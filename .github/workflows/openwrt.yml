@@ -1,0 +1,124 @@
+name: OpenWrt ipk
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://downloads.immortalwrt.org/releases/24.10.4/targets/x86/64/immortalwrt-sdk-24.10.4-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+
+jobs:
+  ipk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 ci.yml 钉同一个版本：两条流水线用不同 Go 编出来的二进制会有差异，
+      # 而 ci.yml 已经用 git diff --exit-code 锁死了嵌入资源，版本漂移只会制造噪声。
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+
+      # 纯 Go 依赖（modernc sqlite），CGO_ENABLED=0 出来的静态二进制在 musl 上直接可跑。
+      # 不在 SDK 里从源码编译：本项目要求 Go 1.25，24.10 feed 里的 golang 到不了。
+      - name: 交叉编译面板
+        run: |
+          version="${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${version}" \
+            -o "${GITHUB_WORKSPACE}/kdae-panel" \
+            ./cmd/kdae-panel
+          file "${GITHUB_WORKSPACE}/kdae-panel"
+
+      - name: 安装 SDK 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git \
+            gettext libssl-dev xsltproc rsync wget unzip python3 zstd
+
+      - name: 拉取 immortalwrt SDK
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/sdk"
+          wget -q "${SDK_URL}" -O sdk.tar.zst
+          tar --zstd -xf sdk.tar.zst -C "${GITHUB_WORKSPACE}/sdk" --strip-components=1
+
+      - name: 准备 feeds 与软件包
+        working-directory: ${{ github.workspace }}/sdk
+        run: |
+          ./scripts/feeds update base luci packages
+          # 只装 luci-base：包 Makefile 需要 feeds/luci/luci.mk，不需要整套 LuCI 应用。
+          ./scripts/feeds install luci-base
+          # 复制而不是软链：buildroot 扫描软件包用的 find 默认不跟随符号链接，
+          # 软链进去的目录会被整个跳过，症状是 "package/kdae-panel 不存在"。
+          cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
+
+      - name: 编译 ipk
+        working-directory: ${{ github.workspace }}/sdk
+        run: |
+          {
+            echo 'CONFIG_PACKAGE_kdae-panel=m'
+            echo 'CONFIG_PACKAGE_luci-app-kdae-panel=m'
+          } >> .config
+          make defconfig
+          # 既导出环境变量又作为 make 变量传入：OpenWrt 的构建会层层调用子 make，
+          # 只靠命令行变量在某些子调用里可能丢失。
+          export KDAE_PANEL_BIN="${GITHUB_WORKSPACE}/kdae-panel"
+          make package/kdae-panel/compile \
+               package/luci-app-kdae-panel/compile \
+               KDAE_PANEL_BIN="${KDAE_PANEL_BIN}" \
+               -j"$(nproc)" V=s
+
+      # 装错依赖的症状是在路由器上 opkg 报缺包，离原因很远；在这里直接断言。
+      - name: 校验产物
+        working-directory: ${{ github.workspace }}/sdk
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/ipk"
+          find bin/packages -name '*kdae*.ipk' -exec cp {} "${GITHUB_WORKSPACE}/ipk/" \;
+          ls -l "${GITHUB_WORKSPACE}/ipk"
+          backend=$(ls "${GITHUB_WORKSPACE}/ipk"/kdae-panel_*.ipk)
+          # ipk 是 gzip 的 tar，里面装着 control.tar.gz 与 data.tar.gz。
+          # 成员名带不带 ./ 前缀各版本不一，因此解到临时目录再看，别猜。
+          workdir=$(mktemp -d)
+          tar -xzf "$backend" -C "$workdir"
+          tar -xzf "$workdir"/control.tar.gz -C "$workdir"
+          cat "$workdir/control"
+          grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
+            || { echo "control 缺少 Conflicts: dae"; exit 1; }
+          for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
+                     kmod-xdp-sockets-diag ca-bundle; do
+            grep -q "$dep" "$workdir/control" || { echo "control 缺少依赖 $dep"; exit 1; }
+          done
+          tar -tzf "$workdir"/data.tar.gz > "$workdir/files"
+          for path in usr/bin/kdae-panel etc/init.d/kdae-panel etc/init.d/dae \
+                      etc/config/kdae-panel; do
+            grep -q "$path\$" "$workdir/files" || { echo "包内缺少 $path"; exit 1; }
+          done
+          ls "${GITHUB_WORKSPACE}/ipk"/luci-app-kdae-panel_*.ipk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kdae-panel-ipk-x86_64
+          path: ipk/*.ipk
+
+      - name: 附到 Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ipk/*.ipk
