@@ -3379,7 +3379,7 @@ immortalwrt 24.10.4（x86/64）上以 ipk 部署，附带 LuCI 入口与配置�
 
 ```
 | `KDAE_PANEL_SERVICE_BACKEND` | `auto` | 服务后端：`auto`（存在 `/sbin/procd` 即 procd）、`systemd`、`procd` |
-| `KDAE_PANEL_LOCK_SELF_UPDATE_PREFERENCE` | `false` | 把自升级开关固定为部署方给出的值，面板内不可修改 |
+（原本这里还有一行 `KDAE_PANEL_LOCK_SELF_UPDATE_PREFERENCE`，属于"锁定自升级偏好"那套方案的残留。该方案在执行前已被"procd 下不注册自升级"取代，对应的 Task 8/9 一并删除；这个环境变量从未实现，不要记进文档。）
 ```
 
 在「面板一键自升级」小节末尾补一段说明锁定语义：部署方打开锁定后，界面上的开关只读，`/var/lib/kdae-panel/self-update.json` 既不读也不写。
