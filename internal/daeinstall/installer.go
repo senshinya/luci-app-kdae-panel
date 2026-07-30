@@ -132,6 +132,8 @@ type Options struct {
 	NewProbe    ProbeFactory
 	Service     ServiceController
 	Logger      *slog.Logger
+	// ServiceBackend 决定服务定义由哪套 init 系统承载，留空即 systemd。
+	ServiceBackend host.Backend
 }
 
 func New(options Options) (*Installer, error) {
@@ -173,7 +175,15 @@ func New(options Options) (*Installer, error) {
 		health:      healthWindow,
 		interval:    healthInterval,
 	}
-	installer.units = &systemdUnits{installer: installer}
+	backend, err := options.ServiceBackend.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	if backend == host.BackendProcd {
+		installer.units = &procdUnits{installer: installer}
+	} else {
+		installer.units = &systemdUnits{installer: installer}
+	}
 	return installer, nil
 }
 
@@ -698,7 +708,7 @@ func (i *Installer) restorePrevious(ctx context.Context, target string) restoreO
 	return restoreOutcome{RestartErr: i.restart(ctx)}
 }
 
-// restart 重启服务并在一个观察窗口内反复确认它稳住了。
+// restart 重启服务，然后在一个观察窗口内反复确认它稳住了。
 // 替换二进制后必须整体重启：dae 的 eBPF 程序要重新挂载，reload 不足以生效。
 func (i *Installer) restart(ctx context.Context) error {
 	restartCtx, cancel := context.WithTimeout(ctx, restartTimeout)
@@ -706,17 +716,23 @@ func (i *Installer) restart(ctx context.Context) error {
 	if err := i.service.Action(restartCtx, host.ActionRestart); err != nil {
 		return err
 	}
+	return i.waitHealthy(restartCtx)
+}
 
+// waitHealthy 是重启后的观察循环，与真正发起重启的那一步分开，
+// 便于测试直接驱动观察窗口而不依赖 ServiceController.Action 的行为。
+func (i *Installer) waitHealthy(ctx context.Context) error {
 	deadline := time.Now().Add(i.health)
 	var baseline uint64
+	var baselinePID int
 	sampled := false
 	for {
 		select {
 		case <-time.After(i.interval):
-		case <-restartCtx.Done():
-			return restartCtx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		status, err := i.service.Status(restartCtx)
+		status, err := i.service.Status(ctx)
 		if err != nil {
 			return fmt.Errorf("重启后无法读取服务状态: %w", err)
 		}
@@ -726,16 +742,23 @@ func (i *Installer) restart(ctx context.Context) error {
 			return fmt.Errorf("重启后服务状态为 %s/%s", status.ActiveState, status.SubState)
 		}
 		// 只看 ActiveState 会漏掉采样间隔内跑完的崩溃-重启循环：
-		// 两次采样都是 active，中间其实已经挂掉并被 systemd 拉起来过。
-		// NRestarts 单调递增，正好把这种"看不见的崩溃"暴露出来。
+		// 两次采样都是 active，中间其实已经挂掉并被拉起来过。
 		if !sampled {
-			baseline, sampled = status.Restarts, true
+			baseline, baselinePID, sampled = status.Restarts, status.MainPID, true
 			// 第一次采样只建立基线，不能因为调度延迟已经越过 deadline 就直接成功。
 			// 至少再采一次，才能判断观察期间有没有发生崩溃重启。
 			continue
-		} else if status.Restarts > baseline {
+		}
+		// systemd 的 NRestarts 单调递增，是最直接的证据。
+		if status.Restarts > baseline {
 			return fmt.Errorf("重启后服务在观察窗口内又重启了 %d 次，新版本很可能起不稳",
 				status.Restarts-baseline)
+		}
+		// procd 不暴露重启计数器，NRestarts 恒为 0，上面那条永远不成立。
+		// 但重新拉起必然换主进程号，pid 变了就等于中间挂过一次。
+		if baselinePID != 0 && status.MainPID != 0 && status.MainPID != baselinePID {
+			return fmt.Errorf("重启后服务的主进程号从 %d 变成 %d，说明它在观察窗口内挂掉并被重新拉起，新版本很可能起不稳",
+				baselinePID, status.MainPID)
 		}
 		if !time.Now().Before(deadline) {
 			return nil

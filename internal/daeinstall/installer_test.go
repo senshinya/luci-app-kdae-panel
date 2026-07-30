@@ -76,9 +76,14 @@ type fakeService struct {
 	// 模拟"两次采样之间服务已经崩过一轮又被拉起来"——ActiveState 全程 active。
 	restartsGrow bool
 	restartsAt   uint64
-	activeState  string
-	statusErr    error
-	actionErr    error
+	// pidChurn 为真时每次状态查询都换一个 pid，模拟"两次采样之间服务已经
+	// 崩过一轮又被拉起来"，而 ActiveState 全程 active。procd 不暴露重启
+	// 计数器，这是那边唯一能发现崩溃循环的信号。
+	pidChurn    bool
+	pidAt       int
+	activeState string
+	statusErr   error
+	actionErr   error
 }
 
 func (s *fakeService) Action(_ context.Context, action host.Action) error {
@@ -109,6 +114,11 @@ func (s *fakeService) Status(context.Context) (host.Status, error) {
 	if s.restartsGrow {
 		s.restartsAt++
 	}
+	if s.pidChurn {
+		s.pidAt++
+	} else if s.pidAt == 0 {
+		s.pidAt = 4321
+	}
 	return host.Status{
 		ActiveState:   state,
 		SubState:      "running",
@@ -116,6 +126,7 @@ func (s *fakeService) Status(context.Context) (host.Status, error) {
 		UnitPath:      s.unitPath,
 		UnitFileState: s.unitFileState,
 		Restarts:      s.restartsAt,
+		MainPID:       s.pidAt,
 	}, nil
 }
 
@@ -404,6 +415,21 @@ func TestInstallDetectsCrashLoopWithinObservationWindow(t *testing.T) {
 	}
 	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v1")) {
 		t.Fatalf("崩溃循环应触发回滚，磁盘内容 = %q", content)
+	}
+}
+
+// procd 不暴露重启计数器，崩溃循环只能靠主进程号变化发现。
+// 没有这一条，respawn 循环里反复崩溃的新版本会被判定为安装成功。
+func TestInstallRejectsPIDChurnDuringHealthWindow(t *testing.T) {
+	service := &fakeService{activeState: "active", pidChurn: true}
+	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
+
+	err := installer.waitHealthy(context.Background())
+	if err == nil {
+		t.Fatal("观察窗口内 pid 变化应当判定为不稳定")
+	}
+	if !strings.Contains(err.Error(), "进程号") {
+		t.Fatalf("错误信息 = %q，应当说明是进程号变化", err.Error())
 	}
 }
 
