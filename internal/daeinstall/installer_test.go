@@ -281,7 +281,7 @@ func TestInstallRefusesWhenServiceHasNoExecStart(t *testing.T) {
 	fetcher := &fakeFetcher{}
 	service := &fakeService{}
 	installer, _ := newTestInstaller(t, fetcher, service)
-	service.execStart = "" // dae 尚未作为 systemd 服务安装
+	service.execStart = "" // 机器上找不到 dae 的服务定义
 
 	_, err := installer.Install(context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2.0.0")
 	if err == nil || !strings.Contains(err.Error(), "找不到 dae 的服务定义") {

@@ -449,6 +449,15 @@ func TestMissingWarningIsDirectWhenHomeVisible(t *testing.T) {
 			t.Fatalf("警告 %q 含沙箱措辞 %q", warning, forbidden)
 		}
 	}
+	// 仅"不含 systemd 词汇"测不出分支选错——新旧两条兜底文案都不含这三个词。
+	// 直接判别式：兜底文案才会把 SandboxHiddenDir 拼进去，直说文案不会；
+	// 反过来断言直说文案的特征子串，双向确认确实走的是直说分支而非误判成兜底。
+	if strings.Contains(warning, SandboxHiddenDir) {
+		t.Fatalf("警告 %q 不该提到面板看不到的目录，那是兜底分支才会做的事", warning)
+	}
+	if !strings.Contains(warning, "未找到 geoip.dat / geosite.dat；路由规则用到") {
+		t.Fatalf("警告 %q 应当是直说文案", warning)
+	}
 }
 
 // 面板读不到 /root（ProtectHome=true）时必须留有余地：
