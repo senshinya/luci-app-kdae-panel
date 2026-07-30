@@ -207,7 +207,17 @@ type unitProvisioner interface {
 
 默认关闭（UCI `enable_self_update=0`），因为包由 opkg 管理，自升级替换 `/usr/bin/kdae-panel` 后 opkg 的文件账本会与实际不符。能力本身保留可用，`RestartSelf` 走 2.2 的 procd 实现。文档说明推荐路径是装新 ipk。
 
-一个必须说清的坑：面板把界面上的自升级开关持久化在 `/var/lib/kdae-panel/self-update.json`，**它优先于命令行传入的初始值**。所以在面板里开过一次之后，改 UCI 再重启不会把它关回去——要么在面板设置页关，要么删掉该文件。`docs/openwrt.md` 与 LuCI 页面该项的说明里都要写这句。
+**必须一并修掉的双真相源。** `panelupdate.New()` 里的 `loadPreference()` 会用 `/var/lib/kdae-panel/self-update.json` 覆盖命令行传入的初始值。上游这么设计是对的：systemd 部署下用户只有 env 文件可改，让界面的选择赢，省得为一个开关去 SSH。但到了 LuCI 部署，同一个布尔有了 UCI 与偏好文件两个真相源，而用户看得见的那个（LuCI）反而不生效——这是移植引进的缺陷，不是上游的。
+
+修法是让部署方能显式锁定这一项：
+
+- `panelupdate.Options` 增加 `PreferenceLocked bool`；`app.Config` 增加 `LockSelfUpdatePreference bool`，由 `--lock-self-update-preference` / `KDAE_PANEL_LOCK_SELF_UPDATE_PREFERENCE` 控制，`/etc/init.d/kdae-panel` 恒传该标志。
+- 锁定时 `New()` 跳过 `loadPreference()`，`SetEnabled` 直接返回错误而不写盘，偏好文件既不读也不写。
+- `panelupdate.Status` 增加 `Locked bool` 与 `LockedReason string`；`PUT /api/v1/panel/update/preference` 在锁定时返回 `409 self_update_preference_locked`。
+- `web/src/views/SettingsView.vue` 的自升级开关在 `locked` 时置灰，提示改为「该项由 LuCI → 服务 → kdae 面板 → 设置 管理」。`web/src/types/api.ts` 同步字段。
+- systemd 部署不传这个标志，锁定为假，行为逐字不变。
+
+这样"你在哪儿看到开关，改它就生效"才真正成立：能改的地方一处，改不了的地方明确说改不了，而不是改完被悄悄覆盖。
 
 面板自身的新版本检查（`disable_update_check`）在本包里默认**关闭检查**（`disable_update_check=1`）。它读的是上游 `tuoro/kdae-panel` 的 releases/latest，与本 ipk 的版本线不是一回事，提示只会误导。想跟踪上游时可在 LuCI 页面打开。
 
@@ -233,7 +243,8 @@ start_service()
       --dae-binary <dae_binary> --dae-config <dae_config> \
       --service-name <service_name> \
       --enable-dae-install=<0|1> --enable-geo-update=<0|1> \
-      --enable-self-update=<0|1> --disable-update-check=<0|1> \
+      --enable-self-update=<0|1> --lock-self-update-preference \
+      --disable-update-check=<0|1> \
       --secure-cookie=<0|1> --trusted-proxies <…> --session-ttl <…> \
       --setup-url-file /var/run/kdae-panel/setup-url
   procd_set_param respawn
@@ -298,7 +309,7 @@ UCI `kdae-panel.main`（`config kdae-panel 'main'`）：
 | `service_name` | `dae` | init 脚本名 |
 | `enable_dae_install` | `1` | 面板管理 dae 版本 |
 | `enable_geo_update` | `1` | 面板管理 geo 数据 |
-| `enable_self_update` | `0` | 面板自升级（默认关，走 opkg；面板内开过就以面板的持久化选择为准） |
+| `enable_self_update` | `0` | 面板自升级（默认关，走 opkg）。此处即唯一真相源，面板设置页的同名开关被锁定为只读 |
 | `disable_update_check` | `1` | 关闭新版本检查（检查的是上游仓库，与本 ipk 版本线无关） |
 | `trusted_proxies` | `127.0.0.0/8,::1/128` | 可信代理 CIDR |
 | `session_ttl` | `12h` | 会话有效期 |
@@ -346,7 +357,13 @@ ACL（`acl.d/luci-app-kdae-panel.json`）：读写 uci `kdae-panel`；`file` 读
 - `procdUnits.Installed`：二进制在 / 不在。
 - `FirstInstall` 在 procd 下不写服务定义、不调 daemon-reload。
 
-**回归**：现有全部 systemd 测试必须原样通过（后端抽象不得改变 systemd 行为）。`go test ./...`、`go vet ./...`、`npm run typecheck`、`npm test`。
+**新增 Go 单测**（`internal/panelupdate/panelupdate_test.go` 增补）
+
+- `PreferenceLocked=true` 时：`New()` 不读已存在的偏好文件（初始值原样保留）；`SetEnabled` 返回错误且不创建偏好文件；`Status().Locked` 为真。
+- `PreferenceLocked=false` 时行为与现在逐字一致（回归）。
+- handler 层：锁定时 `PUT /api/v1/panel/update/preference` 返回 409 `self_update_preference_locked`。
+
+**回归**：现有全部 systemd 测试必须原样通过（后端抽象与偏好锁定都不得改变 systemd 行为）。`go test ./...`、`go vet ./...`、`npm run typecheck`、`npm test`。
 
 **打包验证**（CI）：ipk 生成成功；`tar -xOf … ./control` 断言 `Depends` 含全部 kmod 与 `ca-bundle`、`Conflicts: dae`；`data.tar.gz` 内含 `/usr/bin/kdae-panel`、两个 init 脚本、`/etc/config/kdae-panel`。
 
@@ -364,8 +381,9 @@ ACL（`acl.d/luci-app-kdae-panel.json`）：读写 uci `kdae-panel`；`file` 读
 2. procd 后端 + 单测
 3. 后端选择接进 `app.Config` / flag / health
 4. `daeinstall` 抽 `unitProvisioner` + procd 实现 + 单测
-5. `geodata` / `panelupdate` 的后端相关分支
-6. init 脚本与 UCI 默认配置
+5. `geodata` 的后端相关分支
+6. `panelupdate` 偏好锁定（Go + Vue + api.md）
+7. init 脚本与 UCI 默认配置
 7. 两个包的 Makefile
 8. LuCI 页面（menu.d / acl.d / view.js）
 9. CI workflow
