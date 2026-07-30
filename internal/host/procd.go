@@ -335,28 +335,58 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	return entry, true
 }
 
-// logreadTimestampLayouts 覆盖 ubox 与 busybox 两种 logread 的时间格式。
-var logreadTimestampLayouts = []string{
+// logreadTimestampLayoutsWithYear 是自带年份的时间格式（ubox 的 logread），
+// 解析成功即为完整时间，不需要任何补全。
+var logreadTimestampLayoutsWithYear = []string{
 	"Mon Jan _2 15:04:05 2006",
 	"2006-01-02 15:04:05",
+}
+
+// logreadTimestampLayoutsWithoutYear 是不带年份的时间格式（busybox 的
+// logread）。解析成功后还要靠 timeNow 补年份，见 withInferredYear。
+var logreadTimestampLayoutsWithoutYear = []string{
 	"Jan _2 15:04:05",
 }
 
+// timeNow 是"现在"的取值口，测试覆盖它以获得确定的结果。
+var timeNow = time.Now
+
 // parseLogreadTimestamp 解析行首时间戳，解析不出返回零值。
 //
-// 刻意不退回 time.Now()：那会把一批来历不明的旧日志全部标成"刚刚"，
-// 比空时间戳更容易误导。零值与 systemd 后端解析失败时的行为一致。
+// 零值只在"这段前缀本就不像时间戳"时出现——这时候编造一个日期比说"不知道"
+// 更容易误导，与 systemd 后端解析失败时的行为一致。但 busybox 格式没有年份，
+// 这不属于"解析不出"：月/日/时间是真实信息，直接丢给零值太可惜，因此单独
+// 用 withInferredYear 补全，而不是并入失败路径。
 func parseLogreadTimestamp(prefix string) time.Time {
 	fields := strings.Fields(prefix)
 	for count := len(fields); count > 0; count-- {
 		candidate := strings.Join(fields[:count], " ")
-		for _, layout := range logreadTimestampLayouts {
+		for _, layout := range logreadTimestampLayoutsWithYear {
 			if parsed, err := time.Parse(layout, candidate); err == nil {
 				return parsed.UTC()
 			}
 		}
+		for _, layout := range logreadTimestampLayoutsWithoutYear {
+			if parsed, err := time.Parse(layout, candidate); err == nil {
+				return withInferredYear(parsed)
+			}
+		}
 	}
 	return time.Time{}
+}
+
+// withInferredYear 给不带年份的时间戳补年份：先假定是当前年，如果这个
+// 假定落在了未来（比如现在是次年 1 月，日志却是上一年 12 月留下的），
+// 就回拨一年——不回拨的话，去年 12 月的日志会显示成"来自未来"，
+// 比"年份是猜的"更奇怪。
+func withInferredYear(parsed time.Time) time.Time {
+	now := timeNow().UTC()
+	guess := time.Date(now.Year(), parsed.Month(), parsed.Day(),
+		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.UTC)
+	if guess.After(now) {
+		guess = guess.AddDate(-1, 0, 0)
+	}
+	return guess
 }
 
 // logreadLevel 从前缀里找 "facility.level" 形式的 token 并取出 level。

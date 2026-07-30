@@ -355,6 +355,76 @@ func TestProcdLogsKeepsNewestWithinLimit(t *testing.T) {
 	}
 }
 
+// 前缀完全不像时间戳时，parseLogreadTimestamp 必须老实返回零值——
+// 编造一个日期比说"不知道"更容易误导。三个布局都相当宽松，此前没有一个
+// 测试真正走到"全部失败"这条路径，这里补上。
+func TestProcdLogsTimestampFallsBackToZeroWhenUnparseable(t *testing.T) {
+	initScriptDir(t, "dae")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "garbage prefix dae[7]: 消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	if !entries[0].Timestamp.IsZero() {
+		t.Fatalf("时间戳 = %v，期望零值", entries[0].Timestamp)
+	}
+}
+
+// busybox 的 logread 前缀不带年份，必须靠 timeNow 补全，而不是解析出公元 0 年。
+func TestProcdLogsBusyboxTimestampUsesCurrentYear(t *testing.T) {
+	initScriptDir(t, "dae")
+	previous := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = previous })
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "Jul 31 01:02:03 router dae[7]: 裸消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	want := time.Date(2026, time.July, 31, 1, 2, 3, 0, time.UTC)
+	if !entries[0].Timestamp.Equal(want) {
+		t.Fatalf("时间戳 = %v，期望 %v", entries[0].Timestamp, want)
+	}
+}
+
+// 跨年读日志：现在是次年 1 月，日志留在上一年 12 月，补年份时必须回拨一年，
+// 否则去年 12 月的日志会显示成"来自未来"。
+func TestProcdLogsBusyboxTimestampRollsBackAcrossYearBoundary(t *testing.T) {
+	initScriptDir(t, "dae")
+	previous := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.January, 5, 0, 30, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = previous })
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "Dec 31 23:59:00 router dae[7]: 裸消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	if entries[0].Timestamp.Year() != 2025 {
+		t.Fatalf("年份 = %d，期望 2025（应回拨一年）", entries[0].Timestamp.Year())
+	}
+}
+
 func TestNewReturnsProcdBackend(t *testing.T) {
 	manager, err := New(Options{Backend: BackendProcd, ServiceName: "dae", DaeBinary: "/usr/bin/dae"})
 	if err != nil {
