@@ -1302,20 +1302,42 @@ Expected: FAIL，`backend = "" `
 
 import 加 `"github.com/tuoro/kdae-panel/internal/host"`。
 
-- [ ] **Step 6: 运行测试确认通过**
+- [ ] **Step 6: 把新字段写进 API 文档**
+
+`docs/api.md` 第 30 行把
+
+```markdown
+| `GET` | `/health` | 面板健康状态和版本 |
+```
+
+改为
+
+```markdown
+| `GET` | `/health` | 面板健康状态、版本与服务后端（`backend` 为 `systemd` 或 `procd`） |
+```
+
+并在该表格下方补一句：
+
+```markdown
+`backend` 说明面板正在用哪一套接口管理 dae：存在 `/sbin/procd` 时自动选 `procd`，否则 `systemd`；
+可用 `KDAE_PANEL_SERVICE_BACKEND` 强制。后端选错的症状是服务控制全部失败，而那个现场离原因很远，
+因此把结论直接暴露在健康检查里。
+```
+
+- [ ] **Step 7: 运行测试确认通过**
 
 Run: `go test ./internal/app/ ./cmd/... -v && go build ./...`
 Expected: PASS
 
-- [ ] **Step 7: 手工验证 CLI 拒绝非法值**
+- [ ] **Step 8: 手工验证 CLI 拒绝非法值**
 
 Run: `go run ./cmd/kdae-panel --service-backend=upstart --listen 127.0.0.1:65535`
 Expected: 立即退出，错误信息含 `未知的服务后端 "upstart"，可选 auto、systemd、procd`
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add internal/app cmd/kdae-panel
+git add internal/app cmd/kdae-panel docs/api.md
 git commit -m "feat(app): 服务后端可配置并在健康检查中暴露"
 ```
 
@@ -2600,10 +2622,18 @@ export interface PanelUpdateStatus {
 偏好文件既不读也不写。
 ```
 
-- [ ] **Step 4: 验证**
+- [ ] **Step 4: 用与 CI 完全一致的命令重建嵌入资源**
 
-Run: `npm run typecheck --prefix web && npm test --prefix web && npm run build --prefix web`
-Expected: 全部 PASS，`internal/webui/dist` 产生新的构建产物
+`.github/workflows/ci.yml` 有一道硬门禁：`git diff --exit-code -- internal/webui/dist`。本地构建若与 CI 的干净环境产出不一致，CI 直接红。因此必须照抄它的命令序列，`npm ci` 那一步不能换成 `npm install`：
+
+Run:
+```bash
+npm ci --prefix web
+npm run typecheck --prefix web
+npm test --prefix web
+npm run build --prefix web
+```
+Expected: 全部 PASS，`git status` 显示 `internal/webui/dist` 下有改动（SettingsView 变了，产物必然变）。
 
 - [ ] **Step 5: Commit**
 
@@ -2642,6 +2672,10 @@ config kdae-panel 'main'
 	option dae_config '/etc/dae/config.dae'
 	option service_name 'dae'
 	option enable_dae_install '1'
+	# 上游默认关闭它，理由是"给部署新增一条常态化的联网取字节 → 以 root 写系统目录
+	# 的路径"。这里默认打开：dae 的 geo 也归面板管，而上面的 enable_dae_install=1
+	# 已经引入同一条路径且权限更大，再关掉 geo 只是逼用户手工放文件。
+	# 反过来，若把 enable_dae_install 改成 0，应当一并把这一项也改成 0。
 	option enable_geo_update '1'
 	# 默认关：本包由 opkg 管理，自升级替换 /usr/bin/kdae-panel 会让 opkg 的
 	# 文件账本与实际不符。升级请安装新的 ipk。
@@ -3254,9 +3288,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 与 ci.yml 钉同一个版本：两条流水线用不同 Go 编出来的二进制会有差异，
+      # 而 ci.yml 已经用 git diff --exit-code 锁死了嵌入资源，版本漂移只会制造噪声。
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
 
       - uses: actions/setup-node@v4
         with:
@@ -3266,8 +3302,8 @@ jobs:
 
       - name: 构建前端
         run: |
-          make web-install
-          make web-build
+          npm ci --prefix web
+          npm run build --prefix web
 
       # 纯 Go 依赖（modernc sqlite），CGO_ENABLED=0 出来的静态二进制在 musl 上直接可跑。
       # 不在 SDK 里从源码编译：本项目要求 Go 1.25，24.10 feed 里的 golang 到不了。
@@ -3385,6 +3421,7 @@ Expected: 状态 `success`，artifact 里有两个 ipk。
 - Modify: `README.md`
 - Modify: `docs/deployment.md`
 - Modify: `docs/architecture.md`
+- Modify: `SECURITY.md`
 
 **Interfaces:**
 - Consumes: 前 12 个任务的全部结论。
@@ -3469,14 +3506,70 @@ immortalwrt 24.10.4（x86/64）上以 ipk 部署，附带 LuCI 入口与配置�
 
 新增一小节「服务后端」：说明 `internal/host` 暴露 `Manager` 接口、两套实现的分工（systemd 用 `systemctl show` + `journalctl --output json`；procd 用 `ubus call service list` + init 脚本 + `logread`），后端由 `/sbin/procd` 是否存在自动探测、可显式覆盖，选中的结果记进启动日志并由 `/api/v1/health` 的 `backend` 字段暴露。同时说明 `daeinstall.unitProvisioner` 的存在理由：systemd 下服务定义由面板写、卸载时删；procd 下它属于 `kdae-panel` 软件包，面板只校验。
 
-- [ ] **Step 5: 全量验证**
+- [ ] **Step 5: 改 `SECURITY.md`**
+
+这一步不能省。`SECURITY.md` 现在的「安全边界」列着"systemd 服务采用能力白名单和文件系统保护"——**OpenWrt 部署完全没有这一层**，procd 不提供 `ProtectSystem` / `CapabilityBoundingSet` / `NoNewPrivileges` 的等价物。文档继续这么写，等于对 OpenWrt 用户宣称一份并不存在的防护。
+
+在「安全边界」的项目符号列表里，把
+
+```markdown
+- systemd 服务采用能力白名单和文件系统保护；
+```
+
+改为
+
+```markdown
+- systemd 部署的服务单元采用能力白名单和文件系统保护；**OpenWrt/procd 部署没有等价机制**，
+  面板以完整 root 权限运行，详见下方「OpenWrt 部署的安全差异」；
+```
+
+在「已知边界」之前新增一节：
+
+```markdown
+## OpenWrt 部署的安全差异
+
+`luci-app-kdae-panel` 以 ipk 部署在 OpenWrt/ImmortalWrt 上，procd 没有 systemd 那套沙箱原语。
+差异必须说清，而不是让人以为 systemd 单元里的防护到处都在：
+
+- **没有文件系统保护**：不存在 `ProtectSystem=strict` / `ReadWritePaths` 的等价物。面板能写整个
+  文件系统，而不是被限制在 `/etc/dae` 与数据目录。上游文档里"把某目录加入 ReadWritePaths"
+  一类的排障步骤在这里不适用，对应的错误提示也已去掉。
+- **没有能力白名单**：面板持有完整 root 权限，而不是 `CAP_KILL` + `CAP_NET_ADMIN` 两项。
+- **没有 `ProtectHome`**：`/root/.local/share/dae` 对面板可见，geo 缺失提示因此会直说"未找到"。
+- **默认开启的能力更多**：`enable_dae_install` 与 `enable_geo_update` 都默认为 `1`。前者与 systemd
+  发行单元一致；后者上游默认关闭，理由是"给部署新增一条常态化的联网取字节 → 以 root 写系统目录
+  的路径"。这里默认打开是因为 dae 的 geo 数据在本部署中也由面板管理，而 `enable_dae_install=1`
+  已经引入了同一条路径且权限更大——再关掉 geo 只是让用户手工放文件，并不减少攻击面。
+  **但如果你把 `enable_dae_install` 关掉，就该一并把 `enable_geo_update` 关掉**，否则会在一个
+  没有沙箱的环境里单独留下那条路径。
+- **数据目录是 `/etc/kdae-panel` 而非 `/var/lib/kdae-panel`**：OpenWrt 的 `/var` 是内存文件系统。
+  「部署要求」里"不要让非管理员写入"的目录，在这里指 `/etc/kdae-panel` 与 `/etc/config/kdae-panel`。
+
+结论没有变：面板是高权限系统管理服务，只应在可信内网使用，不要把端口暴露到公网。
+但在 OpenWrt 上，"面板缺陷升级为任意代码执行"的门槛比 systemd 部署更低。
+```
+
+同时把「部署要求」里的
+
+```markdown
+- 不要让非管理员写入 `/etc/kdae-panel`、`/var/lib/kdae-panel`、dae 配置或面板二进制；
+```
+
+改为
+
+```markdown
+- 不要让非管理员写入 `/etc/kdae-panel`、`/var/lib/kdae-panel`（OpenWrt 上是 `/etc/kdae-panel`）、
+  dae 配置或面板二进制；
+```
+
+- [ ] **Step 6: 全量验证**
 
 Run: `go test ./... && go vet ./... && npm run typecheck --prefix web && npm test --prefix web`
 Expected: 全部 PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add docs README.md
-git commit -m "docs: 补上 OpenWrt 部署与服务后端说明"
+git add docs README.md SECURITY.md
+git commit -m "docs: 补上 OpenWrt 部署、服务后端与安全差异说明"
 ```
