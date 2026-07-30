@@ -239,11 +239,9 @@ func New(options Options) (Manager, error) {
 		}, nil
 	}
 }
-
-var _ = context.Background // 保留 context 导入供 Manager 接口签名使用
 ```
 
-把最后那行占位删掉——`context` 已经被 `Manager` 接口的方法签名用到，不需要占位。
+import 全部用得上：`context` 在 `Manager` 的方法签名里，`fmt` 在错误构造里，`os` 在 `Resolve` 的探测里，`time` 在 `Options.Timeout` 上，`command` 在 `Options.Runner` 与 `ExecRunner{}` 上。
 
 - [ ] **Step 4: 更新 `internal/host/systemd_test.go` 的 5 处构造调用**
 
@@ -1375,6 +1373,9 @@ type unitProvisioner interface {
 	WritableDirs() []string
 	// RemovablePaths 是卸载时应当一并删除的服务定义文件。
 	RemovablePaths() []string
+	// VerifyRemovable 在卸载前确认服务定义确实归面板管理。
+	// binaryPath 是本次将要删除的可执行文件。
+	VerifyRemovable(status host.Status, binaryPath string) error
 	// Detect 判定机器上是否已有 dae 服务。
 	Detect(ctx context.Context, status host.Status) unitDetection
 	// Plan 在动任何文件之前决定服务定义要不要写、写什么。
@@ -1422,6 +1423,44 @@ func (u *systemdUnits) WritableDirs() []string {
 
 func (u *systemdUnits) RemovablePaths() []string {
 	return []string{u.Path()}
+}
+
+// VerifyRemovable 确认要删的单元正是面板写下的那一个。
+//
+// 三道关缺一不可：单元必须位于面板管理的标准路径（别人放在 /usr/lib/systemd
+// 下的单元不归面板删）、必须是普通文件、它的 ExecStart 必须与本次要删的
+// 可执行文件一致。少了最后一条，一个指向别处的同名单元会被连坐删除。
+func (u *systemdUnits) VerifyRemovable(status host.Status, binaryPath string) error {
+	// enabled-runtime 是 systemd 独有的临时启用态，面板无法无损恢复它。
+	if status.UnitFileState == "enabled-runtime" {
+		return errors.New("dae 使用临时启用状态 enabled-runtime，面板无法无损恢复该状态，请先执行 systemctl disable dae")
+	}
+	if status.UnitPath == "" {
+		return errors.New("没有找到 dae 的服务单元")
+	}
+	unitPath, err := filepath.Abs(status.UnitPath)
+	if err != nil {
+		return fmt.Errorf("解析 dae 服务单元路径: %w", err)
+	}
+	expectedUnit, err := filepath.Abs(u.Path())
+	if err != nil {
+		return fmt.Errorf("解析面板服务单元路径: %w", err)
+	}
+	if unitPath != expectedUnit {
+		return fmt.Errorf(
+			"dae 服务单元位于 %s，不是面板管理的标准路径 %s；请用原安装方式卸载", unitPath, expectedUnit)
+	}
+	if err := regularFile(unitPath, "dae 服务单元"); err != nil {
+		return err
+	}
+	unit, err := os.ReadFile(unitPath)
+	if err != nil {
+		return fmt.Errorf("读取 dae 服务单元: %w", err)
+	}
+	if exec := execStartBinary(unitExecStart(string(unit))); exec != binaryPath {
+		return fmt.Errorf("服务单元实际启动 %s，与服务状态报告的 %s 不一致，拒绝卸载", exec, binaryPath)
+	}
+	return nil
 }
 
 func (u *systemdUnits) Detect(_ context.Context, status host.Status) unitDetection {
@@ -1668,7 +1707,38 @@ Run: `grep -rn "unitDir" internal/daeinstall/`
 	installer.units = &systemdUnits{installer: installer, directory: dir}
 ```
 
-- [ ] **Step 7: 让 `Uninstall` 的必需路径列表由 units 决定**
+- [ ] **Step 7: 把 `uninstallTarget` 里的单元校验搬进 provisioner**
+
+`internal/daeinstall/uninstall.go` 的 `uninstallTarget` 现在返回 `(host.Status, string, string, error)`，其中第三个是 unitPath，末尾约 25 行是 systemd 单元专属校验。把签名收窄为 `(host.Status, string, error)`，删掉从 `unitPath, err := filepath.Abs(status.UnitPath)` 到 `return status, target, unitPath, nil` 之前的整段（那段逻辑已原样搬进 `systemdUnits.VerifyRemovable`），末尾改为：
+
+```go
+	if err := i.units.VerifyRemovable(status, target); err != nil {
+		return host.Status{}, "", err
+	}
+	return status, target, nil
+}
+```
+
+同时删掉函数开头的 `enabled-runtime` 检查（同样已搬进 `VerifyRemovable`），并把
+
+```go
+	if status.ExecStartPath == "" || status.UnitPath == "" {
+		return host.Status{}, "", "", errors.New("没有找到可卸载的 dae systemd 服务")
+	}
+```
+
+改为
+
+```go
+	// UnitPath 的校验交给 units：procd 下服务定义归软件包，不该在这里挡路。
+	if status.ExecStartPath == "" {
+		return host.Status{}, "", errors.New("没有找到可卸载的 dae 服务")
+	}
+```
+
+把其余 `return host.Status{}, "", "", ...` 全部改为三返回值形式 `return host.Status{}, "", ...`。
+
+- [ ] **Step 8: 让 `Uninstall` 的必需路径列表由 units 决定**
 
 `internal/daeinstall/uninstall.go`：把 `Uninstall` 开头的路径拼装改成
 
@@ -1720,14 +1790,13 @@ Run: `grep -rn "unitDir" internal/daeinstall/`
 	i.logger.Info("已卸载 dae", "binary", target, "unit", i.units.Path(),
 ```
 
-相应地把 `uninstallTarget` 的返回值从 `(host.Status, string, string, error)` 收窄为 `(host.Status, string, error)`，删掉它计算并返回 unitPath 的那一段（改由 `i.units.RemovablePaths()` 提供）。若 `uninstallTarget` 内部对 unitPath 有存在性校验，把该校验整段移除——procd 下这个文件本就不该被删。
-
-- [ ] **Step 8: 全量验证，确认是纯重构**
+- [ ] **Step 9: 全量验证，确认是纯重构**
 
 Run: `go build ./... && go test ./... && go vet ./...`
-Expected: 全部 PASS，`internal/daeinstall` 的测试数量与之前一致
+Expected: 全部 PASS，`internal/daeinstall` 的测试数量与之前一致。
+`internal/daeinstall/uninstall_test.go` 里若有断言错误文案的用例，会因 Step 7 把"没有找到可卸载的 dae systemd 服务"改成"没有找到可卸载的 dae 服务"而失败——**只允许改断言里的期望文案**，不允许把实现改回带 systemd 字样。
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add internal/daeinstall
@@ -1831,6 +1900,10 @@ func TestProcdUnitsRemovesNothing(t *testing.T) {
 	if dirs := units.WritableDirs(); len(dirs) != 0 {
 		t.Fatalf("WritableDirs = %v，期望空：init 脚本目录面板从不写", dirs)
 	}
+	// 卸载 dae 不该因为"单元校验不过"而被拦下——procd 下根本没有要校验的单元。
+	if err := units.VerifyRemovable(host.Status{}, "/usr/bin/dae"); err != nil {
+		t.Fatalf("VerifyRemovable 返回错误: %v", err)
+	}
 }
 
 // 二进制在即已安装。不看 ExecStartPath：procd 下服务停止时它来自回退链，
@@ -1927,6 +2000,10 @@ func (u *procdUnits) WritableDirs() []string { return nil }
 
 // RemovablePaths 为空：init 脚本归软件包所有。
 func (u *procdUnits) RemovablePaths() []string { return nil }
+
+// VerifyRemovable 无事可做：没有要删的服务定义，也就没有"删对了没有"可校验。
+// dae 可执行文件本身的归属校验在 uninstallTarget 里按摘要账本完成，与后端无关。
+func (u *procdUnits) VerifyRemovable(host.Status, string) error { return nil }
 
 // Detect 以磁盘上有没有 dae 可执行文件为准。
 //
@@ -2140,6 +2217,8 @@ func sandboxHidesHome() bool {
 ```
 
 import 加 `"errors"` 与 `"io/fs"`。
+
+注意 `systemDirs` 在包初始化时就把 `SandboxHiddenDir` 的值抄了一份，改这个变量不会改动 `systemDirs[0]`。这对本任务无影响（`MissingWarning` 只直接读该变量），但测试必须用 `t.Cleanup` 还原它，否则会影响同包内其他用例。
 
 - [ ] **Step 4: 改 daeinstall 的"尚未安装"文案**
 
@@ -2411,7 +2490,7 @@ func (m *Manager) SetEnabled(enabled bool) error {
 		}
 ```
 
-import 加 `"errors"` 与 `"github.com/tuoro/kdae-panel/internal/panelupdate"`（若已有则跳过）。
+`panelupdate` 已在该文件的 import 里，只需补 `"errors"`。
 
 - [ ] **Step 5: 接进配置与命令行**
 
@@ -2822,7 +2901,8 @@ $(eval $(call BuildPackage,kdae-panel))
 
 Run: `shellcheck -s sh -e SC1091,SC2034 openwrt/kdae-panel/files/kdae-panel.init openwrt/kdae-panel/files/dae.init`
 Expected: 无输出（`SC1091` 是 `/etc/rc.common` 不可解析，`SC2034` 是 procd 环境注入的变量，两者都是误报）。
-若本机没有 shellcheck：`brew install shellcheck`。
+本机没有 shellcheck 时用 `brew install shellcheck` 装，或退而求其次只做语法检查：
+`sh -n openwrt/kdae-panel/files/kdae-panel.init && sh -n openwrt/kdae-panel/files/dae.init`（无输出即通过）。
 
 - [ ] **Step 6: 静态检查 Makefile 与 UCI 里的关键约定**
 
@@ -2975,16 +3055,10 @@ return view.extend({
 		var link = data[3];
 		var port = uci.get('kdae-panel', 'main', 'listen_port') || '2023';
 
-		var m = new form.Map('kdae-panel', _('kdae 面板'),
-			_('面板负责 dae 的配置编排、版本管理与日志；dae 的可执行文件由面板下载安装，不经 opkg。'));
-
-		var s = m.section(form.NamedSection, 'main', 'kdae-panel');
-		s.tab('status', _('状态'));
-		s.tab('settings', _('设置'));
-
-		var o = s.taboption('status', form.DummyValue, '_status');
-		o.rawhtml = false;
-		o.render = function () {
+		// 状态块不做成表单项：CBI 的 option 只为"编辑一个 UCI 值"而生，
+		// 硬塞按钮和链接要整个覆写它的 render，一旦 LuCI 改动内部约定就会碎。
+		// 直接建 DOM 再和表单拼起来，行为确定得多。
+		var statusView = (function () {
 			var rows = [
 				[ _('kdae 面板'), panelRunning, 'kdae-panel' ],
 				[ _('dae'), daeRunning, 'dae' ]
@@ -2994,7 +3068,7 @@ return view.extend({
 					statusBadge(row[1]),
 					E('button', {
 						'class': 'cbi-button cbi-button-apply',
-						'click': ui.createHandlerFn(this, function (name) {
+						'click': ui.createHandlerFn(null, function (name) {
 							return callInitAction(name, 'restart').then(function () {
 								ui.addNotification(null, E('p', _('已请求重启 %s').format(name)), 'info');
 							});
@@ -3002,7 +3076,7 @@ return view.extend({
 					}, _('重启')),
 					E('button', {
 						'class': 'cbi-button cbi-button-reset',
-						'click': ui.createHandlerFn(this, function (name) {
+						'click': ui.createHandlerFn(null, function (name) {
 							return callInitAction(name, 'stop').then(function () {
 								ui.addNotification(null, E('p', _('已停止 %s').format(name)), 'info');
 							});
@@ -3010,7 +3084,7 @@ return view.extend({
 					}, _('停止')),
 					E('button', {
 						'class': 'cbi-button cbi-button-action',
-						'click': ui.createHandlerFn(this, function (name) {
+						'click': ui.createHandlerFn(null, function (name) {
 							return callInitAction(name, 'start').then(function () {
 								ui.addNotification(null, E('p', _('已启动 %s').format(name)), 'info');
 							});
@@ -3044,62 +3118,70 @@ return view.extend({
 				]));
 			}
 
-			return E('div', {}, rows);
-		};
+			return E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('服务状态')),
+				E('div', {}, rows)
+			]);
+		})();
 
-		o = s.taboption('settings', form.Flag, 'enabled', _('开机自启'),
+		var m = new form.Map('kdae-panel', _('kdae 面板'),
+			_('面板负责 dae 的配置编排、版本管理与日志；dae 的可执行文件由面板下载安装，不经 opkg。'));
+
+		var s = m.section(form.NamedSection, 'main', 'kdae-panel', _('设置'));
+
+		var o = s.option(form.Flag, 'enabled', _('开机自启'),
 			_('关闭后面板不会随系统启动，已经在跑的实例不受影响。'));
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.taboption('settings', form.Value, 'listen_addr', _('监听地址'),
+		o = s.option(form.Value, 'listen_addr', _('监听地址'),
 			_('0.0.0.0 表示接受本机与局域网连接。'));
 		o.datatype = 'ipaddr';
 		o.default = '0.0.0.0';
 
-		o = s.taboption('settings', form.Value, 'listen_port', _('监听端口'));
+		o = s.option(form.Value, 'listen_port', _('监听端口'));
 		o.datatype = 'port';
 		o.default = '2023';
 
-		o = s.taboption('settings', form.Value, 'data_dir', _('数据目录'),
+		o = s.option(form.Value, 'data_dir', _('数据目录'),
 			_('数据库、配置备份、状态文件与 dae 本地版本库的位置。' +
 			  '不要改到 /var 或 /tmp 下——那里是内存文件系统，重启即空。'));
 		o.default = '/etc/kdae-panel';
 
-		o = s.taboption('settings', form.Value, 'dae_binary', _('dae 可执行文件'),
+		o = s.option(form.Value, 'dae_binary', _('dae 可执行文件'),
 			_('面板与 dae 的启动脚本读的是同一个值，不要单独修改启动脚本。'));
 		o.default = '/usr/bin/dae';
 
-		o = s.taboption('settings', form.Value, 'dae_config', _('dae 配置文件'),
+		o = s.option(form.Value, 'dae_config', _('dae 配置文件'),
 			_('geo 数据也放在这个文件所在的目录。'));
 		o.default = '/etc/dae/config.dae';
 
-		o = s.taboption('settings', form.Flag, 'enable_dae_install', _('由面板管理 dae 版本'),
+		o = s.option(form.Flag, 'enable_dae_install', _('由面板管理 dae 版本'),
 			_('允许面板下载、安装、切换与回滚 dae。关闭后版本管理页不可用。'));
 		o.default = '1';
 
-		o = s.taboption('settings', form.Flag, 'enable_geo_update', _('由面板管理 geo 数据'),
+		o = s.option(form.Flag, 'enable_geo_update', _('由面板管理 geo 数据'),
 			_('允许一键更新 geoip.dat / geosite.dat，更新只触发 dae reload 不重启。'));
 		o.default = '1';
 
-		o = s.taboption('settings', form.Flag, 'enable_self_update', _('允许面板自升级'),
+		o = s.option(form.Flag, 'enable_self_update', _('允许面板自升级'),
 			_('默认关闭：本包由 opkg 管理，自升级替换 /usr/bin/kdae-panel 会让 opkg 的' +
 			  '文件账本与实际不符。此处即唯一真相源，面板设置页的同名开关是只读的。'));
 		o.default = '0';
 
-		o = s.taboption('settings', form.Flag, 'disable_update_check', _('关闭新版本检查'),
+		o = s.option(form.Flag, 'disable_update_check', _('关闭新版本检查'),
 			_('检查读的是上游 tuoro/kdae-panel 的发布，与本软件包的版本线不是一回事。'));
 		o.default = '1';
 
-		o = s.taboption('settings', form.Value, 'trusted_proxies', _('可信代理'),
+		o = s.option(form.Value, 'trusted_proxies', _('可信代理'),
 			_('可以转发客户端地址和协议的代理 CIDR，逗号分隔。'));
 		o.default = '127.0.0.0/8,::1/128';
 
-		o = s.taboption('settings', form.Value, 'session_ttl', _('会话有效期'),
+		o = s.option(form.Value, 'session_ttl', _('会话有效期'),
 			_('形如 12h、30m。'));
 		o.default = '12h';
 
-		o = s.taboption('settings', form.Flag, 'secure_cookie', _('Cookie 仅 HTTPS'),
+		o = s.option(form.Flag, 'secure_cookie', _('Cookie 仅 HTTPS'),
 			_('通过 HTTPS 反向代理访问时打开。'));
 		o.default = '0';
 
@@ -3107,7 +3189,9 @@ return view.extend({
 		// 重启不在这里做：init 脚本的 service_triggers 里注册了
 		// procd_add_reload_trigger "kdae-panel"，LuCI 的「保存并应用」提交
 		// UCI 后 procd 会自己触发 reload，而 reload_service 就是 restart。
-		return m.render();
+		return m.render().then(function (formView) {
+			return E([], [ statusView, formView ]);
+		});
 	}
 });
 ```
@@ -3236,7 +3320,9 @@ jobs:
           ./scripts/feeds update base luci packages
           # 只装 luci-base：包 Makefile 需要 feeds/luci/luci.mk，不需要整套 LuCI 应用。
           ./scripts/feeds install luci-base
-          ln -s "${GITHUB_WORKSPACE}/openwrt" package/kdae
+          # 复制而不是软链：buildroot 扫描软件包用的 find 默认不跟随符号链接，
+          # 软链进去的目录会被整个跳过，症状是 "package/kdae-panel 不存在"。
+          cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
 
       - name: 编译 ipk
         working-directory: ${{ github.workspace }}/sdk
@@ -3246,9 +3332,12 @@ jobs:
             echo 'CONFIG_PACKAGE_luci-app-kdae-panel=m'
           } >> .config
           make defconfig
+          # 既导出环境变量又作为 make 变量传入：OpenWrt 的构建会层层调用子 make，
+          # 只靠命令行变量在某些子调用里可能丢失。
+          export KDAE_PANEL_BIN="${GITHUB_WORKSPACE}/kdae-panel"
           make package/kdae-panel/compile \
                package/luci-app-kdae-panel/compile \
-               KDAE_PANEL_BIN="${GITHUB_WORKSPACE}/kdae-panel" \
+               KDAE_PANEL_BIN="${KDAE_PANEL_BIN}" \
                -j"$(nproc)" V=s
 
       # 装错依赖的症状是在路由器上 opkg 报缺包，离原因很远；在这里直接断言。
@@ -3259,17 +3348,22 @@ jobs:
           find bin/packages -name '*kdae*.ipk' -exec cp {} "${GITHUB_WORKSPACE}/ipk/" \;
           ls -l "${GITHUB_WORKSPACE}/ipk"
           backend=$(ls "${GITHUB_WORKSPACE}/ipk"/kdae-panel_*.ipk)
-          tar -xzOf "$backend" ./control.tar.gz | tar -xzO ./control > /tmp/control
-          cat /tmp/control
-          grep -q '^Conflicts: dae$' /tmp/control
+          # ipk 是 gzip 的 tar，里面装着 control.tar.gz 与 data.tar.gz。
+          # 成员名带不带 ./ 前缀各版本不一，因此解到临时目录再看，别猜。
+          workdir=$(mktemp -d)
+          tar -xzf "$backend" -C "$workdir"
+          tar -xzf "$workdir"/control.tar.gz -C "$workdir"
+          cat "$workdir/control"
+          grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
+            || { echo "control 缺少 Conflicts: dae"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
                      kmod-xdp-sockets-diag ca-bundle; do
-            grep -q "$dep" /tmp/control || { echo "control 缺少依赖 $dep"; exit 1; }
+            grep -q "$dep" "$workdir/control" || { echo "control 缺少依赖 $dep"; exit 1; }
           done
-          tar -xzOf "$backend" ./data.tar.gz | tar -tz > /tmp/files
-          for path in ./usr/bin/kdae-panel ./etc/init.d/kdae-panel ./etc/init.d/dae \
-                      ./etc/config/kdae-panel; do
-            grep -qx "$path" /tmp/files || { echo "包内缺少 $path"; exit 1; }
+          tar -tzf "$workdir"/data.tar.gz > "$workdir/files"
+          for path in usr/bin/kdae-panel etc/init.d/kdae-panel etc/init.d/dae \
+                      etc/config/kdae-panel; do
+            grep -q "$path\$" "$workdir/files" || { echo "包内缺少 $path"; exit 1; }
           done
           ls "${GITHUB_WORKSPACE}/ipk"/luci-app-kdae-panel_*.ipk
 

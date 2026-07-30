@@ -174,18 +174,31 @@ type unitProvisioner interface {
     Plan(bundle upstream.Bundle) (content string, inPlace bool, err error)
     // Commit 落地服务定义；inPlace 时不做任何事。
     Commit(ctx context.Context, content string, inPlace bool) error
-    // Remove 卸载时移除服务定义；procd 下是空操作。
-    Remove(ctx context.Context) error
-    // Installed 判定机器上是否已有 dae 服务。
-    Installed(ctx context.Context, status host.Status, binaryPath string) (bool, string)
+    // WritableDirs 是首次安装需要写入、因而必须预检的目录。
+    WritableDirs() []string
+    // RemovablePaths 是卸载时应当一并删除的服务定义文件；procd 下为空。
+    RemovablePaths() []string
+    // VerifyRemovable 在卸载前确认服务定义确实归面板管理；procd 下无事可做。
+    VerifyRemovable(status host.Status, binaryPath string) error
+    // Detect 判定机器上是否已有 dae 服务。
+    Detect(ctx context.Context, status host.Status) unitDetection
+}
+
+// unitDetection 是"这台机器上已经有 dae 了吗"的判定结果。
+type unitDetection struct {
+    Installed bool
+    // Blocker 非空表示不能首次安装，直接作为拒绝理由。
+    Blocker string
+    // Notes 是不阻断但用户应当知道的情况。
+    Notes []string
 }
 ```
 
-- `systemdUnits`：现 `provision.go` 的 `planUnit` / `render` / `retargetUnit` / `execStartBinary` 原样，`Commit` 写单元后 `daemon-reload`，`Remove` 删单元。
+- `systemdUnits`：现 `provision.go` 的 `planUnit` / `render` 原样搬迁（`retargetUnit` / `execStartBinary` / `unitExecStart` 留在 provision.go 供两处共用），`Commit` 写单元后 `daemon-reload`，`RemovablePaths` 返回单元路径，`VerifyRemovable` 承接现 `uninstallTarget` 末段的单元校验。
 - `procdUnits`：init 脚本归 ipk，因此
-  - `Plan` 退化为校验 `/etc/init.d/dae` 存在，且其 `procd_set_param command` 的首个参数等于 `i.binaryPath`——不等就报错并说明改哪个 UCI 项，绝不改写用户的 init 脚本；`inPlace` 恒为 true。
+  - `Plan` 退化为校验 `/etc/init.d/dae` 存在且是普通文件；`inPlace` 恒为 true。不再解析脚本内容——脚本与面板同读一份 UCI，不可能对 dae 的位置产生分歧。
   - `Commit` 空操作。
-  - `Remove` 空操作（脚本属于 ipk，卸载 dae 不该删它）。
+  - `RemovablePaths` 与 `VerifyRemovable` 空操作（脚本属于 ipk，卸载 dae 不该删它，也就没有"删对了没有"可校验）。systemd 现有的单元校验（路径必须是标准位置、必须是普通文件、ExecStart 必须与要删的二进制一致、拒绝 `enabled-runtime`）原样搬进 `systemdUnits.VerifyRemovable`，一条不减。
   - `Installed` 判定：`os.Stat(binaryPath)` 成功即已装。不看 ExecStartPath 是因为 dae 停止时它来自回退链，回退到"面板配置的路径"会恒为真。
 
 提到 systemd 的用户可见文案按后端分支，procd 下不能出现 systemd 词汇：
@@ -297,15 +310,15 @@ bpffs 挂载是必需的：dae 要 pin eBPF map，`/sys/fs/bpf` 未挂载时启�
 
 菜单：`admin/services/kdae-panel`，标题「kdae 面板」，`order 60`。
 
-单个 `view.js`，两个 tab。
+单个 `view.js`：上半是状态块，下半是设置表单。状态块**不做成 CBI 表单项**——`form.DummyValue` 是为"展示一个 UCI 值"设计的，往里塞按钮和链接要整个覆写它的 `render`，LuCI 一改内部约定就会碎。直接建 DOM，再与 `m.render()` 的结果拼起来。
 
-**状态 tab**
+**状态块**
 
 - `kdae-panel` 与 `dae` 两个服务各一行：运行状态徽标（取自 `luci.getInitList` / `service list`）、启动/停止/重启按钮、开机自启开关。
 - 「打开面板」按钮：`window.open('http://' + location.hostname + ':' + port + '/')`。端口取自 UCI。
 - 若 `/var/run/kdae-panel/setup-url` 可读且非空，显示醒目的一次性初始化链接（渲染为 `<a>`），并说明"创建管理员后此链接自动失效"。
 
-**设置 tab**
+**设置表单**
 
 UCI `kdae-panel.main`（`config kdae-panel 'main'`）：
 
