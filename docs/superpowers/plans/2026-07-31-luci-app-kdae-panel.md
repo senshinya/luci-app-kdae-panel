@@ -12,7 +12,7 @@
 
 - 目标平台只有 immortalwrt 24.10.4 x86/64；包 `DEPENDS` 含 `@x86_64`。
 - Go 版本 1.25.0（go.mod 不动）；二进制必须 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`，静态链接以在 musl 上运行。
-- **systemd 后端的行为一个字节都不能变。** 每个重构任务结束时现有测试必须原样通过。
+- **systemd 后端的功能行为不变。** 每个重构任务结束时现有测试必须原样通过。唯一的例外是用户可见的提示文案：Task 7 会把其中假定 systemd 的措辞统一改掉，systemd 用户也会看到新文案。除 Task 7 外的任何任务都不得改动 systemd 路径的行为或文案。
 - 所有新增用户可见文案用简体中文，与现有代码一致；注释解释"为什么"而不是"是什么"，与现有代码风格一致。
 - procd 后端下任何用户可见文案不得出现 "systemd" / "systemctl" / "journalctl" / "ReadWritePaths" 字样。
 - **`/var` 在 OpenWrt 上是 `/tmp` 的软链（tmpfs），重启即空。** 面板的数据库、备份、状态文件、dae 本地版本库一律落在 `/etc/kdae-panel`；只有一次性初始化链接放 `/var/run/kdae-panel`（它本就该重启后重新生成）。
@@ -1384,29 +1384,81 @@ import 加 `"github.com/tuoro/kdae-panel/internal/host"`。
 
 - [ ] **Step 7: 写测试锁住这个行为**
 
-在 `internal/app/app_test.go` 追加：
+在 `internal/app/app_test.go` 追加。测试要**真的**验证"能力没被注册"，而不是把刚设进去的后端值又读一遍：
 
 ```go
-// procd 部署不能提供自升级：它会从上游仓库取回一个不含 procd 后端的二进制
-// 并替换自己。这条断言防止以后有人"顺手"把它打开。
-func TestProcdBackendDisablesSelfUpdate(t *testing.T) {
+// newBackendTestConfig 造一份指向临时目录的最小可用配置。
+func newBackendTestConfig(t *testing.T, backend host.Backend) Config {
+	t.Helper()
+	directory := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.ServiceBackend = host.BackendProcd
-	if cfg.EnableSelfUpdate != true {
-		t.Fatal("前提变了：DefaultConfig 不再默认开启自升级，本测试需要重写")
+	cfg.ServiceBackend = backend
+	cfg.ListenAddress = "127.0.0.1:0"
+	cfg.DatabasePath = filepath.Join(directory, "panel.db")
+	cfg.BackupDir = filepath.Join(directory, "backups")
+	cfg.SchedulePath = filepath.Join(directory, "schedule.json")
+	cfg.InstallStatePath = filepath.Join(directory, "dae-install.json")
+	cfg.GeoStatePath = filepath.Join(directory, "geo-update.json")
+	cfg.GeoSchedulePath = filepath.Join(directory, "geo-schedule.json")
+	cfg.PanelBackupPath = filepath.Join(directory, "kdae-panel.previous")
+	cfg.DaeConfigPath = filepath.Join(directory, "config.dae")
+	// 版本管理会去探测上游平台并写系统目录，与本测试无关，关掉。
+	cfg.EnableDaeInstall = false
+	return cfg
+}
+
+// panelUpdateStatusPresent 请求面板更新接口，回报响应里有没有 status 字段。
+// status 缺失即代表自升级能力根本没注册（handler 的 nil 分支）。
+func panelUpdateStatusPresent(t *testing.T, application *App) bool {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/panel/update", nil)
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 %d", recorder.Code, http.StatusOK)
 	}
-	// 只验证配置层的判定，不构造完整应用（procd 后端会去碰 /etc/init.d）。
-	backend, err := cfg.ServiceBackend.Resolve()
+	var payload map[string]json.RawMessage
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	_, present := payload["status"]
+	return present
+}
+
+// procd 部署一定不能提供自升级：它会从上游 tuoro/kdae-panel 取回一个不含
+// procd 后端的二进制并替换自己，开启即自毁。这条断言防止以后有人"顺手"打开。
+func TestProcdBackendDoesNotRegisterSelfUpdate(t *testing.T) {
+	application, err := New(newBackendTestConfig(t, host.BackendProcd),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
-		t.Fatalf("解析后端: %v", err)
+		t.Fatalf("初始化应用: %v", err)
 	}
-	if backend != host.BackendProcd {
-		t.Fatalf("后端 = %s，期望 procd", backend)
+	defer func() { _ = application.Close() }()
+
+	if panelUpdateStatusPresent(t, application) {
+		t.Fatal("procd 后端下不应注册面板自升级能力")
+	}
+}
+
+// 对照组：systemd 后端的行为必须原样保留，否则上面那条断言可能只是
+// "配置造错了导致哪个后端都注册不上"。
+func TestSystemdBackendStillRegistersSelfUpdate(t *testing.T) {
+	application, err := New(newBackendTestConfig(t, host.BackendSystemd),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("初始化应用: %v", err)
+	}
+	defer func() { _ = application.Close() }()
+
+	if !panelUpdateStatusPresent(t, application) {
+		t.Fatal("systemd 后端下自升级能力应当照旧注册")
 	}
 }
 ```
 
-这条测试只锁住后端解析。真正的"不注册"由 Step 6 的代码分支保证，其行为在真机验证清单里核对（面板设置页的一键升级开关应为置灰）。
+测试文件的 import 需含 `encoding/json`、`io`、`log/slog`、`net/http`、`net/http/httptest`、`path/filepath`、`testing` 与 `internal/host`（多数已在）。
+
+对照组不是凑数：没有它，"status 缺失"既可能是本次改动生效，也可能是测试配置造错了导致两个后端都注册不上，而后者会让这条断言永远绿着却什么都没保护。
 
 - [ ] **Step 8: 把新字段写进 API 文档**
 
