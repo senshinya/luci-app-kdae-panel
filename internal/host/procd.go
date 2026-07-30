@@ -353,6 +353,11 @@ var timeNow = time.Now
 
 // parseLogreadTimestamp 解析行首时间戳，解析不出返回零值。
 //
+// logread 打印的是本机墙上时间，不带时区信息——用 time.ParseInLocation 配
+// time.Local 才是对它的正确解释：数字本身就是本地时间，不是 UTC 只是"标签
+// 恰好没写"。两组布局解析都统一走本地时区，最后再各自转 UTC 交给上层，
+// 与 systemd 后端返回 UTC 的约定一致。
+//
 // 零值只在"这段前缀本就不像时间戳"时出现——这时候编造一个日期比说"不知道"
 // 更容易误导，与 systemd 后端解析失败时的行为一致。但 busybox 格式没有年份，
 // 这不属于"解析不出"：月/日/时间是真实信息，直接丢给零值太可惜，因此单独
@@ -362,12 +367,12 @@ func parseLogreadTimestamp(prefix string) time.Time {
 	for count := len(fields); count > 0; count-- {
 		candidate := strings.Join(fields[:count], " ")
 		for _, layout := range logreadTimestampLayoutsWithYear {
-			if parsed, err := time.Parse(layout, candidate); err == nil {
+			if parsed, err := time.ParseInLocation(layout, candidate, time.Local); err == nil {
 				return parsed.UTC()
 			}
 		}
 		for _, layout := range logreadTimestampLayoutsWithoutYear {
-			if parsed, err := time.Parse(layout, candidate); err == nil {
+			if parsed, err := time.ParseInLocation(layout, candidate, time.Local); err == nil {
 				return withInferredYear(parsed)
 			}
 		}
@@ -375,18 +380,43 @@ func parseLogreadTimestamp(prefix string) time.Time {
 	return time.Time{}
 }
 
-// withInferredYear 给不带年份的时间戳补年份：先假定是当前年，如果这个
-// 假定落在了未来（比如现在是次年 1 月，日志却是上一年 12 月留下的），
-// 就回拨一年——不回拨的话，去年 12 月的日志会显示成"来自未来"，
-// 比"年份是猜的"更奇怪。
+// withInferredYear 给不带年份的时间戳补年份。
+//
+// 全程留在本地参照系里比较，出口才转 UTC：parsed 是"贴着本地时区标签的
+// 墙上时间"，timeNow() 同样是本地参照系下的一个真实时刻，两者才可比——
+// 之前的实现把 parsed 的裸数字硬套上 time.UTC 标签去跟 timeNow().UTC()
+// （一次真实的时区换算）比较，在 UTC+8（面向国内用户的部署最常见的时区）
+// 上会让 8 小时以内的日志全部被判成"来自未来"进而误回拨一年。
 func withInferredYear(parsed time.Time) time.Time {
-	now := timeNow().UTC()
-	guess := time.Date(now.Year(), parsed.Month(), parsed.Day(),
-		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.UTC)
-	if guess.After(now) {
-		guess = guess.AddDate(-1, 0, 0)
+	now := timeNow()
+	guess := dateInYear(now.Year(), parsed)
+	// 回拨要求"晚于现在超过 24 小时"而不是"晚于现在"：几秒到几分钟的偏差是
+	// 路由器 RTC 与日志时间戳之间常见的时钟误差，为此回拨一整年是灾难性的
+	// 误判；真正的跨年场景（元旦读上一年 12 月的日志）与"现在"差着将近
+	// 一年，24 小时的宽限足以把两者分开，不会误伤时钟误差。
+	if guess.Sub(now) > 24*time.Hour {
+		guess = dateInYear(guess.Year()-1, parsed)
 	}
-	return guess
+	return guess.UTC()
+}
+
+// dateInYear 用给定年份重建 parsed 的月/日/时刻，落在 time.Local 下。
+//
+// 只有 2 月 29 日会让目标年份"没有这一天"——time.Date 对此不报错，而是把
+// 溢出静默归一化成 3 月 1 日，月和日一起被改掉，不校验就会把闰年才有的
+// 日志显示成 3 月的日志。校验不通过就退到更早的年份重建，直到找到真正
+// 拥有这一天的年份；8 次封顶只是给异常输入（parsed 根本不是真实存在过的
+// 日期）一个退出条件，正常情况下最近的闰年最多退 4 年就能找到。
+func dateInYear(year int, parsed time.Time) time.Time {
+	for attempt := 0; attempt < 8; attempt++ {
+		guess := time.Date(year-attempt, parsed.Month(), parsed.Day(),
+			parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.Local)
+		if guess.Month() == parsed.Month() && guess.Day() == parsed.Day() {
+			return guess
+		}
+	}
+	return time.Date(year, parsed.Month(), parsed.Day(),
+		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.Local)
 }
 
 // logreadLevel 从前缀里找 "facility.level" 形式的 token 并取出 level。

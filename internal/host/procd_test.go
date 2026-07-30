@@ -98,6 +98,17 @@ func initScriptDir(t *testing.T, names ...string) string {
 	return dir
 }
 
+// pinLocalTimeZone 让本次测试的 time.Local 固定为给定时区，并在测试结束后
+// 还原。time.Local 只在进程内首次被访问时按 TZ 环境变量初始化一次，测试期间
+// 再改 TZ 环境变量不保证生效；直接赋值这个包级变量才可靠，也不依赖测试机器
+// 是否装有对应的 tzdata（FixedZone 不需要）。
+func pinLocalTimeZone(t *testing.T, loc *time.Location) {
+	t.Helper()
+	previous := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = previous })
+}
+
 func newTestProcdManager(t *testing.T, runner command.Runner) *procdManager {
 	t.Helper()
 	manager, err := newProcdManager(Options{
@@ -378,8 +389,12 @@ func TestProcdLogsTimestampFallsBackToZeroWhenUnparseable(t *testing.T) {
 }
 
 // busybox 的 logread 前缀不带年份，必须靠 timeNow 补全，而不是解析出公元 0 年。
+// 固定 time.Local=UTC：这条测试只关心"年份怎么补"，不关心时区换算本身
+// （那是 TestProcdLogsBusyboxTimestampHandlesNonUTCLocalZone 的职责），
+// 固定成 UTC 才能让期望值不随测试机器的实际时区变化。
 func TestProcdLogsBusyboxTimestampUsesCurrentYear(t *testing.T) {
 	initScriptDir(t, "dae")
+	pinLocalTimeZone(t, time.UTC)
 	previous := timeNow
 	timeNow = func() time.Time { return time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() { timeNow = previous })
@@ -402,9 +417,11 @@ func TestProcdLogsBusyboxTimestampUsesCurrentYear(t *testing.T) {
 }
 
 // 跨年读日志：现在是次年 1 月，日志留在上一年 12 月，补年份时必须回拨一年，
-// 否则去年 12 月的日志会显示成"来自未来"。
+// 否则去年 12 月的日志会显示成"来自未来"。同样固定 time.Local=UTC，理由见
+// TestProcdLogsBusyboxTimestampUsesCurrentYear。
 func TestProcdLogsBusyboxTimestampRollsBackAcrossYearBoundary(t *testing.T) {
 	initScriptDir(t, "dae")
+	pinLocalTimeZone(t, time.UTC)
 	previous := timeNow
 	timeNow = func() time.Time { return time.Date(2026, time.January, 5, 0, 30, 0, 0, time.UTC) }
 	t.Cleanup(func() { timeNow = previous })
@@ -422,6 +439,75 @@ func TestProcdLogsBusyboxTimestampRollsBackAcrossYearBoundary(t *testing.T) {
 	}
 	if entries[0].Timestamp.Year() != 2025 {
 		t.Fatalf("年份 = %d，期望 2025（应回拨一年）", entries[0].Timestamp.Year())
+	}
+}
+
+// 时区参照系：路由器最常见的部署地是 UTC+8（Asia/Shanghai，LuCI 里设过时区
+// 就是这样）。旧实现把不带时区标签的"本地墙上时间"数值直接套上 time.UTC，
+// 再跟 timeNow().UTC()（一次真实的时区换算）比较，UTC+8 下会让 8 小时以内
+// 的日志全部被误判成"来自未来"进而回拨一年——这条测试专门守住这个场景：
+// 日志时间是"几分钟前"，年份必须还是今年，绝不能被回拨。
+func TestProcdLogsBusyboxTimestampHandlesNonUTCLocalZone(t *testing.T) {
+	initScriptDir(t, "dae")
+	shanghai := time.FixedZone("CST", 8*3600)
+	pinLocalTimeZone(t, shanghai)
+	previous := timeNow
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, shanghai)
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previous })
+	// 日志时间是本地时间 11:55:00，比"现在"（本地 12:00:00）早 5 分钟。
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "Jul 31 11:55:00 router dae[7]: 裸消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	if entries[0].Timestamp.Year() != 2026 {
+		t.Fatalf("年份 = %d，期望 2026（几分钟前不该被判成来自未来而回拨一年）",
+			entries[0].Timestamp.Year())
+	}
+	wantUTC := time.Date(2026, time.July, 31, 3, 55, 0, 0, time.UTC)
+	if !entries[0].Timestamp.Equal(wantUTC) {
+		t.Fatalf("时间戳 = %v，期望 %v（本地 11:55 CST 换算成 UTC）",
+			entries[0].Timestamp, wantUTC)
+	}
+}
+
+// 2 月 29 日只在闰年存在；time.Date 对不存在的日期不报错，而是把溢出静默
+// 归一化成 3 月 1 日，月和日会一起被改掉。这里现在固定在 2026 年（非闰年）
+// 的 3 月，日志前缀却是 2 月 29 日，断言结果不能被归一化——月日必须仍是
+// 2 月 29 日，年份则退到最近的闰年 2024。
+func TestProcdLogsBusyboxTimestampHandlesLeapDay(t *testing.T) {
+	initScriptDir(t, "dae")
+	pinLocalTimeZone(t, time.UTC)
+	previous := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.March, 15, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = previous })
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "Feb 29 08:00:00 router dae[7]: 裸消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	got := entries[0].Timestamp
+	if got.Month() != time.February || got.Day() != 29 {
+		t.Fatalf("月/日 = %s/%d，期望 2 月 29 日（不能被静默归一化成 3 月 1 日）",
+			got.Month(), got.Day())
+	}
+	if got.Year() != 2024 {
+		t.Fatalf("年份 = %d，期望 2024（最近的闰年）", got.Year())
 	}
 }
 
