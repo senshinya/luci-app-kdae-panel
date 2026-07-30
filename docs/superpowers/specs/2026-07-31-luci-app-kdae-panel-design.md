@@ -194,7 +194,9 @@ type unitDetection struct {
 }
 ```
 
-- `systemdUnits`：现 `provision.go` 的 `planUnit` / `render` 原样搬迁（`retargetUnit` / `execStartBinary` / `unitExecStart` 留在 provision.go 供两处共用），`Commit` 写单元后 `daemon-reload`，`RemovablePaths` 返回单元路径，`VerifyRemovable` 承接现 `uninstallTarget` 末段的单元校验。
+- `systemdUnits`：只搬 `planUnit` / `render` 两个方法，`Commit` 写单元后 `daemon-reload`，`RemovablePaths` 返回单元路径，`VerifyRemovable` 承接现 `uninstallTarget` 末段的单元校验（标准路径、普通文件、ExecStart 一致、拒绝 `enabled-runtime`，一条不减）。
+
+  `Installer.unitDir` 字段与 `unitDirectory()` / `serviceUnit()` / `retargetUnit` / `execStartBinary` / `unitExecStart` **一律留在原处**：`provision_test.go` 与 `uninstall_test.go` 有十余处直接读写它们，搬家只会制造与本次改造无关的测试改动。`systemdUnits` 因此不带任何状态，只有一个指回 `Installer` 的指针。
 - `procdUnits`：init 脚本归 ipk，因此
   - `Plan` 退化为校验 `/etc/init.d/dae` 存在且是普通文件；`inPlace` 恒为 true。不再解析脚本内容——脚本与面板同读一份 UCI，不可能对 dae 的位置产生分歧。
   - `Commit` 空操作。

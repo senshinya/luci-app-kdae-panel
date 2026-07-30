@@ -1385,40 +1385,21 @@ type unitProvisioner interface {
 	Commit(ctx context.Context, content string, inPlace bool) error
 }
 
-const defaultUnitDirectory = "/etc/systemd/system"
-
 // systemdUnits 管理 systemd 的服务单元。
+//
+// 刻意不自带目录字段：`Installer.unitDir` 与 `unitDirectory()` / `serviceUnit()`
+// 原地不动，现有测试有十余处直接读写它们，把这份状态挪个位置只会制造一批
+// 与本次改造无关的测试改动。
 type systemdUnits struct {
 	installer *Installer
-	// directory 是单元的落地目录，留空即用系统默认，测试会覆盖它。
-	directory string
-}
-
-func (u *systemdUnits) unitDirectory() string {
-	if u.directory != "" {
-		return u.directory
-	}
-	return defaultUnitDirectory
-}
-
-// unitName 是单元文件名，服务名没带 .service 后缀时补上。
-func (u *systemdUnits) unitName() string {
-	name := u.installer.serviceName
-	if name == "" {
-		name = "dae"
-	}
-	if !strings.HasSuffix(name, ".service") {
-		name += ".service"
-	}
-	return name
 }
 
 func (u *systemdUnits) Path() string {
-	return filepath.Join(u.unitDirectory(), u.unitName())
+	return filepath.Join(u.installer.unitDirectory(), u.installer.serviceUnit())
 }
 
 func (u *systemdUnits) WritableDirs() []string {
-	return []string{u.unitDirectory()}
+	return []string{u.installer.unitDirectory()}
 }
 
 func (u *systemdUnits) RemovablePaths() []string {
@@ -1561,9 +1542,9 @@ var _ unitProvisioner = (*systemdUnits)(nil)
 
 - [ ] **Step 2: 从 `provision.go` 删掉搬走的部分**
 
-删除这些声明（它们现在在 `units.go`）：`defaultUnitDirectory` 常量、`(i *Installer) unitDirectory()`、`(i *Installer) serviceUnit()`、`(i *Installer) planUnit(...)`、`(i *Installer) render(...)`。
+只删这两个方法（它们现在是 `systemdUnits.Plan` 与 `systemdUnits.render`）：`(i *Installer) planUnit(...)`、`(i *Installer) render(...)`。
 
-保留在 `provision.go`：`SeedConfig`、`configMode`/`geoMode`/`unitMode` 常量、`Provision` 结构体、`Provision` 方法、`FirstInstall`、`writeGeoAssets`、`writeSeedConfig`、`execStartBinary`、`backupExistingBinary`、`unitExecStart`、`retargetUnit`。
+**其余一概保留在 `provision.go`**，包括 `defaultUnitDirectory` 常量、`(i *Installer) unitDirectory()`、`(i *Installer) serviceUnit()`——`provision_test.go` 与 `uninstall_test.go` 有十余处直接读写 `installer.unitDir` 与调用 `installer.serviceUnit()`，把它们挪走会制造一批与本次改造无关的测试改动，而本任务的验收标准正是"测试一行不改"。同样保留：`SeedConfig`、`configMode`/`geoMode`/`unitMode`、`Provision` 结构体与方法、`FirstInstall`、`writeGeoAssets`、`writeSeedConfig`、`execStartBinary`、`backupExistingBinary`、`unitExecStart`、`retargetUnit`。
 
 - [ ] **Step 3: 让 `Provision` 走 unitProvisioner**
 
@@ -1582,7 +1563,7 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	if err != nil {
 		result.Blockers = append(result.Blockers, fmt.Sprintf(
 			"无法读取 %s 的状态，因而不能确认这台机器上是否已有 dae，已拒绝首次安装：%v",
-			i.units.Path(), err))
+			i.serviceUnit(), err))
 		return result
 	}
 	detection := i.units.Detect(ctx, status)
@@ -1662,14 +1643,7 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 
 - [ ] **Step 5: 在 Installer 上挂 units 字段**
 
-`internal/daeinstall/installer.go`：把结构体里
-
-```go
-	// unitDir 是 systemd 单元的落地目录，留空即用系统默认，测试会覆盖它。
-	unitDir string
-```
-
-替换为
+`internal/daeinstall/installer.go`：**保留** `unitDir string` 字段不动，在它下面新增一个字段
 
 ```go
 	// units 抽掉不同 init 系统在"服务定义"上的差异。
@@ -1697,15 +1671,11 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	return installer, nil
 ```
 
-- [ ] **Step 6: 修正现有测试对 `unitDir` 的覆盖**
+- [ ] **Step 6: 确认测试确实一行没改**
 
-Run: `grep -rn "unitDir" internal/daeinstall/`
-
-对每一处形如 `installer.unitDir = dir` 的赋值，改为
-
-```go
-	installer.units = &systemdUnits{installer: installer, directory: dir}
-```
+Run: `git diff --stat -- 'internal/daeinstall/*_test.go'`
+Expected: 无输出。`installer.unitDir`、`installer.serviceUnit()` 都还在原处，测试不该受影响。
+若这里有输出，说明 Step 2 多删了东西——回去把它放回 `provision.go`，而不是改测试。
 
 - [ ] **Step 7: 把 `uninstallTarget` 里的单元校验搬进 provisioner**
 
@@ -1794,7 +1764,8 @@ Run: `grep -rn "unitDir" internal/daeinstall/`
 
 Run: `go build ./... && go test ./... && go vet ./...`
 Expected: 全部 PASS，`internal/daeinstall` 的测试数量与之前一致。
-`internal/daeinstall/uninstall_test.go` 里若有断言错误文案的用例，会因 Step 7 把"没有找到可卸载的 dae systemd 服务"改成"没有找到可卸载的 dae 服务"而失败——**只允许改断言里的期望文案**，不允许把实现改回带 systemd 字样。
+
+已核对过的两处：`uninstall_test.go:206` 断言 "不是面板管理的标准路径"，`VerifyRemovable` 原样保留了这句，不受影响；没有任何测试断言 "没有找到可卸载的 dae systemd 服务"，Step 7 改这句是安全的。若仍有测试因文案失败，**只允许改断言里的期望文案**，不允许把实现改回带 systemd 字样。
 
 - [ ] **Step 10: Commit**
 
@@ -2233,6 +2204,14 @@ import 加 `"errors"` 与 `"io/fs"`。
 ```go
 		return "", false, errors.New("机器上找不到 dae 的服务定义，面板只能升级或切换已有的 dae")
 ```
+
+`internal/daeinstall/installer_test.go` 第 272 行断言的正是旧文案，同步改掉：
+
+```go
+	if err == nil || !strings.Contains(err.Error(), "找不到 dae 的服务定义") {
+```
+
+这是本计划里**唯一**一处需要改动既有测试断言的地方，改的是期望文案而不是行为。同文件第 269 行与 `provision_test.go` 第 51 行的同类字样在注释里，改不改都行。
 
 - [ ] **Step 5: 改 panelupdate 的写权限提示**
 
