@@ -12,19 +12,25 @@ on:
 env:
   SDK_URL: https://downloads.immortalwrt.org/releases/24.10.4/targets/x86/64/immortalwrt-sdk-24.10.4-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
+# 默认只读：push/pull_request/workflow_dispatch 都不需要写权限。"附到 Release"
+# 需要 contents: write，单独放进只在 release 事件下才跑的 job 里升级，
+# 不在这里整体放开——否则每次普通 push 都会拿到不需要的写权限。
+permissions:
+  contents: read
+
 jobs:
   ipk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # 与 ci.yml 钉同一个版本：两条流水线用不同 Go 编出来的二进制会有差异，
       # 而 ci.yml 已经用 git diff --exit-code 锁死了嵌入资源，版本漂移只会制造噪声。
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.25.12"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
@@ -112,13 +118,27 @@ jobs:
           done
           ls "${GITHUB_WORKSPACE}/ipk"/luci-app-kdae-panel_*.ipk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kdae-panel-ipk-x86_64
           path: ipk/*.ipk
 
+  # 独立 job 而不是给 ipk job 整体加 contents: write：那样会让 push/pull_request/
+  # workflow_dispatch 触发时也拿到写权限，而它们根本不需要、也不该有。
+  # 只有这个 job 会在 release 事件下运行，写权限的授予范围与实际需要一致。
+  release:
+    needs: ipk
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kdae-panel-ipk-x86_64
+          path: ipk
+
       - name: 附到 Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: ipk/*.ipk
