@@ -126,16 +126,18 @@ ubus call service list '{"name":"dae"}'
 | `Name` | 配置的服务名 |
 | `ActiveState` / `SubState` | ubus `running` → `active`/`running`，否则 `inactive`/`dead` |
 | `MainPID` | ubus `pid`，回退 `pidof <name>` 首个 |
-| `ExecStartPath` | ubus `command[0]`；ubus 无实例时回退解析 `/etc/init.d/dae` 里的 `procd_set_param command`，再回退面板配置的 `dae_binary` |
+| `ExecStartPath` | ubus `command[0]`；ubus 无实例时回退到面板配置的 `dae_binary` |
 | `UnitFileState` | `/etc/init.d/dae enabled` 退出码 → `enabled` / `disabled`；脚本不存在 → 空 |
 | `UnitPath` | `/etc/init.d/<serviceName>` |
 | `MemoryBytes` | `/proc/<pid>/status` 的 `VmRSS` |
 | `CPUUsageNanoseconds` | `/proc/<pid>/stat` 的 utime+stime × 10ms |
 | `Restarts` | 恒为 0；字段带 `omitempty`，不进 JSON，前端自然不展示 |
-| `Environment` | `/proc/<pid>/environ`（NUL 分隔）；进程没跑时解析 init 脚本里的 `procd_set_param env` |
+| `Environment` | `/proc/<pid>/environ`（NUL 分隔）；进程没跑时为空 |
 | `Description` | 固定 `"procd service <name>"` |
 
-`ExecStartPath` 的回退链是刻意的：`daeinstall` 用它做"已安装"判定与替换目标，返回空会让首次安装误判，返回错误路径会让替换打到别处。三级回退保证只要 init 脚本在就能给出确定答案。
+`ExecStartPath` 的回退是刻意的：`daeinstall` 用它做替换目标，返回空会让首次安装误判，返回错误路径会让替换打到别处。回退到面板配置的 `dae_binary` 是安全的——`/etc/init.d/dae` 与面板的 `--dae-binary` 读的是**同一份 UCI**，两者不可能分叉，因此不需要解析 init 脚本，也就不存在"脚本被改过而面板不知道"这一类分歧。
+
+`Environment` 只在进程运行时才有。这不是缺陷：进程没跑时 geo 的搜索顺序退化为"配置文件所在目录优先"，而 init 脚本设的 `DAE_LOCATION_ASSET` 正是配置文件所在目录，两者本就重合。
 
 `/proc` 的读取路径抽成包级变量 `procRoot`（默认 `/proc`），测试可指向临时目录。
 
@@ -200,14 +202,14 @@ type unitProvisioner interface {
 ### 2.4 `geodata`
 
 - init 脚本设 `DAE_LOCATION_ASSET=/etc/dae`，geo 落在面板已可写的配置目录，无需放宽任何东西。
-- `SandboxHiddenDir`（`/root/.local/share/dae`）在 procd 下不存在沙箱遮挡问题。`MissingWarning` 与 `locate` 的文案按后端分支：systemd 保留现措辞，procd 下直接说"未找到"，不再提 ProtectHome。
+- `SandboxHiddenDir`（`/root/.local/share/dae`）在 procd 下不存在沙箱遮挡问题。`MissingWarning` 不需要从上层透传后端标志：它自己探测 `/root` 是否因权限而读不到（`ProtectHome=true` 正是这个症状），读不到就留余地，读得到就直说"未找到"。这比透传布尔更准——systemd 部署若没开 ProtectHome，同样该直说。签名不变。
 - `systemDirs` 不变（`/usr/local/share/dae`、`/usr/share/dae` 在 OpenWrt 上同样是 dae 的搜索路径）。
 
 ### 2.5 `panelupdate`
 
 默认关闭（UCI `enable_self_update=0`），因为包由 opkg 管理，自升级替换 `/usr/bin/kdae-panel` 后 opkg 的文件账本会与实际不符。能力本身保留可用，`RestartSelf` 走 2.2 的 procd 实现。文档说明推荐路径是装新 ipk。
 
-**必须一并修掉的双真相源。** `panelupdate.New()` 里的 `loadPreference()` 会用 `/var/lib/kdae-panel/self-update.json` 覆盖命令行传入的初始值。上游这么设计是对的：systemd 部署下用户只有 env 文件可改，让界面的选择赢，省得为一个开关去 SSH。但到了 LuCI 部署，同一个布尔有了 UCI 与偏好文件两个真相源，而用户看得见的那个（LuCI）反而不生效——这是移植引进的缺陷，不是上游的。
+**必须一并修掉的双真相源。** `panelupdate.New()` 里的 `loadPreference()` 会用数据目录下的 `self-update.json` 覆盖命令行传入的初始值。上游这么设计是对的：systemd 部署下用户只有 env 文件可改，让界面的选择赢，省得为一个开关去 SSH。但到了 LuCI 部署，同一个布尔有了 UCI 与偏好文件两个真相源，而用户看得见的那个（LuCI）反而不生效——这是移植引进的缺陷，不是上游的。
 
 修法是让部署方能显式锁定这一项：
 
@@ -246,6 +248,12 @@ start_service()
       --enable-self-update=<0|1> --lock-self-update-preference \
       --disable-update-check=<0|1> \
       --secure-cookie=<0|1> --trusted-proxies <…> --session-ttl <…> \
+      --database <data_dir>/panel.db --backup-dir <data_dir>/backups \
+      --schedule-file <data_dir>/schedule.json \
+      --install-state-file <data_dir>/dae-install.json \
+      --geo-state-file <data_dir>/geo-update.json \
+      --geo-schedule-file <data_dir>/geo-schedule.json \
+      --panel-backup-file <data_dir>/kdae-panel.previous \
       --setup-url-file /var/run/kdae-panel/setup-url
   procd_set_param respawn
   procd_set_param stdout 1
@@ -256,7 +264,9 @@ service_triggers()
   procd_add_reload_trigger "kdae-panel"
 ```
 
-数据目录 `/var/lib/kdae-panel`（数据库、备份、状态文件、dae 本地版本库）在 `start_service` 里确保存在，权限 0700。
+**数据目录默认 `/etc/kdae-panel`，不是 systemd 部署用的 `/var/lib/kdae-panel`。** OpenWrt 上 `/var` 是 `/tmp` 的软链，即内存文件系统——把数据库、管理员账户、配置备份和 dae 本地版本库放在那里，一次重启全部消失。`/etc` 在 overlay 上，是这台机器上唯一确定持久的可写位置。目录由 `start_service` 按 UCI 的 `data_dir` 创建，权限 0700（配置里可能有订阅地址与节点凭据）。
+
+反过来，一次性初始化链接**就该**是易失的：它本来每次重启都要重新生成，因此留在 `/var/run/kdae-panel/setup-url`。
 
 ### `/etc/init.d/dae`
 
@@ -281,7 +291,7 @@ reload_service()
 
 bpffs 挂载是必需的：dae 要 pin eBPF map，`/sys/fs/bpf` 未挂载时启动失败。
 
-面板通过 `Status.ExecStartPath` 解析 `procd_set_param command` 的首个参数，所以这一行的格式必须稳定；解析实现按 shell 词法宽松切分，遇到无法解析的自定义脚本就回退到配置值并在界面提示。
+两个脚本都从 `config_load kdae-panel` 读 `dae_binary` 与 `dae_config`，与面板的命令行参数同源。这就是"面板不解析 init 脚本"的前提：UCI 是唯一真相源，脚本与面板不可能对 dae 的位置产生分歧。
 
 ## 四、LuCI 页面
 
@@ -304,7 +314,8 @@ UCI `kdae-panel.main`（`config kdae-panel 'main'`）：
 | `enabled` | `1` | 开机自启（映射到 init enable/disable） |
 | `listen_addr` | `0.0.0.0` | 监听地址 |
 | `listen_port` | `2023` | 监听端口 |
-| `dae_binary` | `/usr/bin/dae` | dae 可执行文件 |
+| `data_dir` | `/etc/kdae-panel` | 数据库、备份、状态文件与 dae 本地版本库；不可放到 `/var` 或 `/tmp`（内存文件系统） |
+| `dae_binary` | `/usr/bin/dae` | dae 可执行文件；面板与 `/etc/init.d/dae` 读同一个值 |
 | `dae_config` | `/etc/dae/config.dae` | dae 入口配置 |
 | `service_name` | `dae` | init 脚本名 |
 | `enable_dae_install` | `1` | 面板管理 dae 版本 |
@@ -344,9 +355,8 @@ ACL（`acl.d/luci-app-kdae-panel.json`）：读写 uci `kdae-panel`；`file` 读
 **新增 Go 单测**（`internal/host/procd_test.go`）
 
 - ubus JSON 解析：运行中 / 已停止 / 服务不存在 / ubus 不可用四种输入。
-- `ExecStartPath` 三级回退链：ubus 有实例 → init 脚本解析 → 配置值。
-- init 脚本 `procd_set_param command` 解析：标准格式、带 `procd_append_param`、无法解析的自定义脚本。
-- `/etc/init.d/dae enabled` 退出码 → `UnitFileState` 映射。
+- `ExecStartPath` 回退：ubus 有实例取 `command[0]`，ubus 无实例回退到配置的 `dae_binary`（服务停止时也不能为空）。
+- `/etc/init.d/dae enabled` 退出码 → `UnitFileState` 映射；脚本不存在 → `LoadState` 为 `not-found`。
 - `logread` 两种前缀格式 + dae `level=…/msg=…` 消息体解析。
 - `/proc` 读取（`procRoot` 指向临时目录）：VmRSS、utime/stime、environ。
 - `RestartSelf` 命令行含 `setsid`。
