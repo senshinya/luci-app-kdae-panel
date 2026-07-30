@@ -132,7 +132,9 @@ type Options struct {
 	NewProbe    ProbeFactory
 	Service     ServiceController
 	Logger      *slog.Logger
-	// ServiceBackend 决定服务定义由哪套 init 系统承载，留空即 systemd。
+	// ServiceBackend 决定服务定义由哪套 init 系统承载，留空按
+	// host.Backend.Resolve 的规则自动探测（有 /sbin/procd 则判为 procd，
+	// 否则 systemd），并非无条件落到 systemd。
 	ServiceBackend host.Backend
 }
 

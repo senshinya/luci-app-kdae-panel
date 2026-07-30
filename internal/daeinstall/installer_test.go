@@ -153,6 +153,10 @@ func newTestInstaller(t *testing.T, fetcher *fakeFetcher, service *fakeService) 
 			return fakeProbe{content: string(content)}
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// 这批测试验证的是 systemd 路径的行为；留空会走 host.Backend.Resolve
+		// 的自动探测，让测试结果取决于运行机器上有没有 /sbin/procd。显式钉住
+		// 后，测试断言（如 unitDir 下 dae.service 落盘）在任何机器上都成立。
+		ServiceBackend: host.BackendSystemd,
 	})
 	if err != nil {
 		t.Fatal(err)
