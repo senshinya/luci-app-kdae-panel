@@ -91,7 +91,13 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化配置管理器: %w", err)
 	}
-	hostManager, err := host.NewManager(cfg.ServiceName, cfg.Systemctl, cfg.Journalctl)
+	hostManager, err := host.New(host.Options{
+		Backend:     host.BackendAuto,
+		ServiceName: cfg.ServiceName,
+		DaeBinary:   cfg.DaeBinary,
+		Systemctl:   cfg.Systemctl,
+		Journalctl:  cfg.Journalctl,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("初始化主机服务管理器: %w", err)
 	}

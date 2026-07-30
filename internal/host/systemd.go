@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,7 +18,8 @@ const (
 	maxLogLines    = 500
 )
 
-type Manager struct {
+type systemdManager struct {
+	interfaceLister
 	serviceName string
 	systemctl   string
 	journalctl  string
@@ -77,39 +77,7 @@ const (
 	ActionDaemonReload Action = "daemon-reload"
 )
 
-func NewManager(serviceName, systemctl, journalctl string) (*Manager, error) {
-	return NewManagerWithRunner(serviceName, systemctl, journalctl, command.ExecRunner{}, defaultTimeout)
-}
-
-func NewManagerWithRunner(serviceName, systemctl, journalctl string, runner command.Runner, timeout time.Duration) (*Manager, error) {
-	if serviceName == "" {
-		serviceName = "dae"
-	}
-	if !validUnitName(serviceName) {
-		return nil, fmt.Errorf("systemd 服务名 %q 无效", serviceName)
-	}
-	if systemctl == "" {
-		systemctl = "systemctl"
-	}
-	if journalctl == "" {
-		journalctl = "journalctl"
-	}
-	if runner == nil {
-		return nil, errors.New("命令执行器不能为空")
-	}
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	return &Manager{
-		serviceName: serviceName,
-		systemctl:   systemctl,
-		journalctl:  journalctl,
-		runner:      runner,
-		timeout:     timeout,
-	}, nil
-}
-
-func (m *Manager) Status(ctx context.Context) (Status, error) {
+func (m *systemdManager) Status(ctx context.Context) (Status, error) {
 	properties := strings.Join([]string{
 		"Id",
 		"Description",
@@ -191,7 +159,7 @@ func parseExecStartPath(value string) string {
 	return strings.TrimSpace(path)
 }
 
-func (m *Manager) Action(ctx context.Context, action Action) error {
+func (m *systemdManager) Action(ctx context.Context, action Action) error {
 	switch action {
 	case ActionStart, ActionStop, ActionRestart, ActionEnable, ActionDisable:
 	case ActionDaemonReload:
@@ -224,7 +192,7 @@ const PanelUnit = "kdae-panel.service"
 // 刻意不复用 Action：那条路径操作的是 dae 的单元，而这里的目标固定是面板
 // 自己；把两者混在一个入口里，只要服务名参数传错一次，就会变成"想升级面板
 // 却重启了 dae"。
-func (m *Manager) RestartSelf(ctx context.Context) error {
+func (m *systemdManager) RestartSelf(ctx context.Context) error {
 	result, err := m.runFor(ctx, actionTimeout, m.systemctl, "restart", "--no-block", PanelUnit)
 	if err != nil {
 		return fmt.Errorf("请求重启 %s: %s", PanelUnit, command.Describe(err, result))
@@ -232,7 +200,7 @@ func (m *Manager) RestartSelf(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) Logs(ctx context.Context, limit int) ([]LogEntry, error) {
+func (m *systemdManager) Logs(ctx context.Context, limit int) ([]LogEntry, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -253,11 +221,11 @@ func (m *Manager) Logs(ctx context.Context, limit int) ([]LogEntry, error) {
 	return parseJournal(result.Stdout)
 }
 
-func (m *Manager) run(ctx context.Context, name string, args ...string) (command.Result, error) {
+func (m *systemdManager) run(ctx context.Context, name string, args ...string) (command.Result, error) {
 	return m.runFor(ctx, m.timeout, name, args...)
 }
 
-func (m *Manager) runFor(ctx context.Context, timeout time.Duration, name string, args ...string) (command.Result, error) {
+func (m *systemdManager) runFor(ctx context.Context, timeout time.Duration, name string, args ...string) (command.Result, error) {
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return m.runner.Run(commandCtx, name, args...)
@@ -372,3 +340,5 @@ func parseUint(value string) uint64 {
 	parsed, _ := strconv.ParseUint(value, 10, 64)
 	return parsed
 }
+
+var _ Manager = (*systemdManager)(nil)

@@ -13,7 +13,7 @@ import (
 )
 
 func TestInterfacesAreSorted(t *testing.T) {
-	manager := &Manager{}
+	manager := interfaceLister{}
 	interfaces, err := manager.Interfaces(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestInterfacesAreSorted(t *testing.T) {
 func TestInterfacesHonorCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	manager := &Manager{}
+	manager := interfaceLister{}
 	if _, err := manager.Interfaces(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("错误 = %v，期望 context.Canceled", err)
 	}
@@ -63,7 +63,14 @@ func TestStatus(t *testing.T) {
 	runner := &fakeRunner{results: map[string]command.Result{
 		key: {Stdout: "Id=dae.service\nDescription=dae Service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nMemoryCurrent=4096\nCPUUsageNSec=8000\nTasksCurrent=7\nNRestarts=2\nExecStart={ path=/usr/local/bin/dae ; argv[]=/usr/local/bin/dae run --disable-timestamp ; ignore_errors=no }\nEnvironment=DAE_LOCATION_ASSET=/opt/geo LANG=C\n"},
 	}, errors: map[string]error{}}
-	manager, err := NewManagerWithRunner("dae", "systemctl", "journalctl", runner, time.Second)
+	manager, err := New(Options{
+		Backend:     BackendSystemd,
+		ServiceName: "dae",
+		Systemctl:   "systemctl",
+		Journalctl:  "journalctl",
+		Runner:      runner,
+		Timeout:     time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +128,14 @@ func TestActionAllowlist(t *testing.T) {
 		"systemctl enable dae":  {},
 		"systemctl disable dae": {},
 	}, errors: map[string]error{}}
-	manager, _ := NewManagerWithRunner("dae", "systemctl", "journalctl", runner, time.Second)
+	manager, _ := New(Options{
+		Backend:     BackendSystemd,
+		ServiceName: "dae",
+		Systemctl:   "systemctl",
+		Journalctl:  "journalctl",
+		Runner:      runner,
+		Timeout:     time.Second,
+	})
 	if err := manager.Action(context.Background(), ActionRestart); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +161,14 @@ func TestDaemonReloadTakesNoServiceName(t *testing.T) {
 	runner := &fakeRunner{results: map[string]command.Result{
 		"systemctl daemon-reload": {},
 	}, errors: map[string]error{}}
-	manager, _ := NewManagerWithRunner("dae", "systemctl", "journalctl", runner, time.Second)
+	manager, _ := New(Options{
+		Backend:     BackendSystemd,
+		ServiceName: "dae",
+		Systemctl:   "systemctl",
+		Journalctl:  "journalctl",
+		Runner:      runner,
+		Timeout:     time.Second,
+	})
 
 	if err := manager.Action(context.Background(), ActionDaemonReload); err != nil {
 		t.Fatal(err)
@@ -162,7 +183,14 @@ func TestLogs(t *testing.T) {
 	runner := &fakeRunner{results: map[string]command.Result{
 		"journalctl --unit dae --no-pager --output json --lines 2": {Stdout: "{\"__REALTIME_TIMESTAMP\":\"1000000\",\"PRIORITY\":\"6\",\"MESSAGE\":\"started\",\"_SYSTEMD_UNIT\":\"dae.service\",\"_PID\":\"9\"}\n"},
 	}, errors: map[string]error{}}
-	manager, _ := NewManagerWithRunner("dae", "systemctl", "journalctl", runner, time.Second)
+	manager, _ := New(Options{
+		Backend:     BackendSystemd,
+		ServiceName: "dae",
+		Systemctl:   "systemctl",
+		Journalctl:  "journalctl",
+		Runner:      runner,
+		Timeout:     time.Second,
+	})
 
 	entries, err := manager.Logs(context.Background(), 2)
 	if err != nil {
@@ -188,7 +216,14 @@ func TestCommandError(t *testing.T) {
 		results: map[string]command.Result{"systemctl start dae": {Stderr: "permission denied"}},
 		errors:  map[string]error{"systemctl start dae": errors.New("exit status 1")},
 	}
-	manager, _ := NewManagerWithRunner("dae", "systemctl", "journalctl", runner, time.Second)
+	manager, _ := New(Options{
+		Backend:     BackendSystemd,
+		ServiceName: "dae",
+		Systemctl:   "systemctl",
+		Journalctl:  "journalctl",
+		Runner:      runner,
+		Timeout:     time.Second,
+	})
 	if err := manager.Action(context.Background(), ActionStart); err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("错误信息异常: %v", err)
 	}

@@ -12,9 +12,16 @@ type NetworkInterface struct {
 	Addresses []string `json:"addresses,omitempty"`
 }
 
+// interfaceLister 提供与 init 系统无关的本机网卡枚举。
+//
+// Manager 变成接口后这个方法不能再挂在某个具体后端上，而它的实现只用
+// net.Interfaces()，两个后端没有任何理由各写一份。做成零字段结构体由
+// 两个后端各内嵌一次，方法集自动带上。
+type interfaceLister struct{}
+
 // Interfaces 枚举本机接口及其地址。单个接口读取地址失败时仍保留接口名，
 // 让尚未分配地址或状态正在变化的接口也能出现在配置选择器中。
-func (m *Manager) Interfaces(ctx context.Context) ([]NetworkInterface, error) {
+func (interfaceLister) Interfaces(ctx context.Context) ([]NetworkInterface, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
