@@ -87,8 +87,7 @@ func New(options Options) (Manager, error) {
 	}
 	switch backend {
 	case BackendProcd:
-		// Task 3 接上真正的实现。
-		return nil, fmt.Errorf("procd 后端尚未实现")
+		return newProcdManager(options)
 	default:
 		if options.Systemctl == "" {
 			options.Systemctl = "systemctl"

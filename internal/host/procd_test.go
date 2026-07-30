@@ -227,3 +227,146 @@ func TestProcdStatusReportsMissingInitScript(t *testing.T) {
 		t.Fatalf("UnitPath = %q，期望 %q", status.UnitPath, filepath.Join(dir, "dae"))
 	}
 }
+
+func TestProcdActionRunsInitScript(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		filepath.Join(dir, "dae") + " restart": {},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	if err := manager.Action(context.Background(), ActionRestart); err != nil {
+		t.Fatalf("Action 返回错误: %v", err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != filepath.Join(dir, "dae")+" restart" {
+		t.Fatalf("调用记录 = %v", runner.calls)
+	}
+}
+
+// procd 每次执行 init 脚本都会重读定义，没有等价的全局重载动作。
+// 必须静默成功：dae 的首次安装与卸载事务都会调用它，报错会让整条链路失败。
+func TestProcdDaemonReloadIsNoop(t *testing.T) {
+	initScriptDir(t, "dae")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{}}
+	manager := newTestProcdManager(t, runner)
+
+	if err := manager.Action(context.Background(), ActionDaemonReload); err != nil {
+		t.Fatalf("daemon-reload 应当静默成功，实际: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("daemon-reload 不应执行任何命令，实际 %v", runner.calls)
+	}
+}
+
+// setsid 不能省：重启命令是面板的子进程，procd 停掉面板实例时会连它一起杀掉，
+// 于是命令先于重启本身死亡，面板永远升级不完。
+func TestProcdRestartSelfDetachesWithSetsid(t *testing.T) {
+	expected := "/bin/sh -c setsid " + PanelInitScript + " restart >/dev/null 2>&1 &"
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{expected: {}}}
+	manager := newTestProcdManager(t, runner)
+
+	if err := manager.RestartSelf(context.Background()); err != nil {
+		t.Fatalf("RestartSelf 返回错误: %v", err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != expected {
+		t.Fatalf("调用记录 = %v，期望 %q", runner.calls, expected)
+	}
+}
+
+func TestProcdLogsParsesUboxFormat(t *testing.T) {
+	initScriptDir(t, "dae")
+	output := "Fri Jul 31 01:02:03 2026 daemon.warn dae[4321]: level=warn msg=\"节点不可达\" dialer=n1\n" +
+		"Fri Jul 31 01:02:04 2026 daemon.info dae[4321]: level=info msg=\"已重载配置\"\n"
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: output},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("条目数 = %d，期望 2", len(entries))
+	}
+	if entries[0].Level != "warn" || entries[0].Priority != 4 {
+		t.Fatalf("首条级别 = %s/%d，期望 warn/4", entries[0].Level, entries[0].Priority)
+	}
+	if entries[0].Message != "节点不可达" {
+		t.Fatalf("首条消息 = %q，期望 节点不可达", entries[0].Message)
+	}
+	if entries[0].PID != "4321" || entries[0].Unit != "dae" {
+		t.Fatalf("首条 PID/Unit = %s/%s", entries[0].PID, entries[0].Unit)
+	}
+	if entries[0].Timestamp.IsZero() {
+		t.Fatal("首条时间戳为零值，ubox 格式应当解析成功")
+	}
+	if entries[1].Level != "info" || entries[1].Message != "已重载配置" {
+		t.Fatalf("次条 = %s/%q", entries[1].Level, entries[1].Message)
+	}
+}
+
+// busybox 的 logread 没有 facility.level 也没有年份；解析不出就退回整行，
+// 绝不能丢日志——用户看日志正是因为出了问题。
+func TestProcdLogsFallsBackToRawLine(t *testing.T) {
+	initScriptDir(t, "dae")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: "Jul 31 01:02:03 router dae[7]: 裸消息\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	if entries[0].Message != "裸消息" {
+		t.Fatalf("消息 = %q，期望 裸消息", entries[0].Message)
+	}
+	if entries[0].Level != "info" || entries[0].Priority != 6 {
+		t.Fatalf("级别 = %s/%d，期望默认 info/6", entries[0].Level, entries[0].Priority)
+	}
+}
+
+// limit 是"最新 N 条"，因此要截尾部而不是头部。
+func TestProcdLogsKeepsNewestWithinLimit(t *testing.T) {
+	initScriptDir(t, "dae")
+	output := ""
+	for index := 1; index <= 5; index++ {
+		output += "Fri Jul 31 01:02:0" + strconv.Itoa(index) +
+			" 2026 daemon.info dae[7]: level=info msg=\"第" + strconv.Itoa(index) + "条\"\n"
+	}
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: output},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("条目数 = %d，期望 2", len(entries))
+	}
+	if entries[0].Message != "第4条" || entries[1].Message != "第5条" {
+		t.Fatalf("保留的是 %q / %q，期望最后两条", entries[0].Message, entries[1].Message)
+	}
+}
+
+func TestNewReturnsProcdBackend(t *testing.T) {
+	manager, err := New(Options{Backend: BackendProcd, ServiceName: "dae", DaeBinary: "/usr/bin/dae"})
+	if err != nil {
+		t.Fatalf("New 返回错误: %v", err)
+	}
+	if _, ok := manager.(*procdManager); !ok {
+		t.Fatalf("类型 = %T，期望 *procdManager", manager)
+	}
+}
+
+func TestBackendResolveRejectsUnknown(t *testing.T) {
+	if _, err := Backend("upstart").Resolve(); err == nil {
+		t.Fatal("未知后端应当报错")
+	}
+}
