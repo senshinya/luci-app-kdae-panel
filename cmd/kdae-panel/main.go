@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/app"
+	"github.com/tuoro/kdae-panel/internal/host"
 )
 
 var version = "dev"
@@ -61,6 +62,7 @@ func run() error {
 	serviceName := flag.String("service-name", envOr("KDAE_PANEL_SERVICE_NAME", cfg.ServiceName), "dae systemd 服务名")
 	systemctl := flag.String("systemctl", envOr("KDAE_PANEL_SYSTEMCTL", cfg.Systemctl), "systemctl 可执行文件路径")
 	journalctl := flag.String("journalctl", envOr("KDAE_PANEL_JOURNALCTL", cfg.Journalctl), "journalctl 可执行文件路径")
+	serviceBackend := flag.String("service-backend", envOr("KDAE_PANEL_SERVICE_BACKEND", string(cfg.ServiceBackend)), "服务后端：auto、systemd 或 procd")
 	databasePath := flag.String("database", envOr("KDAE_PANEL_DATABASE", cfg.DatabasePath), "面板 SQLite 数据库路径")
 	schedulePath := flag.String("schedule-file", envOr("KDAE_PANEL_SCHEDULE_FILE", cfg.SchedulePath), "订阅自动刷新设置文件路径")
 	installStatePath := flag.String("install-state-file", envOr("KDAE_PANEL_INSTALL_STATE_FILE", cfg.InstallStatePath), "dae 版本安装状态文件路径")
@@ -90,6 +92,7 @@ func run() error {
 	cfg.ServiceName = *serviceName
 	cfg.Systemctl = *systemctl
 	cfg.Journalctl = *journalctl
+	cfg.ServiceBackend = host.Backend(*serviceBackend)
 	cfg.DatabasePath = *databasePath
 	cfg.SchedulePath = *schedulePath
 	cfg.InstallStatePath = *installStatePath

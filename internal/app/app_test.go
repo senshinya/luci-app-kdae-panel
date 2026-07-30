@@ -164,12 +164,17 @@ func TestHealth(t *testing.T) {
 	var response struct {
 		Status  string `json:"status"`
 		Version string `json:"version"`
+		Backend string `json:"backend"`
 	}
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("解析响应失败: %v", err)
 	}
 	if response.Status != "ok" || response.Version != "test-version" {
 		t.Fatalf("响应内容异常: %+v", response)
+	}
+	// 后端选错的症状（服务控制全部失败）离原因很远，健康检查必须直接说出结论。
+	if response.Backend != "systemd" && response.Backend != "procd" {
+		t.Fatalf("backend = %q，期望 systemd 或 procd", response.Backend)
 	}
 }
 
@@ -1969,5 +1974,118 @@ func TestSecurityHeadersHonorTrustedHTTPSProxy(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Header().Get("Strict-Transport-Security") == "" {
 		t.Fatal("可信 HTTPS 代理后应发送 HSTS")
+	}
+}
+
+// newBackendTestConfig 造一份指向临时目录的最小可用配置。
+func newBackendTestConfig(t *testing.T, backend host.Backend) Config {
+	t.Helper()
+	directory := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.ServiceBackend = backend
+	cfg.ListenAddress = "127.0.0.1:0"
+	cfg.DatabasePath = filepath.Join(directory, "panel.db")
+	cfg.BackupDir = filepath.Join(directory, "backups")
+	cfg.SchedulePath = filepath.Join(directory, "schedule.json")
+	cfg.InstallStatePath = filepath.Join(directory, "dae-install.json")
+	cfg.GeoStatePath = filepath.Join(directory, "geo-update.json")
+	cfg.GeoSchedulePath = filepath.Join(directory, "geo-schedule.json")
+	cfg.PanelBackupPath = filepath.Join(directory, "kdae-panel.previous")
+	cfg.DaeConfigPath = filepath.Join(directory, "config.dae")
+	// 版本管理会去探测上游平台并写系统目录，与本测试无关，关掉。
+	cfg.EnableDaeInstall = false
+	// New() 建出的是真实应用，/api/v1/panel/update 不在认证中间件的公开
+	// 路径白名单里；固定 token 是为了让测试能自己跑完一遍初始化拿到会话，
+	// 而不必依赖 New() 内部随机生成、外部读不到的那个值。
+	cfg.BootstrapToken = "backend-test-bootstrap-token"
+	return cfg
+}
+
+// adminSessionCookie 走一遍真实的首次初始化流程（bootstrap → setup），
+// 换回登录会话 Cookie。New() 建的应用给非公开的 /api/v1/* 路径都挂了认证
+// 中间件，面板更新接口不在白名单内，后续请求必须带着这张 Cookie 才能穿过去。
+func adminSessionCookie(t *testing.T, application *App, bootstrapToken string) *http.Cookie {
+	t.Helper()
+	bootstrap := httptest.NewRecorder()
+	application.Handler().ServeHTTP(bootstrap, httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap",
+		strings.NewReader(`{"token":"`+bootstrapToken+`"}`)))
+	if bootstrap.Code != http.StatusNoContent {
+		t.Fatalf("初始化链接授权失败: status=%d body=%s", bootstrap.Code, bootstrap.Body)
+	}
+	var setupCookie *http.Cookie
+	for _, cookie := range bootstrap.Result().Cookies() {
+		if cookie.Name == setupAuthorizationCookieName {
+			setupCookie = cookie
+		}
+	}
+	if setupCookie == nil {
+		t.Fatal("缺少初始化授权 Cookie")
+	}
+
+	setup := httptest.NewRecorder()
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/setup",
+		strings.NewReader(`{"username":"admin","password":"a secure test password"}`))
+	setupRequest.AddCookie(setupCookie)
+	application.Handler().ServeHTTP(setup, setupRequest)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("创建管理员失败: status=%d body=%s", setup.Code, setup.Body)
+	}
+	for _, cookie := range setup.Result().Cookies() {
+		if cookie.Name == sessionCookieName {
+			return cookie
+		}
+	}
+	t.Fatal("缺少登录会话 Cookie")
+	return nil
+}
+
+// panelUpdateStatusPresent 请求面板更新接口，回报响应里有没有 status 字段。
+// status 缺失即代表自升级能力根本没注册（handler 的 nil 分支）。
+func panelUpdateStatusPresent(t *testing.T, application *App, session *http.Cookie) bool {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/panel/update", nil)
+	request.AddCookie(session)
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 %d", recorder.Code, http.StatusOK)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	_, present := payload["status"]
+	return present
+}
+
+// procd 部署一定不能提供自升级：它会从上游 tuoro/kdae-panel 取回一个不含
+// procd 后端的二进制并替换自己，开启即自毁。这条断言防止以后有人"顺手"打开。
+func TestProcdBackendDoesNotRegisterSelfUpdate(t *testing.T) {
+	cfg := newBackendTestConfig(t, host.BackendProcd)
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("初始化应用: %v", err)
+	}
+	defer func() { _ = application.Close() }()
+	session := adminSessionCookie(t, application, cfg.BootstrapToken)
+
+	if panelUpdateStatusPresent(t, application, session) {
+		t.Fatal("procd 后端下不应注册面板自升级能力")
+	}
+}
+
+// 对照组：systemd 后端的行为必须原样保留，否则上面那条断言可能只是
+// "配置造错了导致哪个后端都注册不上"。
+func TestSystemdBackendStillRegistersSelfUpdate(t *testing.T) {
+	cfg := newBackendTestConfig(t, host.BackendSystemd)
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("初始化应用: %v", err)
+	}
+	defer func() { _ = application.Close() }()
+	session := adminSessionCookie(t, application, cfg.BootstrapToken)
+
+	if !panelUpdateStatusPresent(t, application, session) {
+		t.Fatal("systemd 后端下自升级能力应当照旧注册")
 	}
 }

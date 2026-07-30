@@ -1,6 +1,10 @@
 package app
 
-import "time"
+import (
+	"time"
+
+	"github.com/tuoro/kdae-panel/internal/host"
+)
 
 type Config struct {
 	ListenAddress  string
@@ -16,6 +20,9 @@ type Config struct {
 	ServiceName    string
 	Systemctl      string
 	Journalctl     string
+	// ServiceBackend 选择用 systemd 还是 procd 管理 dae。
+	// 留空即 auto：存在 /sbin/procd 就用 procd，否则 systemd。
+	ServiceBackend host.Backend
 	DatabasePath   string
 	SchedulePath   string
 	// InstallStatePath 记录面板装了哪个 dae 版本，并存放回滚用的上一版二进制。
@@ -64,6 +71,7 @@ func DefaultConfig() Config {
 		ServiceName:    "dae",
 		Systemctl:      "systemctl",
 		Journalctl:     "journalctl",
+		ServiceBackend: host.BackendAuto,
 		DatabasePath:   "/var/lib/kdae-panel/panel.db",
 		SchedulePath:   "/var/lib/kdae-panel/schedule.json",
 		// 上一版二进制也放在这个前缀下，因此目录必须在 ReadWritePaths 内。
@@ -105,6 +113,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Journalctl == "" {
 		c.Journalctl = defaults.Journalctl
+	}
+	if c.ServiceBackend == "" {
+		c.ServiceBackend = defaults.ServiceBackend
 	}
 	if c.DatabasePath == "" {
 		c.DatabasePath = defaults.DatabasePath

@@ -27,9 +27,13 @@ X-CSRF-Token: <csrfToken>
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/health` | 面板健康状态和版本 |
+| `GET` | `/health` | 面板健康状态、版本与服务后端（`backend` 为 `systemd` 或 `procd`） |
 | `GET` | `/dae/capabilities` | dae 可用性、版本和命令能力 |
 | `GET` | `/dae/outline` | 当前 dae 导出的动态配置结构 |
+
+`backend` 说明面板正在用哪一套接口管理 dae：存在 `/sbin/procd` 时自动选 `procd`，否则 `systemd`；
+可用 `KDAE_PANEL_SERVICE_BACKEND` 强制。后端选错的症状是服务控制全部失败，而那个现场离原因很远，
+因此把结论直接暴露在健康检查里。
 
 ## 配置
 

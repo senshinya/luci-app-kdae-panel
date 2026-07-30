@@ -92,7 +92,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("初始化配置管理器: %w", err)
 	}
 	hostManager, err := host.New(host.Options{
-		Backend:     host.BackendAuto,
+		Backend:     cfg.ServiceBackend,
 		ServiceName: cfg.ServiceName,
 		DaeBinary:   cfg.DaeBinary,
 		Systemctl:   cfg.Systemctl,
@@ -101,6 +101,11 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化主机服务管理器: %w", err)
 	}
+	resolvedBackend, err := cfg.ServiceBackend.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("解析服务后端: %w", err)
+	}
+	logger.Info("已选定服务后端", "backend", string(resolvedBackend))
 	authStore, err := auth.Open(cfg.DatabasePath, cfg.SessionTTL)
 	if err != nil {
 		return nil, fmt.Errorf("初始化认证服务: %w", err)
@@ -159,19 +164,30 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 		dependencies.Geo = manager
 	}
-	updater, err := panelupdate.New(panelupdate.Options{
-		Version:    cfg.Version,
-		BackupPath: cfg.PanelBackupPath,
-		Enabled:    cfg.EnableSelfUpdate,
-		Fetcher:    upstream.NewPanelFetcher(),
-		Service:    hostManager,
-		Logger:     logger,
-	})
-	if err != nil {
-		_ = authStore.Close()
-		return nil, fmt.Errorf("初始化面板自升级: %w", err)
+	// procd 部署由 opkg 管理升级，这里根本不构造自升级能力。
+	//
+	// 不是"默认关"而是"不存在"：PanelFetcher 指向的是上游 tuoro/kdae-panel，
+	// 那里的发布二进制不含 procd 后端。开启后升级一次，面板就会以 root 把自己
+	// 替换成一个只会调 systemctl 的程序，重启即不可用。一个开了就砖的开关，
+	// 靠默认值和文案是拦不住的。新版本检查同理：上游的 tag 与本软件包的版本线
+	// 不是一回事，提示只会误导。
+	if resolvedBackend == host.BackendProcd {
+		cfg.DisableUpdateCheck = true
+	} else {
+		updater, err := panelupdate.New(panelupdate.Options{
+			Version:    cfg.Version,
+			BackupPath: cfg.PanelBackupPath,
+			Enabled:    cfg.EnableSelfUpdate,
+			Fetcher:    upstream.NewPanelFetcher(),
+			Service:    hostManager,
+			Logger:     logger,
+		})
+		if err != nil {
+			_ = authStore.Close()
+			return nil, fmt.Errorf("初始化面板自升级: %w", err)
+		}
+		dependencies.PanelUpdate = updater
 	}
-	dependencies.PanelUpdate = updater
 	application, err := NewWithDependencies(cfg, logger, dependencies)
 	if err != nil {
 		_ = authStore.Close()
@@ -246,9 +262,17 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 		geoScheduleService = runner
 	}
 	router.HandleFunc("GET /api/v1/health", func(writer http.ResponseWriter, request *http.Request) {
+		// 健康检查在这里注册，拿不到 New 里解析好的后端，因此就地再解析一次。
+		// Resolve 只做一次 os.Stat，健康检查的调用频率下开销可忽略；解析失败时
+		// New 早已报错退出，这里的兜底只为不 panic。
+		backend, err := cfg.ServiceBackend.Resolve()
+		if err != nil {
+			backend = cfg.ServiceBackend
+		}
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"status":  "ok",
 			"version": cfg.Version,
+			"backend": string(backend),
 		})
 	})
 	panelRelease := dependencies.PanelRelease
