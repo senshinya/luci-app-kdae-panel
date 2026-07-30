@@ -100,7 +100,10 @@ dae 版本管理（`KDAE_PANEL_ENABLE_DAE_INSTALL`，默认开启）会引入一
 
 - **没有文件系统保护**：不存在 `ProtectSystem=strict` / `ReadWritePaths` 的等价物。面板能写整个
   文件系统，而不是被限制在 `/etc/dae` 与数据目录。上游文档里"把某目录加入 ReadWritePaths"
-  一类的排障步骤在这里不适用，对应的错误提示也已去掉。
+  一类的排障步骤在这里不适用：procd 上没有这个概念，遇到"无法写入某目录"类报错应理解为真实的
+  文件系统权限问题（例如目标分区以只读挂载），而不是需要放宽某个服务单元的写白名单。**如实说明
+  现状**：部分报错文案目前仍沿用 systemd 的措辞、提示往服务单元的 `ReadWritePaths` 里加目录，
+  这是遗留文案，procd 部署下按上面的方式理解即可，不代表面板真的在找一个并不存在的服务单元。
 - **没有能力白名单**：面板持有完整 root 权限，而不是 `CAP_KILL` + `CAP_NET_ADMIN` 两项。
 - **没有 `ProtectHome`**：`/root/.local/share/dae` 对面板可见，geo 缺失提示因此会直说"未找到"。
 - **默认开启的能力更多**：`enable_dae_install` 与 `enable_geo_update` 都默认为 `1`。前者与 systemd
