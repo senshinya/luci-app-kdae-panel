@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+# dae 先于面板启动：面板起来时能直接读到真实状态，少一次"刚装完显示未运行"。
+START=90
+STOP=15
+
+start_service() {
+	config_load kdae-panel
+
+	local dae_binary dae_config
+	config_get dae_binary main dae_binary '/usr/bin/dae'
+	config_get dae_config main dae_config '/etc/dae/config.dae'
+
+	# 二进制由面板的版本管理页安装，全新机器上本来就没有。
+	# 明确说出原因，而不是让 procd 反复重启一个不存在的程序。
+	if [ ! -x "$dae_binary" ]; then
+		echo "dae 尚未安装：请先在 kdae 面板的版本管理页完成安装" >&2
+		return 1
+	fi
+	if [ ! -f "$dae_config" ]; then
+		echo "找不到 dae 配置 $dae_config：请先在面板的配置页写入配置" >&2
+		return 1
+	fi
+	# dae 要 pin eBPF map，bpffs 没挂载时直接启动失败。
+	grep -q ' /sys/fs/bpf bpf ' /proc/mounts || mount -t bpf bpf /sys/fs/bpf 2>/dev/null
+
+	procd_open_instance
+	procd_set_param command "$dae_binary" run -c "$dae_config"
+	# geo 数据与配置同目录：那是 dae 搜索顺序里优先级最高的默认位置，
+	# 也是面板唯一确定可写的目录。
+	procd_set_param env DAE_LOCATION_ASSET="$(dirname "$dae_config")"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param limits nofile="1048576 1048576"
+	procd_close_instance
+}
+
+reload_service() {
+	# dae 支持无损重载。退化成 restart 会断掉所有进行中的连接，
+	# 而 geo 更新与配置保存都会走到这里。
+	local dae_binary
+	config_load kdae-panel
+	config_get dae_binary main dae_binary '/usr/bin/dae'
+	"$dae_binary" reload
+}

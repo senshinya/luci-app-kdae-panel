@@ -1,0 +1,71 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+PANEL_BIN=/usr/bin/kdae-panel
+RUN_DIR=/var/run/kdae-panel
+
+start_service() {
+	config_load kdae-panel
+
+	local enabled listen_addr listen_port data_dir dae_binary dae_config service_name
+	local enable_dae_install enable_geo_update
+	local trusted_proxies session_ttl secure_cookie
+
+	config_get_bool enabled main enabled 1
+	[ "$enabled" = 1 ] || return 0
+
+	config_get listen_addr main listen_addr '0.0.0.0'
+	config_get listen_port main listen_port '2023'
+	config_get data_dir main data_dir '/etc/kdae-panel'
+	config_get dae_binary main dae_binary '/usr/bin/dae'
+	config_get dae_config main dae_config '/etc/dae/config.dae'
+	config_get service_name main service_name 'dae'
+	config_get_bool enable_dae_install main enable_dae_install 1
+	config_get_bool enable_geo_update main enable_geo_update 1
+	config_get trusted_proxies main trusted_proxies '127.0.0.0/8,::1/128'
+	config_get session_ttl main session_ttl '12h'
+	config_get_bool secure_cookie main secure_cookie 0
+
+	# 数据目录在 overlay 上，必须持久；配置里可能有订阅地址与节点凭据，
+	# 因此只给 root 读写。
+	mkdir -p "$data_dir/backups" "$(dirname "$dae_config")"
+	chmod 0700 "$data_dir"
+	# 一次性初始化链接反而应当是易失的：重启后它本就该重新生成。
+	mkdir -p "$RUN_DIR"
+	chmod 0700 "$RUN_DIR"
+
+	procd_open_instance
+	procd_set_param command "$PANEL_BIN" \
+		--listen "$listen_addr:$listen_port" \
+		--dae-binary "$dae_binary" \
+		--dae-config "$dae_config" \
+		--service-name "$service_name" \
+		--database "$data_dir/panel.db" \
+		--backup-dir "$data_dir/backups" \
+		--schedule-file "$data_dir/schedule.json" \
+		--install-state-file "$data_dir/dae-install.json" \
+		--geo-state-file "$data_dir/geo-update.json" \
+		--geo-schedule-file "$data_dir/geo-schedule.json" \
+		--panel-backup-file "$data_dir/kdae-panel.previous" \
+		--setup-url-file "$RUN_DIR/setup-url" \
+		--enable-dae-install="$enable_dae_install" \
+		--enable-geo-update="$enable_geo_update" \
+		--trusted-proxies "$trusted_proxies" \
+		--session-ttl "$session_ttl" \
+		--secure-cookie="$secure_cookie"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "kdae-panel"
+}
+
+reload_service() {
+	restart
+}
