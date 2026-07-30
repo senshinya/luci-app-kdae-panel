@@ -1,0 +1,14 @@
+{
+	"admin/services/kdae-panel": {
+		"title": "kdae 面板",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "kdae-panel/panel"
+		},
+		"depends": {
+			"acl": [ "luci-app-kdae-panel" ],
+			"uci": { "kdae-panel": true }
+		}
+	}
+}

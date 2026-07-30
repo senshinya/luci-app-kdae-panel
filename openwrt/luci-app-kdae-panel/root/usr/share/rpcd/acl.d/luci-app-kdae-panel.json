@@ -1,0 +1,21 @@
+{
+	"luci-app-kdae-panel": {
+		"description": "Grant access to kdae-panel configuration and service control",
+		"read": {
+			"uci": [ "kdae-panel" ],
+			"file": {
+				"/var/run/kdae-panel/setup-url": [ "read" ]
+			},
+			"ubus": {
+				"service": [ "list" ],
+				"luci": [ "getInitList" ]
+			}
+		},
+		"write": {
+			"uci": [ "kdae-panel" ],
+			"ubus": {
+				"luci": [ "setInitAction" ]
+			}
+		}
+	}
+}
