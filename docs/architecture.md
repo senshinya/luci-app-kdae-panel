@@ -10,13 +10,13 @@ kdae-panel
   ├── 认证与会话：SQLite + Argon2id
   ├── 配置事务：临时文件、validate、备份、原子替换、回滚
   ├── dae 适配：固定参数调用公开 CLI
-  ├── 服务管理：systemctl
-  ├── 日志读取：journalctl JSON
+  ├── 服务管理：systemctl（procd 部署下是 ubus + init 脚本，见「服务后端」）
+  ├── 日志读取：journalctl JSON（procd 部署下是 logread，见「服务后端」）
   ├── 网络探测：对节点服务器发起 TCP 握手
   └── 定时重载：按间隔触发 dae reload 以刷新订阅
         │
         ▼
-      dae.service
+      dae.service（procd 部署下是 /etc/init.d/dae）
 ```
 
 面板和 dae 是独立进程。面板不链接 dae 的内部包，不要求修改 dae，也不需要向上游增加 Unix Socket API。
@@ -33,12 +33,48 @@ kdae-panel
 | `dae validate -c` | 使用当前二进制校验候选配置 | 低 |
 | `dae reload` | 应用配置 | 低 |
 | `.dae` 入口配置 | 配置的唯一真实来源 | 中 |
-| systemd 单元 | 生命周期与资源状态 | 低 |
-| journald JSON | 近期日志 | 低 |
+| systemd 单元 / procd init 脚本 | 生命周期与资源状态 | 低 |
+| journald JSON / logread | 近期日志 | 低 |
 
-默认启用的 dae 版本管理还会依赖四个外部契约，它们不属于 dae 本身，风险也更高：GitHub Release 的 `dae-linux-<平台>.zip` 与 `.dgst` 命名（中）、GitHub Actions 接口的 `digest` 字段（中）、`nightly.link` 的重定向服务（高，第三方），以及首次安装依赖的发布包内容——`dae.service` 里的默认路径 `/usr/bin/dae` 与 `/etc/dae/config.dae`，面板靠替换这两个字面量把单元改写到实际路径（中）。
+默认启用的 dae 版本管理还会依赖四个外部契约，它们不属于 dae 本身，风险也更高：GitHub Release 的 `dae-linux-<平台>.zip` 与 `.dgst` 命名（中）、GitHub Actions 接口的 `digest` 字段（中）、`nightly.link` 的重定向服务（高，第三方），以及首次安装依赖的发布包内容——`dae.service` 里的默认路径 `/usr/bin/dae` 与 `/etc/dae/config.dae`，面板靠替换这两个字面量把单元改写到实际路径（中，仅 systemd 部署；procd 部署下这份服务定义由 `kdae-panel` 软件包提供，面板不写它，详见下方「服务后端」）。
 
 不稳定的内部对象、eBPF Map、Go 包、内存布局和普通日志文本均不作为控制契约。
+
+## 服务后端
+
+面板对"如何控制 dae 这个系统服务"的全部认知收在 `internal/host` 包里，对上层只暴露一个
+`Manager` 接口（`Status`、`Action`、`RestartSelf`、`Logs`、`Interfaces`），具体由哪套 init 系统
+实现由本包决定，其余代码不区分。
+
+两套实现分工不同：
+
+- **systemd**（`internal/host/systemd.go`）：`Status` 用 `systemctl show` 解析生命周期、资源与
+  重启计数；`Logs` 用 `journalctl --output json` 取结构化日志。
+- **procd**（`internal/host/procd.go`）：`Status` 用 `ubus call service list` 取运行状态与命令行，
+  用 `<init 脚本> enabled` 的退出码判断开机自启，用 `/proc/<pid>/{status,stat,environ}` 补内存、
+  线程数、CPU 与环境变量；`Logs` 用 `logread -e <name>`，并需要把两种 `logread` 时间戳格式
+  （ubox 带年份、busybox 不带）都解析成本地时间再转 UTC。procd 不暴露重启计数器，`Status` 里的
+  `Restarts` 字段刻意留空（`omitempty`，不填 0——填 0 会被上层的崩溃循环检测误读成"确实没重启
+  过"），前端相应地显示"—"而不是"0"。
+
+后端的选择由 `host.Backend`（`auto` / `systemd` / `procd`）决定：`auto` 探测 `/sbin/procd` 是否
+存在，存在即判为 procd，否则 systemd；可用 `--service-backend` 命令行参数或
+`KDAE_PANEL_SERVICE_BACKEND` 环境变量显式覆盖探测结果。选中的后端会记入启动日志（`已选定服务
+后端`），并由 `GET /api/v1/health` 响应的 `backend` 字段实时暴露，方便在不方便看日志的环境里
+确认当前实际生效的是哪一套。
+
+`daeinstall` 包（dae 版本管理）同样要面对"服务定义"这件事在两套 init 系统上含义不同，抽出了
+`unitProvisioner` 接口封装差异：
+
+- **systemd 下**，服务定义（`dae.service`）由面板从发布包渲染并写入 `/etc/systemd/system`，
+  首次安装时创建，卸载 dae 时删除——它的生命周期与某一次具体的安装/卸载事务绑定。
+- **procd 下**，服务定义（`/etc/init.d/dae`）是 `kdae-panel` 软件包自带的文件，不属于任何一次
+  dae 安装。面板只校验它是否存在、是否是普通文件，从不改写、从不删除；卸载 dae 时也不会动它，
+  这样用户之后仍可以从面板重新安装 dae，而不必重装整个软件包。
+
+两套实现都满足同一个 `unitProvisioner` 接口（`Path`、`WritableDirs`、`RemovablePaths`、
+`VerifyRemovable`、`Detect`、`Plan`、`Commit`），`daeinstall.Installer` 的安装、卸载事务逻辑不
+区分后端，只在构造时按 `host.Backend.Resolve()` 的结果选择其中一个实现。
 
 ## 配置事务
 
@@ -101,7 +137,7 @@ daed 能继续展开并逐个选择订阅内包含的节点，那依赖 dae-wing
 
 替换目标以 `dae.service` 的 `ExecStart` 为准，而不是面板配置里的 `KDAE_PANEL_DAE_BINARY`。两者可能不是同一个文件，若替换了后者，事务会全绿而 dae 仍在跑旧二进制——这种静默的假成功比失败更糟，因此以单元为准，并在两者不一致时明确提示。
 
-安装是一个带回滚的事务：下载并比对 sha256 → 在目标同目录暂存（不能用 `/tmp`，面板单元开了 `PrivateTmp`，跨文件系统改名会失败，而且 `/tmp` 常以 `noexec` 挂载）→ 用新二进制自证能运行并接受当前配置 → 把当前版本备份到暂存位 → 原子替换 → 重启 → 在观察窗口内持续确认 active 且 `NRestarts` 不再增长。任一步失败都恢复备份并重启回去。
+安装是一个带回滚的事务：下载并比对 sha256 → 在目标同目录暂存（不能用 `/tmp`，面板单元开了 `PrivateTmp`，跨文件系统改名会失败，而且 `/tmp` 常以 `noexec` 挂载）→ 用新二进制自证能运行并接受当前配置 → 把当前版本备份到暂存位 → 原子替换 → 重启 → 在观察窗口内持续确认 active，且重启计数不再增长。任一步失败都恢复备份并重启回去。观察窗口同时盯两个信号：systemd 的 `NRestarts`，以及主进程号是否发生变化——后者是为 procd 补的（procd 不暴露重启计数器，`Restarts` 恒为空），但对 systemd 同样生效，两个信号任一触发都判定为观察期内发生过崩溃重启。
 
 下载完成的二进制进入 `/var/lib/kdae-panel/dae-versions/` 本地版本库。每个版本是一个原子提交的自描述文件，元数据与二进制不会出现只写了一半的组合；文件名由来源、版本号和本机 CPU 平台共同做 SHA-256 得到，外部版本字符串从不直接参与路径。列表页只读取有长度边界的元数据，切换时才读完整文件、重新计算 SHA-256 并检查 ELF 文件头。校验失败的缓存会被弃用并重新从上游下载。被替换的当前版本也会进入版本库，但前提是磁盘摘要与面板账本一致——摘要漂移的未知文件不会被冒充成某个已知版本。
 

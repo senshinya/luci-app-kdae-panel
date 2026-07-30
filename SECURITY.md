@@ -25,7 +25,8 @@ dae 版本管理（`KDAE_PANEL_ENABLE_DAE_INSTALL`，默认开启）会引入一
 - 登录失败按可信代理解析后的来源地址限速，限速状态有容量上限和自动清理；
 - 密码哈希操作全局串行，忙时快速拒绝，避免并发 Argon2id 耗尽内存；
 - API 请求体、命令输出和日志条数都有上限；
-- systemd 服务采用能力白名单和文件系统保护；
+- systemd 部署的服务单元采用能力白名单和文件系统保护；**OpenWrt/procd 部署没有等价机制**，
+  面板以完整 root 权限运行，详见下方「OpenWrt 部署的安全差异」；
 - 配置及备份默认使用 0600 权限，数据目录使用 0700；首次安装写入的种子配置同样是 0600。
 - 配置备份最多保留 50 份且总量不超过 256 MiB，防止管理历史耗尽磁盘。
 - 子进程不继承 `KDAE_PANEL_` 前缀的环境变量，初始化凭据不会传给 dae 等外部命令。
@@ -87,9 +88,32 @@ dae 版本管理（`KDAE_PANEL_ENABLE_DAE_INSTALL`，默认开启）会引入一
 - 跨不可信网络访问必须使用 HTTPS 反向代理或 SSH 隧道；
 - HTTPS 部署必须设置 `KDAE_PANEL_SECURE_COOKIE=true`；
 - 反向代理必须保留原始 Host；
-- 不要让非管理员写入 `/etc/kdae-panel`、`/var/lib/kdae-panel`、dae 配置或面板二进制；
+- 不要让非管理员写入 `/etc/kdae-panel`、`/var/lib/kdae-panel`（OpenWrt 上是 `/etc/kdae-panel`）、
+  dae 配置或面板二进制；
 - 定期更新面板、dae、Go 工具链、Node 构建依赖和操作系统；
 - 备份可能包含订阅地址和节点凭据，分享前必须脱敏。
+
+## OpenWrt 部署的安全差异
+
+`luci-app-kdae-panel` 以 ipk 部署在 OpenWrt/ImmortalWrt 上，procd 没有 systemd 那套沙箱原语。
+差异必须说清，而不是让人以为 systemd 单元里的防护到处都在：
+
+- **没有文件系统保护**：不存在 `ProtectSystem=strict` / `ReadWritePaths` 的等价物。面板能写整个
+  文件系统，而不是被限制在 `/etc/dae` 与数据目录。上游文档里"把某目录加入 ReadWritePaths"
+  一类的排障步骤在这里不适用，对应的错误提示也已去掉。
+- **没有能力白名单**：面板持有完整 root 权限，而不是 `CAP_KILL` + `CAP_NET_ADMIN` 两项。
+- **没有 `ProtectHome`**：`/root/.local/share/dae` 对面板可见，geo 缺失提示因此会直说"未找到"。
+- **默认开启的能力更多**：`enable_dae_install` 与 `enable_geo_update` 都默认为 `1`。前者与 systemd
+  发行单元一致；后者上游默认关闭，理由是"给部署新增一条常态化的联网取字节 → 以 root 写系统目录
+  的路径"。这里默认打开是因为 dae 的 geo 数据在本部署中也由面板管理，而 `enable_dae_install=1`
+  已经引入了同一条路径且权限更大——再关掉 geo 只是让用户手工放文件，并不减少攻击面。
+  **但如果你把 `enable_dae_install` 关掉，就该一并把 `enable_geo_update` 关掉**，否则会在一个
+  没有沙箱的环境里单独留下那条路径。
+- **数据目录是 `/etc/kdae-panel` 而非 `/var/lib/kdae-panel`**：OpenWrt 的 `/var` 是内存文件系统。
+  「部署要求」里"不要让非管理员写入"的目录，在这里指 `/etc/kdae-panel` 与 `/etc/config/kdae-panel`。
+
+结论没有变：面板是高权限系统管理服务，只应在可信内网使用，不要把端口暴露到公网。
+但在 OpenWrt 上，"面板缺陷升级为任意代码执行"的门槛比 systemd 部署更低。
 
 ## 已知边界
 

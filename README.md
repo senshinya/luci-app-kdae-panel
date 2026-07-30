@@ -19,7 +19,7 @@
 ## 功能
 
 - 通过 `dae export outline` 动态发现当前版本的配置结构；
-- systemd 服务状态、启动、停止和重启；
+- systemd 与 OpenWrt procd 两套服务后端，自动探测；服务状态、启动、停止和重启；
 - dae 无损重载、暂停和 sysdump 诊断；
 - `global`、节点、订阅、分组与路由的可视化编排：全局设置覆盖 dae 当前公开的字段，实际支持项和默认值由本机二进制的 `export outline` 动态确认，不兼容字段会明确标记；支持分享链接批量导入、订阅与分组过滤条件编辑、逐条路由编辑，以及 GFW/中国列表/全局/MAC 常用路由模板；复杂规则可直接在当前页面编辑对应节原文，注释与未涉及的配置节保持不变；
 - 订阅离线缓存开关（dae 的 `-file` 持久化）、立即刷新与按间隔自动刷新；
@@ -54,6 +54,12 @@ KDAE_PANEL_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.co
 这条命令等于信任本仓库与 GitHub：校验和与发布包同处一个 Release，防传输损坏，防不住发布者本身。不接受这个前提、或网络无法直连 GitHub 时，请手动到 [Releases](https://github.com/tuoro/kdae-panel/releases) 下载对应架构的 `kdae-panel_linux_<arch>.tar.gz` 与 `SHA256SUMS`，用 `sha256sum -c --ignore-missing SHA256SUMS` 核对（清单含全部架构，勿直接整份 `-c`）后运行包内的 `install.sh`——或直接用下面的源码方式。发布包另附构建来源证明，验证方式见 [docs/deployment.md](docs/deployment.md)。
 
 若这台机器上还没有 dae，装好面板后可直接在版本管理页完成 dae 的首次安装。安装完成后的访问方式见下方「首次访问」。
+
+## OpenWrt / ImmortalWrt
+
+immortalwrt 24.10.4（x86/64）上以 ipk 部署，附带 LuCI 入口与配置页。dae 的可执行文件、
+配置与 geo 全部由面板管理，不经 opkg——这样 `opkg upgrade` 不会把你自己的分支构建盖回
+官方版本。详见 [docs/openwrt.md](docs/openwrt.md)。
 
 ## 从源码安装
 
@@ -150,6 +156,7 @@ dae sysdump
 
 - [架构与兼容策略](docs/architecture.md)
 - [安装部署与升级](docs/deployment.md)
+- [OpenWrt / ImmortalWrt 部署](docs/openwrt.md)
 - [HTTP API](docs/api.md)
 - [安全策略](SECURITY.md)
 

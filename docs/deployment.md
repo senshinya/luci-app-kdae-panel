@@ -2,7 +2,9 @@
 
 ## 前置条件
 
-- Linux 与 systemd；
+- Linux，systemd 或 OpenWrt procd（自动探测，可用 `KDAE_PANEL_SERVICE_BACKEND` 强制）；本页的
+  一键部署脚本与源码安装步骤只覆盖 systemd 路径，OpenWrt/ImmortalWrt 上的 ipk 部署见
+  [docs/openwrt.md](openwrt.md)；
 - 已安装并能够通过 `systemctl status dae` 正常运行的 dae——若这台机器上还没有 dae，可直接使用默认开启的版本管理完成首次安装；
 - `/etc/dae/config.dae` 是实际入口配置（首次安装时由面板写入不劫持流量的种子配置）；
 - 构建阶段需要 Go 1.25.12+ 和 Node.js 22+；
@@ -84,9 +86,10 @@ sudo systemctl restart kdae-panel
 | `KDAE_PANEL_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | 可以转发客户端地址和协议的代理 CIDR，逗号分隔 |
 | `KDAE_PANEL_DAE_BINARY` | `/usr/bin/dae` | dae 二进制路径 |
 | `KDAE_PANEL_DAE_CONFIG` | `/etc/dae/config.dae` | dae 入口配置 |
-| `KDAE_PANEL_SERVICE_NAME` | `dae` | systemd 单元名 |
-| `KDAE_PANEL_SYSTEMCTL` | `/usr/bin/systemctl` | systemctl 路径 |
-| `KDAE_PANEL_JOURNALCTL` | `/usr/bin/journalctl` | journalctl 路径 |
+| `KDAE_PANEL_SERVICE_NAME` | `dae` | systemd 单元名（procd 后端下是 init 脚本名） |
+| `KDAE_PANEL_SERVICE_BACKEND` | `auto` | 服务后端：`auto`（存在 `/sbin/procd` 即判为 procd，否则 systemd）、`systemd`、`procd`；也可用 `--service-backend` 命令行参数指定，选中结果会记入启动日志并由 `GET /api/v1/health` 的 `backend` 字段暴露 |
+| `KDAE_PANEL_SYSTEMCTL` | `/usr/bin/systemctl` | systemctl 路径（仅 systemd 后端使用） |
+| `KDAE_PANEL_JOURNALCTL` | `/usr/bin/journalctl` | journalctl 路径（仅 systemd 后端使用） |
 | `KDAE_PANEL_DATABASE` | `/var/lib/kdae-panel/panel.db` | 认证数据库 |
 | `KDAE_PANEL_BACKUP_DIR` | `/var/lib/kdae-panel/backups` | 配置备份目录 |
 | `KDAE_PANEL_SCHEDULE_FILE` | `/var/lib/kdae-panel/schedule.json` | 订阅自动刷新的设置与上次执行时间 |
