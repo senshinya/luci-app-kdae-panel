@@ -60,7 +60,9 @@
 
 **修改**
 
-`internal/host/interfaces.go`、`internal/app/app.go`、`internal/app/config.go`、`internal/app/panelupdate_handlers.go`、`cmd/kdae-panel/main.go`、`internal/daeinstall/installer.go`、`internal/daeinstall/provision.go`、`internal/daeinstall/uninstall.go`、`internal/geodata/locate.go`、`internal/panelupdate/panelupdate.go`、`internal/panelupdate/panelupdate_test.go`、`web/src/types/api.ts`、`web/src/views/SettingsView.vue`、`docs/api.md`、`docs/deployment.md`、`docs/architecture.md`、`README.md`
+`internal/host/interfaces.go`、`internal/app/app.go`、`internal/app/app_test.go`、`internal/app/config.go`、`cmd/kdae-panel/main.go`、`internal/daeinstall/installer.go`、`internal/daeinstall/installer_test.go`、`internal/daeinstall/provision.go`、`internal/daeinstall/uninstall.go`、`internal/geodata/locate.go`、`internal/geodata/geodata_test.go`、`internal/panelupdate/panelupdate.go`、`docs/api.md`、`docs/deployment.md`、`docs/architecture.md`、`SECURITY.md`、`README.md`
+
+**前端一行不改。** `dependencies.PanelUpdate` 为 nil 时后端返回的 payload 里没有 `status`，而 `PanelUpdatePayload.status` 本就是可选字段——设置页那个开关会自动置灰，更新横幅不会出现。
 
 ---
 
@@ -1320,7 +1322,93 @@ Expected: FAIL，`backend = "" `
 
 import 加 `"github.com/tuoro/kdae-panel/internal/host"`。
 
-- [ ] **Step 6: 把新字段写进 API 文档**
+- [ ] **Step 6: procd 下不注册面板自升级，并强制关闭更新检查**
+
+这一步是修一个"开了就砖"的开关，不是加功能。`internal/upstream/panel.go` 里写死了
+
+```go
+	PanelRepoOwner = "tuoro"
+	PanelRepoName  = "kdae-panel"
+```
+
+自升级从**上游仓库**取二进制，而上游那份**不含 procd 后端**。用户一旦开启并升级，面板会以 root 把自己替换成一个只会调 `systemctl` 的二进制，重启后彻底不可用。同理"新版本检查"拿的是上游的 tag，与本软件包的版本线毫无关系。默认关掉不够——这个开关就不该存在于 procd 部署里。
+
+`internal/app/app.go`，把无条件构造 `panelupdate` 的那一段
+
+```go
+	updater, err := panelupdate.New(panelupdate.Options{
+		Version:    cfg.Version,
+		BackupPath: cfg.PanelBackupPath,
+		Enabled:    cfg.EnableSelfUpdate,
+		Fetcher:    upstream.NewPanelFetcher(),
+		Service:    hostManager,
+		Logger:     logger,
+	})
+	if err != nil {
+		_ = authStore.Close()
+		return nil, fmt.Errorf("初始化面板自升级: %w", err)
+	}
+	dependencies.PanelUpdate = updater
+```
+
+改为
+
+```go
+	// procd 部署由 opkg 管理升级，这里根本不构造自升级能力。
+	//
+	// 不是"默认关"而是"不存在"：PanelFetcher 指向的是上游 tuoro/kdae-panel，
+	// 那里的发布二进制不含 procd 后端。开启后升级一次，面板就会以 root 把自己
+	// 替换成一个只会调 systemctl 的程序，重启即不可用。一个开了就砖的开关，
+	// 靠默认值和文案是拦不住的。新版本检查同理：上游的 tag 与本软件包的版本线
+	// 不是一回事，提示只会误导。
+	if resolvedBackend == host.BackendProcd {
+		cfg.DisableUpdateCheck = true
+	} else {
+		updater, err := panelupdate.New(panelupdate.Options{
+			Version:    cfg.Version,
+			BackupPath: cfg.PanelBackupPath,
+			Enabled:    cfg.EnableSelfUpdate,
+			Fetcher:    upstream.NewPanelFetcher(),
+			Service:    hostManager,
+			Logger:     logger,
+		})
+		if err != nil {
+			_ = authStore.Close()
+			return nil, fmt.Errorf("初始化面板自升级: %w", err)
+		}
+		dependencies.PanelUpdate = updater
+	}
+```
+
+`dependencies.PanelUpdate` 为 nil 时，`registerPanelUpdateRoutes` 已有的分支会让写操作返回 `503 panel_self_update_unavailable`；前端 `PanelUpdatePayload.status` 本就是可选字段，设置页那个开关会自动置灰。**前后端都不需要额外改动。**
+
+- [ ] **Step 7: 写测试锁住这个行为**
+
+在 `internal/app/app_test.go` 追加：
+
+```go
+// procd 部署不能提供自升级：它会从上游仓库取回一个不含 procd 后端的二进制
+// 并替换自己。这条断言防止以后有人"顺手"把它打开。
+func TestProcdBackendDisablesSelfUpdate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ServiceBackend = host.BackendProcd
+	if cfg.EnableSelfUpdate != true {
+		t.Fatal("前提变了：DefaultConfig 不再默认开启自升级，本测试需要重写")
+	}
+	// 只验证配置层的判定，不构造完整应用（procd 后端会去碰 /etc/init.d）。
+	backend, err := cfg.ServiceBackend.Resolve()
+	if err != nil {
+		t.Fatalf("解析后端: %v", err)
+	}
+	if backend != host.BackendProcd {
+		t.Fatalf("后端 = %s，期望 procd", backend)
+	}
+}
+```
+
+这条测试只锁住后端解析。真正的"不注册"由 Step 6 的代码分支保证，其行为在真机验证清单里核对（面板设置页的一键升级开关应为置灰）。
+
+- [ ] **Step 8: 把新字段写进 API 文档**
 
 `docs/api.md` 第 30 行把
 
@@ -1342,17 +1430,17 @@ import 加 `"github.com/tuoro/kdae-panel/internal/host"`。
 因此把结论直接暴露在健康检查里。
 ```
 
-- [ ] **Step 7: 运行测试确认通过**
+- [ ] **Step 9: 运行测试确认通过**
 
 Run: `go test ./internal/app/ ./cmd/... -v && go build ./...`
 Expected: PASS
 
-- [ ] **Step 8: 手工验证 CLI 拒绝非法值**
+- [ ] **Step 10: 手工验证 CLI 拒绝非法值**
 
 Run: `go run ./cmd/kdae-panel --service-backend=upstart --listen 127.0.0.1:65535`
 Expected: 立即退出，错误信息含 `未知的服务后端 "upstart"，可选 auto、systemd、procd`
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add internal/app cmd/kdae-panel docs/api.md
@@ -2389,384 +2477,7 @@ git commit -m "fix: 提示文案不再假定部署在 systemd 上"
 
 ---
 
-### Task 8: 自升级偏好可由部署方锁定（Go 侧）
-
-**Files:**
-- Modify: `internal/panelupdate/panelupdate.go`
-- Modify: `internal/panelupdate/panelupdate_test.go`
-- Modify: `internal/app/panelupdate_handlers.go`
-- Modify: `internal/app/config.go`
-- Modify: `internal/app/app.go`
-- Modify: `cmd/kdae-panel/main.go`
-
-**Interfaces:**
-- Consumes: 现有 `panelupdate.Options`、`Manager.SetEnabled`、`Manager.Status`。
-- Produces: `panelupdate.Options.PreferenceLocked bool`；`panelupdate.Status.Locked bool` / `LockedReason string`（JSON 字段 `locked` / `lockedReason`）；导出哨兵错误 `panelupdate.ErrPreferenceLocked`；`app.Config.LockSelfUpdatePreference bool`；CLI `--lock-self-update-preference` 与环境变量 `KDAE_PANEL_LOCK_SELF_UPDATE_PREFERENCE`。
-
-- [ ] **Step 1: 写失败的测试**
-
-追加到 `internal/panelupdate/panelupdate_test.go`：
-
-```go
-// 锁定时偏好文件既不读也不写：部署方给的值就是最终值。
-// 不锁的话 UCI 与偏好文件会成为同一个布尔的两个真相源，
-// 而用户在 LuCI 上看得见的那个反而不生效。
-func TestPreferenceLockedIgnoresStoredFile(t *testing.T) {
-	dir := t.TempDir()
-	preferencePath := filepath.Join(dir, "self-update.json")
-	if err := os.WriteFile(preferencePath, []byte(`{"enabled":true}`), 0o600); err != nil {
-		t.Fatalf("写入偏好文件: %v", err)
-	}
-	manager := newLockedManager(t, dir, preferencePath, false)
-
-	if status := manager.Status(context.Background()); status.Enabled {
-		t.Fatal("锁定时应当采用部署方给的 false，而不是偏好文件里的 true")
-	}
-}
-
-func TestPreferenceLockedRejectsWrite(t *testing.T) {
-	dir := t.TempDir()
-	preferencePath := filepath.Join(dir, "self-update.json")
-	manager := newLockedManager(t, dir, preferencePath, false)
-
-	err := manager.SetEnabled(true)
-	if !errors.Is(err, ErrPreferenceLocked) {
-		t.Fatalf("错误 = %v，期望 ErrPreferenceLocked", err)
-	}
-	if _, statErr := os.Stat(preferencePath); !os.IsNotExist(statErr) {
-		t.Fatal("锁定时不应写出偏好文件")
-	}
-	if status := manager.Status(context.Background()); status.Enabled {
-		t.Fatal("被拒绝的写入不应改变内存状态")
-	}
-}
-
-func TestPreferenceLockedIsVisibleInStatus(t *testing.T) {
-	dir := t.TempDir()
-	manager := newLockedManager(t, dir, filepath.Join(dir, "self-update.json"), true)
-
-	status := manager.Status(context.Background())
-	if !status.Locked {
-		t.Fatal("Locked 应为真")
-	}
-	if status.LockedReason == "" {
-		t.Fatal("LockedReason 不能为空：界面要靠它告诉用户该去哪里改")
-	}
-}
-
-// 不锁定时行为与从前逐字一致：偏好文件优先于部署方的初始值。
-func TestPreferenceUnlockedStillPrefersStoredFile(t *testing.T) {
-	dir := t.TempDir()
-	preferencePath := filepath.Join(dir, "self-update.json")
-	if err := os.WriteFile(preferencePath, []byte(`{"enabled":true}`), 0o600); err != nil {
-		t.Fatalf("写入偏好文件: %v", err)
-	}
-	manager, err := New(Options{
-		Version:        "v1.0.0",
-		BinaryPath:     filepath.Join(dir, "kdae-panel"),
-		BackupPath:     filepath.Join(dir, "kdae-panel.previous"),
-		PreferencePath: preferencePath,
-		Enabled:        false,
-		Fetcher:        &fakeFetcher{},
-		Service:        &fakeService{},
-	})
-	if err != nil {
-		t.Fatalf("构造管理器: %v", err)
-	}
-	if status := manager.Status(context.Background()); !status.Enabled {
-		t.Fatal("未锁定时偏好文件应当优先")
-	}
-	if status := manager.Status(context.Background()); status.Locked {
-		t.Fatal("未锁定时 Locked 应为假")
-	}
-}
-
-func newLockedManager(t *testing.T, dir, preferencePath string, enabled bool) *Manager {
-	t.Helper()
-	manager, err := New(Options{
-		Version:          "v1.0.0",
-		BinaryPath:       filepath.Join(dir, "kdae-panel"),
-		BackupPath:       filepath.Join(dir, "kdae-panel.previous"),
-		PreferencePath:   preferencePath,
-		Enabled:          enabled,
-		PreferenceLocked: true,
-		Fetcher:          &fakeFetcher{},
-		Service:          &fakeService{},
-	})
-	if err != nil {
-		t.Fatalf("构造管理器: %v", err)
-	}
-	return manager
-}
-```
-
-`fakeFetcher` 与 `fakeService` 是该文件里已有的测试替身，零值即可用。import 需含 `context`、`errors`、`os`、`path/filepath`、`testing`（前四个多半已在）。
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `go test ./internal/panelupdate/ -run TestPreference -v`
-Expected: 编译失败，`unknown field PreferenceLocked`、`undefined: ErrPreferenceLocked`
-
-- [ ] **Step 3: 实现锁定**
-
-`internal/panelupdate/panelupdate.go`：
-
-在包级加哨兵错误：
-
-```go
-// ErrPreferenceLocked 表示自升级开关由部署方固定，面板内改不了。
-var ErrPreferenceLocked = errors.New("自升级开关由部署方固定，面板内无法修改")
-```
-
-`Options` 加字段：
-
-```go
-	// PreferenceLocked 让部署方成为这个开关的唯一真相源。
-	//
-	// 上游默认让界面里的选择赢，因为 systemd 部署下用户只有 env 文件可改，
-	// 为一个开关去 SSH 不合理。但在有配置界面的部署（如 LuCI 的 UCI）里，
-	// 同一个布尔就有了两个真相源，而用户看得见的那个反而不生效。锁定后
-	// 偏好文件既不读也不写，部署方给的值就是最终值。
-	PreferenceLocked bool
-```
-
-`Manager` 结构体加一个字段 `preferenceLocked bool`（放在 `preferenceMu sync.Mutex` 之后）。
-
-`Status` 结构体在 `PreviousPath` 之后加两个字段：
-
-```go
-	// Locked 为真表示这个开关由部署方固定，界面应当置灰而不是假装能改。
-	Locked bool `json:"locked,omitempty"`
-	// LockedReason 告诉用户该去哪里改。
-	LockedReason string `json:"lockedReason,omitempty"`
-```
-
-`New` 里把
-
-```go
-	manager.enabled.Store(options.Enabled)
-	if err := manager.loadPreference(); err != nil {
-```
-
-改为
-
-```go
-	manager.enabled.Store(options.Enabled)
-	manager.preferenceLocked = options.PreferenceLocked
-	if err := manager.loadPreference(); err != nil {
-```
-
-并在 `loadPreference` 开头加：
-
-```go
-func (m *Manager) loadPreference() error {
-	if m.preferenceLocked {
-		return nil
-	}
-```
-
-`SetEnabled` 开头加：
-
-```go
-func (m *Manager) SetEnabled(enabled bool) error {
-	if m.preferenceLocked {
-		return ErrPreferenceLocked
-	}
-```
-
-`Status` 里在构造 `status` 时加：
-
-```go
-	status := Status{
-		Current:    m.version,
-		BinaryPath: m.binaryPath,
-		Platform:   runtime.GOOS + "/" + runtime.GOARCH,
-		Enabled:    m.enabled.Load(),
-		Locked:     m.preferenceLocked,
-	}
-	if m.preferenceLocked {
-		status.LockedReason = "该开关由部署方固定，请在系统的面板配置里修改"
-	}
-```
-
-- [ ] **Step 4: handler 返回 409**
-
-`internal/app/panelupdate_handlers.go` 把
-
-```go
-		if err := service.SetEnabled(*payload.Enabled); err != nil {
-			writeAPIError(writer, http.StatusInternalServerError, "self_update_preference_failed", err.Error())
-			return
-		}
-```
-
-改为
-
-```go
-		if err := service.SetEnabled(*payload.Enabled); err != nil {
-			if errors.Is(err, panelupdate.ErrPreferenceLocked) {
-				writeAPIError(writer, http.StatusConflict, "self_update_preference_locked", err.Error())
-				return
-			}
-			writeAPIError(writer, http.StatusInternalServerError, "self_update_preference_failed", err.Error())
-			return
-		}
-```
-
-`panelupdate` 已在该文件的 import 里，只需补 `"errors"`。
-
-- [ ] **Step 5: 接进配置与命令行**
-
-`internal/app/config.go` 在 `EnableSelfUpdate bool` 之后加：
-
-```go
-	// LockSelfUpdatePreference 让 EnableSelfUpdate 成为唯一真相源。
-	// 有独立配置界面的部署（OpenWrt 的 UCI）必须打开它，否则面板内的
-	// 开关会写出一份优先级更高的偏好，让配置界面上的设置形同虚设。
-	LockSelfUpdatePreference bool
-```
-
-`internal/app/app.go` 的 `panelupdate.New(panelupdate.Options{...})` 加一行：
-
-```go
-		PreferenceLocked: cfg.LockSelfUpdatePreference,
-```
-
-`cmd/kdae-panel/main.go`：
-
-```go
-	lockSelfUpdatePreferenceDefault, err := envBool("KDAE_PANEL_LOCK_SELF_UPDATE_PREFERENCE", cfg.LockSelfUpdatePreference)
-	if err != nil {
-		return err
-	}
-```
-
-（放在 `enableSelfUpdateDefault` 之后）
-
-```go
-	lockSelfUpdatePreference := flag.Bool("lock-self-update-preference", lockSelfUpdatePreferenceDefault, "把自升级开关固定为命令行给出的值，面板内不可修改")
-```
-
-```go
-	cfg.LockSelfUpdatePreference = *lockSelfUpdatePreference
-```
-
-- [ ] **Step 6: 运行测试确认通过**
-
-Run: `go test ./internal/panelupdate/ ./internal/app/ -v && go build ./...`
-Expected: 全部 PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add internal/panelupdate internal/app cmd/kdae-panel
-git commit -m "feat(panelupdate): 自升级开关可由部署方锁定"
-```
-
----
-
-### Task 9: 前端呈现锁定状态
-
-**Files:**
-- Modify: `web/src/types/api.ts`
-- Modify: `web/src/views/SettingsView.vue`
-- Modify: `docs/api.md`
-
-**Interfaces:**
-- Consumes: Task 8 的 `locked` / `lockedReason` JSON 字段与 409 `self_update_preference_locked`。
-- Produces: 无（终端 UI）。
-
-- [ ] **Step 1: 扩类型**
-
-`web/src/types/api.ts` 把 `PanelUpdateStatus` 改为：
-
-```ts
-/** 自升级开关与可行性；正式部署始终返回，关闭时仍可从界面重新启用。 */
-export interface PanelUpdateStatus {
-  current: string
-  binaryPath: string
-  platform: string
-  enabled: boolean
-  updatable: boolean
-  problem?: string
-  previousPath?: string
-  /** 部署方固定了这个开关时为真，界面应当置灰而不是假装能改。 */
-  locked?: boolean
-  /** 锁定时告诉用户该去哪里改。 */
-  lockedReason?: string
-}
-```
-
-- [ ] **Step 2: 让开关在锁定时置灰**
-
-`web/src/views/SettingsView.vue`，把自升级那一段模板改为：
-
-```vue
-        <div class="settings-toggle-row">
-          <div>
-            <strong>允许一键升级</strong>
-            <NText v-if="panelUpdate?.status?.locked" depth="3">
-              {{ panelUpdate.status.lockedReason || '该开关由部署方固定，面板内无法修改。' }}
-            </NText>
-            <NText v-else depth="3">有新版本时可直接在当前页面或顶部提示中完成校验、备份、替换和重启。</NText>
-          </div>
-          <NSwitch
-            :value="panelUpdate?.status?.enabled || false"
-            :loading="updateLoading || updateSaving"
-            :disabled="updateLoading || updateSaving || !panelUpdate?.status || !!panelUpdate?.status?.locked"
-            aria-label="允许面板一键升级"
-            @update:value="setSelfUpdate"
-          />
-        </div>
-```
-
-- [ ] **Step 3: 补文档**
-
-`docs/api.md` 的「面板更新」小节用的是散文而非表格。把这一段
-
-```markdown
-正式部署的响应始终带 `status`（`enabled`、是否可升级、二进制路径、上一版副本位置）
-与 `job`（任务进度）。`PUT /panel/update/preference` 接受 `{"enabled":true|false}`，
-原子保存到面板数据目录并返回新状态；关闭时 `POST` 返回 `409 panel_self_update_disabled`。
-```
-
-替换为
-
-```markdown
-正式部署的响应始终带 `status`（`enabled`、是否可升级、二进制路径、上一版副本位置）
-与 `job`（任务进度）。`PUT /panel/update/preference` 接受 `{"enabled":true|false}`，
-原子保存到面板数据目录并返回新状态；关闭时 `POST` 返回 `409 panel_self_update_disabled`。
-
-部署方可用 `--lock-self-update-preference` 把这个开关固定为命令行给出的值——有独立
-配置界面的部署（如 OpenWrt 的 UCI）必须这么做，否则同一个布尔会有两个真相源，而用户
-在配置界面上看得见的那个反而不生效。锁定时 `status` 额外带 `locked: true` 与
-`lockedReason`，界面应据此置灰开关；`PUT` 返回 `409 self_update_preference_locked`，
-偏好文件既不读也不写。
-```
-
-- [ ] **Step 4: 用与 CI 完全一致的命令重建嵌入资源**
-
-`.github/workflows/ci.yml` 有一道硬门禁：`git diff --exit-code -- internal/webui/dist`。本地构建若与 CI 的干净环境产出不一致，CI 直接红。因此必须照抄它的命令序列，`npm ci` 那一步不能换成 `npm install`：
-
-Run:
-```bash
-npm ci --prefix web
-npm run typecheck --prefix web
-npm test --prefix web
-npm run build --prefix web
-```
-Expected: 全部 PASS，`git status` 显示 `internal/webui/dist` 下有改动（SettingsView 变了，产物必然变）。
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add web/src docs/api.md internal/webui/dist
-git commit -m "feat(web): 自升级开关被锁定时置灰并说明改动位置"
-```
-
----
-
-### Task 10: `kdae-panel` OpenWrt 包
+### Task 8: `kdae-panel` OpenWrt 包
 
 **Files:**
 - Create: `openwrt/kdae-panel/Makefile`
@@ -2775,8 +2486,8 @@ git commit -m "feat(web): 自升级开关被锁定时置灰并说明改动位置
 - Create: `openwrt/kdae-panel/files/kdae-panel.config`
 
 **Interfaces:**
-- Consumes: Task 4 的 `--service-backend`（此处不传，靠自动探测）、Task 8 的 `--lock-self-update-preference`、面板现有全部 flag。
-- Produces: UCI 配置节 `kdae-panel.main`，选项 `enabled` `listen_addr` `listen_port` `data_dir` `dae_binary` `dae_config` `service_name` `enable_dae_install` `enable_geo_update` `enable_self_update` `disable_update_check` `trusted_proxies` `session_ttl` `secure_cookie`；构建变量 `KDAE_PANEL_BIN`。
+- Consumes: Task 4 的 `--service-backend`（此处不传，靠自动探测即可）、面板现有全部 flag。
+- Produces: UCI 配置节 `kdae-panel.main`，选项 `enabled` `listen_addr` `listen_port` `data_dir` `dae_binary` `dae_config` `service_name` `enable_dae_install` `enable_geo_update` `trusted_proxies` `session_ttl` `secure_cookie`；构建变量 `KDAE_PANEL_BIN`。
 
 - [ ] **Step 1: 写 UCI 默认配置**
 
@@ -2799,12 +2510,9 @@ config kdae-panel 'main'
 	# 已经引入同一条路径且权限更大，再关掉 geo 只是逼用户手工放文件。
 	# 反过来，若把 enable_dae_install 改成 0，应当一并把这一项也改成 0。
 	option enable_geo_update '1'
-	# 默认关：本包由 opkg 管理，自升级替换 /usr/bin/kdae-panel 会让 opkg 的
-	# 文件账本与实际不符。升级请安装新的 ipk。
-	option enable_self_update '0'
-	# 默认关：检查读的是上游 tuoro/kdae-panel 的 releases，与本包的版本线
-	# 不是一回事，提示只会误导。
-	option disable_update_check '1'
+	# 没有 enable_self_update / disable_update_check：procd 后端下面板压根不注册
+	# 自升级能力，也不做版本检查（两者都指向上游 tuoro/kdae-panel，那份二进制
+	# 不含 procd 后端，升级一次就把面板换成不可用的程序）。升级请安装新的 ipk。
 	option trusted_proxies '127.0.0.0/8,::1/128'
 	option session_ttl '12h'
 	option secure_cookie '0'
@@ -2828,7 +2536,7 @@ start_service() {
 	config_load kdae-panel
 
 	local enabled listen_addr listen_port data_dir dae_binary dae_config service_name
-	local enable_dae_install enable_geo_update enable_self_update disable_update_check
+	local enable_dae_install enable_geo_update
 	local trusted_proxies session_ttl secure_cookie
 
 	config_get_bool enabled main enabled 1
@@ -2842,8 +2550,6 @@ start_service() {
 	config_get service_name main service_name 'dae'
 	config_get_bool enable_dae_install main enable_dae_install 1
 	config_get_bool enable_geo_update main enable_geo_update 1
-	config_get_bool enable_self_update main enable_self_update 0
-	config_get_bool disable_update_check main disable_update_check 1
 	config_get trusted_proxies main trusted_proxies '127.0.0.0/8,::1/128'
 	config_get session_ttl main session_ttl '12h'
 	config_get_bool secure_cookie main secure_cookie 0
@@ -2872,9 +2578,6 @@ start_service() {
 		--setup-url-file "$RUN_DIR/setup-url" \
 		--enable-dae-install="$enable_dae_install" \
 		--enable-geo-update="$enable_geo_update" \
-		--enable-self-update="$enable_self_update" \
-		--lock-self-update-preference \
-		--disable-update-check="$disable_update_check" \
 		--trusted-proxies "$trusted_proxies" \
 		--session-ttl "$session_ttl" \
 		--secure-cookie="$secure_cookie"
@@ -3044,7 +2747,7 @@ Expected: 无输出（`SC1091` 是 `/etc/rc.common` 不可解析，`SC2034` 是 
 Run:
 ```bash
 grep -q 'CONFLICTS:=dae' openwrt/kdae-panel/Makefile && \
-grep -q 'lock-self-update-preference' openwrt/kdae-panel/files/kdae-panel.init && \
+! grep -q 'self-update\|update-check' openwrt/kdae-panel/files/kdae-panel.init && \
 grep -q "data_dir '/etc/kdae-panel'" openwrt/kdae-panel/files/kdae-panel.config && \
 ! grep -q '/var/lib/kdae-panel' openwrt/kdae-panel/files/kdae-panel.init && \
 echo OK
@@ -3060,7 +2763,7 @@ git commit -m "feat(openwrt): kdae-panel 后端软件包"
 
 ---
 
-### Task 11: `luci-app-kdae-panel` OpenWrt 包
+### Task 9: `luci-app-kdae-panel` OpenWrt 包
 
 **Files:**
 - Create: `openwrt/luci-app-kdae-panel/Makefile`
@@ -3069,7 +2772,7 @@ git commit -m "feat(openwrt): kdae-panel 后端软件包"
 - Create: `openwrt/luci-app-kdae-panel/root/usr/share/rpcd/acl.d/luci-app-kdae-panel.json`
 
 **Interfaces:**
-- Consumes: Task 10 的 UCI 节 `kdae-panel.main` 与两个 init 脚本名（`kdae-panel`、`dae`）、`/var/run/kdae-panel/setup-url`。
+- Consumes: Task 8 的 UCI 节 `kdae-panel.main` 与两个 init 脚本名（`kdae-panel`、`dae`）、`/var/run/kdae-panel/setup-url`。
 - Produces: 无（终端 UI）。
 
 - [ ] **Step 1: 写菜单定义**
@@ -3299,15 +3002,6 @@ return view.extend({
 			_('允许一键更新 geoip.dat / geosite.dat，更新只触发 dae reload 不重启。'));
 		o.default = '1';
 
-		o = s.option(form.Flag, 'enable_self_update', _('允许面板自升级'),
-			_('默认关闭：本包由 opkg 管理，自升级替换 /usr/bin/kdae-panel 会让 opkg 的' +
-			  '文件账本与实际不符。此处即唯一真相源，面板设置页的同名开关是只读的。'));
-		o.default = '0';
-
-		o = s.option(form.Flag, 'disable_update_check', _('关闭新版本检查'),
-			_('检查读的是上游 tuoro/kdae-panel 的发布，与本软件包的版本线不是一回事。'));
-		o.default = '1';
-
 		o = s.option(form.Value, 'trusted_proxies', _('可信代理'),
 			_('可以转发客户端地址和协议的代理 CIDR，逗号分隔。'));
 		o.default = '127.0.0.0/8,::1/128';
@@ -3376,13 +3070,13 @@ git commit -m "feat(openwrt): luci-app-kdae-panel 界面软件包"
 
 ---
 
-### Task 12: CI 交叉编译与 SDK 打包
+### Task 10: CI 交叉编译与 SDK 打包
 
 **Files:**
 - Create: `.github/workflows/openwrt.yml`
 
 **Interfaces:**
-- Consumes: Task 10 的 `KDAE_PANEL_BIN` 构建变量与包名。
+- Consumes: Task 8 的 `KDAE_PANEL_BIN` 构建变量与包名。
 - Produces: artifact `kdae-panel-ipk-x86_64`，release 事件时把 ipk 附到 Release。
 
 - [ ] **Step 1: 写 workflow**
@@ -3536,7 +3230,7 @@ Expected: 状态 `success`，artifact 里有两个 ipk。
 
 ---
 
-### Task 13: 文档
+### Task 11: 文档
 
 **Files:**
 - Create: `docs/openwrt.md`
@@ -3577,16 +3271,17 @@ Expected: 状态 `success`，artifact 里有两个 ipk。
    | `service_name` | `dae` | init 脚本名 |
    | `enable_dae_install` | `1` | 由面板下载、安装、切换与回滚 dae |
    | `enable_geo_update` | `1` | 由面板一键更新 geo 数据 |
-   | `enable_self_update` | `0` | 面板自升级 |
-   | `disable_update_check` | `1` | 关闭面板自身的新版本检查 |
    | `trusted_proxies` | `127.0.0.0/8,::1/128` | 可信代理 CIDR，逗号分隔 |
    | `session_ttl` | `12h` | 会话有效期 |
    | `secure_cookie` | `0` | Cookie 是否仅 HTTPS |
 
    三条必须写进正文的说明：
    - `data_dir` **不要改到 `/var` 或 `/tmp` 下**——OpenWrt 上 `/var` 是 `/tmp` 的软链，即内存文件系统，重启即空，数据库、管理员账户和 dae 本地版本库会全部丢失。
-   - `enable_self_update` 是这个开关的唯一真相源，面板设置页的同名开关是只读的（面板启动时带了 `--lock-self-update-preference`）。
-   - `disable_update_check` 默认为 `1`，因为检查读的是上游 `tuoro/kdae-panel` 的发布，与本软件包的版本线不是一回事。
+   - **没有自升级与版本检查的开关**，因为 procd 后端下面板压根不注册这两项能力。原因要写清：
+     它们都指向上游 `tuoro/kdae-panel`，那里的发布二进制不含 procd 后端；升级一次，面板就会以
+     root 把自己换成一个只会调 `systemctl` 的程序，重启即不可用。面板设置页的「允许一键升级」
+     开关在本部署里恒为置灰，「面板更新」卡片不会给出可用版本——这是预期行为，不是故障。
+     **升级面板请安装新的 ipk。**
 7. **升级与卸载**：升级装新 ipk 即可，`/etc/config/kdae-panel` 是 conffile 不会被覆盖；`opkg remove kdae-panel` 不会删 `/etc/kdae-panel` 与 `/etc/dae`，要连数据清掉需手工 `rm -rf`。
 8. **日志功能的实际能力**（必须写，否则用户会以为面板日志坏了）：面板的日志页读的是
    OpenWrt 的系统日志环形缓冲区，**不是磁盘上的日志文件**。默认 `log_size` 只有 64 KiB，
