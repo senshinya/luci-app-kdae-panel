@@ -2,7 +2,9 @@ package geodata
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,13 +16,13 @@ import (
 // Names 是 dae 会查找的两个 geo 数据文件。
 var Names = []string{upstream.GeoIPName, upstream.GeoSiteName}
 
-// SandboxHiddenDir 是搜索顺序里面板永远看不到的那一位。
+// SandboxHiddenDir 是 dae 搜索顺序里面板可能看不到的那一位。
 //
-// dae 以 root 运行时会读 $HOME/.local/share/dae，而面板单元设了 ProtectHome=true，
-// systemd 把 /root 换成一个空且不可访问的目录，面板也没有 CAP_DAC_OVERRIDE 可以绕。
-// 仍然把它列进搜索顺序，是因为 dae 确实读这里；但"面板看不到"不等于"文件不存在"，
-// 为一个少见的 geo 目录把整个 /root 敞开给这个 root 服务不划算。
-const SandboxHiddenDir = "/root/.local/share/dae"
+// dae 以 root 运行时会读 $HOME/.local/share/dae。systemd 单元设了
+// ProtectHome=true 时，/root 被换成一个空且不可访问的目录，面板也没有
+// CAP_DAC_OVERRIDE 可以绕；procd 部署则没有这层遮挡。仍然把它列进搜索顺序，
+// 是因为 dae 确实读这里。做成变量是给测试留的缝。
+var SandboxHiddenDir = "/root/.local/share/dae"
 
 // systemDirs 是 dae 搜索顺序里排在配置目录之后的固定系统目录。
 //
@@ -57,17 +59,31 @@ func SearchPath(configPath string, environment map[string]string) []string {
 // 必须提醒：dae 只在路由规则用到 geosite/geoip 时才读它们，但一旦用到而文件
 // 不在，dae 会直接启动失败，且 dae validate 完全察觉不到——它只读配置文件。
 //
-// 措辞留有余地：SandboxHiddenDir 对面板不可见，文件可能就在那里而 dae 读得好好的，
-// 说死"未找到"会把一个正常运行的系统报成故障。
+// 措辞取决于面板能不能读到 SandboxHiddenDir。读不到时留余地：文件可能就在
+// 那里而 dae 读得好好的，说死"未找到"会把一个正常运行的系统报成故障。
+// 读得到时就该直说——对着 procd 部署的用户念 ProtectHome 只会让人困惑。
 func MissingWarning(searchPath []string) string {
 	for _, file := range locate(searchPath, Names) {
-		if !file.Present {
+		if file.Present {
+			continue
+		}
+		if sandboxHidesHome() {
 			return fmt.Sprintf("在面板可见的目录里未找到 geoip.dat / geosite.dat；"+
-				"%s 受面板单元 ProtectHome=true 限制读不到，文件若在那里 dae 仍能读到。"+
+				"%s 受面板沙箱限制读不到，文件若在那里 dae 仍能读到。"+
 				"确实缺失且路由规则用到 geosite/geoip 时，dae 将无法启动", SandboxHiddenDir)
 		}
+		return "未找到 geoip.dat / geosite.dat；路由规则用到 geosite/geoip 时 dae 将无法启动"
 	}
 	return ""
+}
+
+// sandboxHidesHome 判断 SandboxHiddenDir 是否因为沙箱而对本进程不可见。
+//
+// 判据是读它的上级目录得到权限错误——ProtectHome=true 正是这个症状。
+// 目录不存在不算遮挡：那说明 dae 本来就没在那里放东西。
+func sandboxHidesHome() bool {
+	_, err := os.ReadDir(filepath.Dir(SandboxHiddenDir))
+	return errors.Is(err, fs.ErrPermission)
 }
 
 // searchPath 取回本机当前的搜索顺序。

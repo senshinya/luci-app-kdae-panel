@@ -271,7 +271,7 @@ func (i *Installer) target(ctx context.Context) (string, bool, error) {
 		return "", false, fmt.Errorf("读取 dae 服务状态失败，无法确定要替换哪个文件：%w", err)
 	}
 	if status.ExecStartPath == "" {
-		return "", false, errors.New("dae 尚未作为 systemd 服务安装，面板只能升级或切换已有的 dae")
+		return "", false, errors.New("机器上找不到 dae 的服务定义，面板只能升级或切换已有的 dae")
 	}
 	path, err := filepath.Abs(status.ExecStartPath)
 	if err != nil {

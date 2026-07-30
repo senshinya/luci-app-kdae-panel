@@ -432,6 +432,47 @@ func TestStatusReportsUnwritableTarget(t *testing.T) {
 
 // 两个文件来自同一次发布，只换掉其中一个会让 dae 拿着两个版本的规则集跑，
 // 而这种不一致既不报错也无从察觉。
+// 面板能读到 /root 时，"未找到"就是未找到，不该再拿沙箱当挡箭牌。
+// procd 部署没有 ProtectHome，用户看到含 ProtectHome 的措辞只会困惑。
+func TestMissingWarningIsDirectWhenHomeVisible(t *testing.T) {
+	visible := t.TempDir()
+	previous := SandboxHiddenDir
+	SandboxHiddenDir = filepath.Join(visible, "dae")
+	t.Cleanup(func() { SandboxHiddenDir = previous })
+
+	warning := MissingWarning([]string{t.TempDir()})
+	if warning == "" {
+		t.Fatal("geo 文件缺失时应当给出警告")
+	}
+	for _, forbidden := range []string{"ProtectHome", "systemd", "面板单元"} {
+		if strings.Contains(warning, forbidden) {
+			t.Fatalf("警告 %q 含沙箱措辞 %q", warning, forbidden)
+		}
+	}
+}
+
+// 面板读不到 /root（ProtectHome=true）时必须留有余地：
+// 文件可能就在那里而 dae 读得好好的，说死"未找到"会把正常系统报成故障。
+func TestMissingWarningHedgesWhenHomeHidden(t *testing.T) {
+	hidden := t.TempDir()
+	unreadable := filepath.Join(hidden, "root")
+	if err := os.Mkdir(unreadable, 0o000); err != nil {
+		t.Fatalf("创建不可读目录: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+	if os.Geteuid() == 0 {
+		t.Skip("root 能读任何目录，无法模拟沙箱遮挡")
+	}
+	previous := SandboxHiddenDir
+	SandboxHiddenDir = filepath.Join(unreadable, ".local", "share", "dae")
+	t.Cleanup(func() { SandboxHiddenDir = previous })
+
+	warning := MissingWarning([]string{t.TempDir()})
+	if !strings.Contains(warning, SandboxHiddenDir) {
+		t.Fatalf("警告 %q 应当提到面板看不到的那个目录", warning)
+	}
+}
+
 func TestApplyRejectsEmptyContent(t *testing.T) {
 	manager, fetcher, reloader, directory := newTestManager(t)
 	fetcher.files = map[string][]byte{

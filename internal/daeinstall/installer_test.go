@@ -284,7 +284,7 @@ func TestInstallRefusesWhenServiceHasNoExecStart(t *testing.T) {
 	service.execStart = "" // dae 尚未作为 systemd 服务安装
 
 	_, err := installer.Install(context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2.0.0")
-	if err == nil || !strings.Contains(err.Error(), "尚未作为 systemd 服务安装") {
+	if err == nil || !strings.Contains(err.Error(), "找不到 dae 的服务定义") {
 		t.Fatalf("没有服务时应拒绝安装，得到 %v", err)
 	}
 	if status := installer.Status(context.Background()); status.Ready {

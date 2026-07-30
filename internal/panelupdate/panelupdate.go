@@ -188,7 +188,7 @@ func (m *Manager) Status(context.Context) Status {
 	// 替换靠同目录内的原子改名完成，因此要写的是目录而不是文件本身
 	if err := atomicfile.Writable(filepath.Dir(m.binaryPath)); err != nil {
 		status.Problem = fmt.Sprintf(
-			"面板无法写入 %s：%v；自升级需要在 kdae-panel.service 的 ReadWritePaths 中加入该目录",
+			"面板无法写入 %s：%v（systemd 部署需在服务单元的 ReadWritePaths 中列出该目录）",
 			filepath.Dir(m.binaryPath), err)
 		return status
 	}
