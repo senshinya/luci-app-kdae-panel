@@ -635,6 +635,10 @@ type ubusService struct {
 // 会让 daeinstall 的预检永久卡在"无法确认是否已有 dae"。
 func (m *procdManager) Status(ctx context.Context) (Status, error) {
 	script := m.initScript()
+	// Restarts 刻意不填：procd 不暴露重启计数器，填 0 会让 daeinstall 的
+	// 崩溃循环检测（"计数没涨就算稳"）静默通过。字段带 omitempty，0 不进 JSON，
+	// 仪表盘那一格显示 "—" 而不是 "0"——不知道就该说不知道。
+	// 真正的替代信号是 MainPID 变化，见 daeinstall 的重启后观察窗口。
 	status := Status{
 		Name:        m.serviceName,
 		Description: "procd service " + m.serviceName,
@@ -665,6 +669,7 @@ func (m *procdManager) Status(ctx context.Context) (Status, error) {
 	}
 	if status.MainPID > 0 {
 		status.MemoryBytes = readMemoryBytes(status.MainPID)
+		status.Tasks = readThreadCount(status.MainPID)
 		status.CPUUsageNanoseconds = readCPUNanoseconds(status.MainPID)
 		status.Environment = readProcessEnvironment(status.MainPID)
 	}
@@ -712,23 +717,36 @@ func (m *procdManager) runFor(ctx context.Context, timeout time.Duration, name s
 }
 
 func readMemoryBytes(pid int) uint64 {
-	content, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	value := procStatusField(pid, "VmRSS:")
+	value = strings.TrimSpace(strings.TrimSuffix(value, "kB"))
+	kilobytes, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(content), "\n") {
-		value, found := strings.CutPrefix(line, "VmRSS:")
-		if !found {
-			continue
-		}
-		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "kB"))
-		kilobytes, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
-		if err != nil {
-			return 0
-		}
-		return kilobytes * 1024
+	return kilobytes * 1024
+}
+
+// readThreadCount 供仪表盘的"任务数"格。systemd 那边取自 TasksCurrent，
+// procd 没有等价物，但 /proc/<pid>/status 的 Threads 就是同一个意思。
+func readThreadCount(pid int) uint64 {
+	count, err := strconv.ParseUint(procStatusField(pid, "Threads:"), 10, 64)
+	if err != nil {
+		return 0
 	}
-	return 0
+	return count
+}
+
+func procStatusField(pid int, prefix string) string {
+	content, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if value, found := strings.CutPrefix(line, prefix); found {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func readCPUNanoseconds(pid int) uint64 {
@@ -2079,21 +2097,125 @@ var _ unitProvisioner = (*procdUnits)(nil)
 			ServiceBackend: cfg.ServiceBackend,
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [ ] **Step 6: 写崩溃循环检测的失败测试**
+
+安装新 dae 版本后有一段观察窗口，靠 `status.Restarts` 是否增长来发现"两次采样之间已经崩过一轮又被拉起来"的情况（`installer.go` 的重启后观察循环）。**procd 不暴露重启计数器，这个安全网在 OpenWrt 上完全失效**——新版本在 respawn 循环里反复崩溃，面板会判定安装成功。
+
+等价信号是主进程号：respawn 必然换 pid，pid 变了就等于中间挂过。这对 systemd 同样成立，因此是纯增强而非分支。
+
+给 `internal/daeinstall/installer_test.go` 的 `fakeService` 增加两个字段（紧挨现有的 `restartsGrow` / `restartsAt`）：
+
+```go
+	// pidChurn 为真时每次状态查询都换一个 pid，模拟"两次采样之间服务已经
+	// 崩过一轮又被拉起来"，而 ActiveState 全程 active。procd 不暴露重启
+	// 计数器，这是那边唯一能发现崩溃循环的信号。
+	pidChurn bool
+	pidAt    int
+```
+
+在 `fakeService.Status` 里，参照 `restartsGrow` 的写法填 `MainPID`：
+
+```go
+	if s.pidChurn {
+		s.pidAt++
+	} else if s.pidAt == 0 {
+		s.pidAt = 4321
+	}
+	status.MainPID = s.pidAt
+```
+
+（`status` 是该方法里已有的返回值变量；按文件实际写法接上即可。）
+
+新增测试：
+
+```go
+// procd 不暴露重启计数器，崩溃循环只能靠主进程号变化发现。
+// 没有这一条，respawn 循环里反复崩溃的新版本会被判定为安装成功。
+func TestInstallRejectsPIDChurnDuringHealthWindow(t *testing.T) {
+	service := &fakeService{activeState: "active", pidChurn: true}
+	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
+
+	err := installer.waitHealthy(context.Background())
+	if err == nil {
+		t.Fatal("观察窗口内 pid 变化应当判定为不稳定")
+	}
+	if !strings.Contains(err.Error(), "进程号") {
+		t.Fatalf("错误信息 = %q，应当说明是进程号变化", err.Error())
+	}
+}
+```
+
+`waitHealthy` 是承载重启后观察循环的那个方法；按文件里的实际方法名调用，必要时先把 `i.service.Action(ctx, host.ActionRestart)` 那一步剥离出来以便直接测观察循环。
+
+- [ ] **Step 7: 运行测试确认失败**
+
+Run: `go test ./internal/daeinstall/ -run TestInstallRejectsPIDChurn -v`
+Expected: FAIL，"观察窗口内 pid 变化应当判定为不稳定"
+
+- [ ] **Step 8: 让观察窗口同时盯住进程号**
+
+`internal/daeinstall/installer.go` 的重启后观察循环，把基线与判定都扩到 pid：
+
+```go
+	deadline := time.Now().Add(i.health)
+	var baseline uint64
+	var baselinePID int
+	sampled := false
+	for {
+		select {
+		case <-time.After(i.interval):
+		case <-restartCtx.Done():
+			return restartCtx.Err()
+		}
+		status, err := i.service.Status(restartCtx)
+		if err != nil {
+			return fmt.Errorf("重启后无法读取服务状态: %w", err)
+		}
+		// 崩溃重启循环里 ActiveState 会在 activating/failed 之间跳，
+		// 任何一次不是 active 都判定失败，而不是等到窗口结束再看最后一眼。
+		if status.ActiveState != "active" {
+			return fmt.Errorf("重启后服务状态为 %s/%s", status.ActiveState, status.SubState)
+		}
+		// 只看 ActiveState 会漏掉采样间隔内跑完的崩溃-重启循环：
+		// 两次采样都是 active，中间其实已经挂掉并被重新拉起来过。
+		if !sampled {
+			baseline, baselinePID, sampled = status.Restarts, status.MainPID, true
+			// 第一次采样只建立基线，不能因为调度延迟已经越过 deadline 就直接成功。
+			// 至少再采一次，才能判断观察期间有没有发生崩溃重启。
+			continue
+		}
+		// systemd 的 NRestarts 单调递增，是最直接的证据。
+		if status.Restarts > baseline {
+			return fmt.Errorf("重启后服务在观察窗口内又重启了 %d 次，新版本很可能起不稳",
+				status.Restarts-baseline)
+		}
+		// procd 不暴露重启计数器，NRestarts 恒为 0，上面那条永远不成立。
+		// 但重新拉起必然换主进程号，pid 变了就等于中间挂过一次。
+		if baselinePID != 0 && status.MainPID != 0 && status.MainPID != baselinePID {
+			return fmt.Errorf("重启后服务的主进程号从 %d 变成 %d，说明它在观察窗口内挂掉并被重新拉起，新版本很可能起不稳",
+				baselinePID, status.MainPID)
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+	}
+```
+
+- [ ] **Step 9: 运行测试确认通过**
 
 Run: `go test ./internal/daeinstall/ ./internal/app/ -v`
-Expected: 全部 PASS
+Expected: 全部 PASS，含原有的 `restartsGrow` 用例（systemd 路径的检测不受影响）
 
-- [ ] **Step 7: 全量验证**
+- [ ] **Step 10: 全量验证**
 
 Run: `go build ./... && go test ./... && go vet ./...`
 Expected: 全部 PASS
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add internal/daeinstall internal/app/app.go
-git commit -m "feat(daeinstall): procd 下的服务定义只校验不改写"
+git commit -m "feat(daeinstall): procd 下的服务定义只校验不改写，崩溃循环改盯进程号"
 ```
 
 ---
@@ -3466,7 +3588,20 @@ Expected: 状态 `success`，artifact 里有两个 ipk。
    - `enable_self_update` 是这个开关的唯一真相源，面板设置页的同名开关是只读的（面板启动时带了 `--lock-self-update-preference`）。
    - `disable_update_check` 默认为 `1`，因为检查读的是上游 `tuoro/kdae-panel` 的发布，与本软件包的版本线不是一回事。
 7. **升级与卸载**：升级装新 ipk 即可，`/etc/config/kdae-panel` 是 conffile 不会被覆盖；`opkg remove kdae-panel` 不会删 `/etc/kdae-panel` 与 `/etc/dae`，要连数据清掉需手工 `rm -rf`。
-8. **排障**：
+8. **日志功能的实际能力**（必须写，否则用户会以为面板日志坏了）：面板的日志页读的是
+   OpenWrt 的系统日志环形缓冲区，**不是磁盘上的日志文件**。默认 `log_size` 只有 64 KiB，
+   dae 在 `info` 级别下每条连接都记一行，缓冲区可能只装得下几分钟；重启路由器后全部清空。
+   与 systemd 部署的 journald（可持久化、可按单元精确过滤、可翻很久以前）相比这是实质降级。
+   缓解办法：
+   ```sh
+   uci set system.@system[0].log_size='256'   # 单位 KiB
+   uci commit system
+   /etc/init.d/log restart
+   ```
+   或把 dae 的 `log_level` 调到 `warn` 减少噪声（配置页的 global 段里改）。
+   日志页的搜索框是在已取回的那几百条里做客户端过滤，缓冲区里没有的内容搜不出来。
+
+9. **排障**：
    ```sh
    logread -e kdae-panel
    logread -e dae
@@ -3475,7 +3610,7 @@ Expected: 状态 `success`，artifact 里有两个 ipk。
    curl http://127.0.0.1:2023/api/v1/health   # backend 字段应为 procd
    mount | grep bpf                            # dae 需要 bpffs
    ```
-9. **真机验证清单**（安装后照做一遍）：装 ipk → LuCI 出现菜单 → 启动面板 → 打开一次性链接创建管理员 → 版本管理页首次安装 dae → 配置页写规则 → 启动 dae → 日志页有内容 → geo 更新一次 → 重启路由后面板与 dae 状态正确、管理员仍能登录。
+10. **真机验证清单**（安装后照做一遍）：装 ipk → LuCI 出现菜单 → 启动面板 → 打开一次性链接创建管理员 → 版本管理页首次安装 dae → 配置页写规则 → 启动 dae → 日志页有内容 → geo 更新一次 → 重启路由后面板与 dae 状态正确、管理员仍能登录。
 
 - [ ] **Step 2: 改 `README.md`**
 
