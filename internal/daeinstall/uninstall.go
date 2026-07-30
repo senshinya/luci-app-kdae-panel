@@ -30,7 +30,7 @@ type UninstallOptions struct {
 // Uninstall 删除面板管理的 dae 可执行文件、服务单元与版本账本。
 // 配置和 geo 默认保留，只有 options 显式要求时才进入同一个删除事务。
 func (i *Installer) Uninstall(ctx context.Context, options UninstallOptions) error {
-	status, target, unitPath, err := i.uninstallTarget(ctx)
+	status, target, err := i.uninstallTarget(ctx)
 	if err != nil {
 		return err
 	}
@@ -38,18 +38,21 @@ func (i *Installer) Uninstall(ctx context.Context, options UninstallOptions) err
 	if err != nil {
 		return err
 	}
-	paths := []string{
-		target,
-		unitPath,
+	// required 里的文件必须存在，缺一个就说明状态与账本对不上，宁可中止；
+	// 其余的允许缺失。procd 下服务定义属于软件包而非某次安装，因此
+	// RemovablePaths 为空——卸载 dae 不该删掉 ipk 装的 /etc/init.d/dae。
+	required := append([]string{target}, i.units.RemovablePaths()...)
+	paths := append([]string{}, required...)
+	paths = append(paths,
 		i.statePath,
 		i.previousStatePath(),
 		i.backupPath,
 		i.pendingBackupPath(),
-	}
+	)
 	paths = append(paths, dataPaths...)
 	for index, path := range paths {
 		if _, err := os.Lstat(path); err != nil {
-			if index >= 2 && os.IsNotExist(err) {
+			if index >= len(required) && os.IsNotExist(err) {
 				continue
 			}
 			return fmt.Errorf("检查待删除文件 %s: %w", path, err)
@@ -76,7 +79,7 @@ func (i *Installer) Uninstall(ctx context.Context, options UninstallOptions) err
 
 	removed := make([]removedFile, 0, len(paths))
 	for index, path := range paths {
-		file, err := stageRemoval(path, index >= 2)
+		file, err := stageRemoval(path, index >= len(required))
 		if err != nil {
 			return i.rollbackUninstall(ctx, removed, wasEnabled, wasActive,
 				fmt.Errorf("暂存待删除文件 %s: %w", path, err))
@@ -98,7 +101,7 @@ func (i *Installer) Uninstall(ctx context.Context, options UninstallOptions) err
 			i.logger.Warn("清理 dae 卸载暂存文件失败", "path", file.staged, "error", err)
 		}
 	}
-	i.logger.Info("已卸载 dae", "binary", target, "unit", unitPath,
+	i.logger.Info("已卸载 dae", "binary", target, "unit", i.units.Path(),
 		"purge_config", options.PurgeConfig, "purge_geo", options.PurgeGeo)
 	return nil
 }
@@ -156,71 +159,49 @@ func (i *Installer) uninstallDataPaths(status host.Status, options UninstallOpti
 }
 
 // uninstallTarget 把所有破坏性操作前的安全检查集中在一起。
-func (i *Installer) uninstallTarget(ctx context.Context) (host.Status, string, string, error) {
+func (i *Installer) uninstallTarget(ctx context.Context) (host.Status, string, error) {
 	status, err := i.service.Status(ctx)
 	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("读取 dae 服务状态: %w", err)
+		return host.Status{}, "", fmt.Errorf("读取 dae 服务状态: %w", err)
 	}
-	if status.ExecStartPath == "" || status.UnitPath == "" {
-		return host.Status{}, "", "", errors.New("没有找到可卸载的 dae systemd 服务")
-	}
-	if status.UnitFileState == "enabled-runtime" {
-		return host.Status{}, "", "", errors.New("dae 使用临时启用状态 enabled-runtime，面板无法无损恢复该状态，请先执行 systemctl disable dae")
+	// UnitPath 的校验交给 units：procd 下服务定义归软件包，不该在这里挡路。
+	if status.ExecStartPath == "" {
+		return host.Status{}, "", errors.New("没有找到可卸载的 dae 服务")
 	}
 
 	target, err := filepath.Abs(status.ExecStartPath)
 	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("解析 dae 可执行文件路径: %w", err)
+		return host.Status{}, "", fmt.Errorf("解析 dae 可执行文件路径: %w", err)
 	}
 	if filepath.Base(target) != upstream.BinaryName {
-		return host.Status{}, "", "", fmt.Errorf("服务启动的是 %s，文件名不是 %s，拒绝卸载", target, upstream.BinaryName)
+		return host.Status{}, "", fmt.Errorf("服务启动的是 %s，文件名不是 %s，拒绝卸载", target, upstream.BinaryName)
 	}
 	if err := regularFile(target, "dae 可执行文件"); err != nil {
-		return host.Status{}, "", "", err
+		return host.Status{}, "", err
 	}
 	if err := assertExecutable(target); err != nil {
-		return host.Status{}, "", "", err
+		return host.Status{}, "", err
 	}
 
 	state, err := i.readState()
 	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("读取 dae 安装记录: %w", err)
+		return host.Status{}, "", fmt.Errorf("读取 dae 安装记录: %w", err)
 	}
 	if state == nil || state.SHA256 == "" {
-		return host.Status{}, "", "", errors.New("当前 dae 没有面板安装记录，为避免删除外部安装，已拒绝卸载")
+		return host.Status{}, "", errors.New("当前 dae 没有面板安装记录，为避免删除外部安装，已拒绝卸载")
 	}
 	digest, err := i.fileDigest(target)
 	if err != nil {
-		return host.Status{}, "", "", err
+		return host.Status{}, "", err
 	}
 	if digest != state.SHA256 {
-		return host.Status{}, "", "", errors.New("dae 二进制已在面板之外被替换，为避免删除未知文件，已拒绝卸载")
+		return host.Status{}, "", errors.New("dae 二进制已在面板之外被替换，为避免删除未知文件，已拒绝卸载")
 	}
 
-	unitPath, err := filepath.Abs(status.UnitPath)
-	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("解析 dae 服务单元路径: %w", err)
+	if err := i.units.VerifyRemovable(status, target); err != nil {
+		return host.Status{}, "", err
 	}
-	expectedUnit := filepath.Join(i.unitDirectory(), i.serviceUnit())
-	expectedUnit, err = filepath.Abs(expectedUnit)
-	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("解析面板服务单元路径: %w", err)
-	}
-	if unitPath != expectedUnit {
-		return host.Status{}, "", "", fmt.Errorf(
-			"dae 服务单元位于 %s，不是面板管理的标准路径 %s；请用原安装方式卸载", unitPath, expectedUnit)
-	}
-	if err := regularFile(unitPath, "dae 服务单元"); err != nil {
-		return host.Status{}, "", "", err
-	}
-	unit, err := os.ReadFile(unitPath)
-	if err != nil {
-		return host.Status{}, "", "", fmt.Errorf("读取 dae 服务单元: %w", err)
-	}
-	if exec := execStartBinary(unitExecStart(string(unit))); exec != target {
-		return host.Status{}, "", "", fmt.Errorf("服务单元实际启动 %s，与 systemd 报告的 %s 不一致，拒绝卸载", exec, target)
-	}
-	return status, target, unitPath, nil
+	return status, target, nil
 }
 
 func regularFile(path, description string) error {

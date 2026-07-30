@@ -109,6 +109,8 @@ type Installer struct {
 	cache       *versionCache
 	// unitDir 是 systemd 单元的落地目录，留空即用系统默认，测试会覆盖它。
 	unitDir string
+	// units 抽掉不同 init 系统在"服务定义"上的差异。
+	units unitProvisioner
 	// geoSearchDirs 只供卸载测试把搜索范围收进临时目录；生产环境留空，
 	// 始终使用 dae 的真实 geo 搜索顺序。
 	geoSearchDirs []string
@@ -157,7 +159,7 @@ func New(options Options) (*Installer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Installer{
+	installer := &Installer{
 		binaryPath:  binaryPath,
 		configPath:  options.ConfigPath,
 		statePath:   options.StatePath,
@@ -170,7 +172,9 @@ func New(options Options) (*Installer, error) {
 		logger:      logger,
 		health:      healthWindow,
 		interval:    healthInterval,
-	}, nil
+	}
+	installer.units = &systemdUnits{installer: installer}
+	return installer, nil
 }
 
 // resolveBinaryPath 把配置里的 dae 路径解析成绝对路径。

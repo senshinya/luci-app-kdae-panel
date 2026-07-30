@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
-	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -59,10 +58,10 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	result := Provision{
 		BinaryPath: i.binaryPath,
 		ConfigPath: i.configPath,
-		UnitPath:   filepath.Join(i.unitDirectory(), i.serviceUnit()),
+		UnitPath:   i.units.Path(),
 	}
 	// 状态查不出来，就不能断言"这台机器上没有 dae"。把查询失败当成绿灯，
-	// 会让一次 systemctl 抽风变成一次无备份的覆盖安装。
+	// 会让一次状态查询抽风变成一次无备份的覆盖安装。
 	status, err := i.service.Status(ctx)
 	if err != nil {
 		result.Blockers = append(result.Blockers, fmt.Sprintf(
@@ -70,36 +69,24 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 			i.serviceUnit(), err))
 		return result
 	}
-	if status.ExecStartPath != "" {
-		if _, err := os.Stat(status.ExecStartPath); err == nil {
-			result.Installed = true
-			result.Blockers = append(result.Blockers,
-				fmt.Sprintf("已存在 dae 服务（启动 %s），请使用版本切换而不是首次安装", status.ExecStartPath))
-			return result
-		}
-		// 单元在、可执行文件不在。升级路径会说"目标不存在"，首次安装若也以
-		// "已有服务"为由拒绝，面板就再没有任何办法修好这台机器。只要单元指向的
-		// 正是面板要写的位置，就按首次安装把它补齐。
-		if filepath.Clean(status.ExecStartPath) != i.binaryPath {
-			result.Installed = true
-			result.Blockers = append(result.Blockers, fmt.Sprintf(
-				"服务单元指向的 %s 不存在，而面板配置的 dae 路径是 %s；"+
-					"请把 KDAE_PANEL_DAE_BINARY 改成前者后重试",
-				status.ExecStartPath, i.binaryPath))
-			return result
-		}
-		result.Notes = append(result.Notes, fmt.Sprintf(
-			"服务单元已存在，但它启动的 %s 不见了，本次安装会补齐这个文件", i.binaryPath))
+	detection := i.units.Detect(ctx, status)
+	result.Notes = append(result.Notes, detection.Notes...)
+	if detection.Blocker != "" {
+		result.Installed = detection.Installed
+		result.Blockers = append(result.Blockers, detection.Blocker)
+		return result
 	}
 	if _, err := upstream.DetectPlatform(); err != nil {
 		result.Blockers = append(result.Blockers, err.Error())
 		return result
 	}
 
-	for _, directory := range []string{filepath.Dir(i.binaryPath), filepath.Dir(i.configPath), i.unitDirectory()} {
+	directories := []string{filepath.Dir(i.binaryPath), filepath.Dir(i.configPath)}
+	directories = append(directories, i.units.WritableDirs()...)
+	for _, directory := range directories {
 		if err := atomicfile.Writable(directory); err != nil {
 			result.Blockers = append(result.Blockers, fmt.Sprintf(
-				"面板无法写入 %s：%v；请在 kdae-panel.service 的 ReadWritePaths 中加入该目录",
+				"面板无法写入 %s：%v（systemd 部署需在服务单元的 ReadWritePaths 中列出该目录）",
 				directory, err))
 		}
 	}
@@ -109,10 +96,10 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 		result.Notes = append(result.Notes, fmt.Sprintf(
 			"将写入不劫持任何流量的种子配置 %s，安装后需自行编写规则再启动", i.configPath))
 	}
-	// systemd 里没有 dae 服务，不代表这条路径上没有 dae。
+	// 服务定义里没有 dae，不代表这条路径上没有 dae。
 	if _, err := os.Stat(i.binaryPath); err == nil {
 		result.Notes = append(result.Notes, fmt.Sprintf(
-			"%s 已存在但 systemd 里没有对应的服务；安装会先备份它再替换", i.binaryPath))
+			"%s 已存在但服务定义里没有对应的服务；安装会先备份它再替换", i.binaryPath))
 	}
 	result.Notes = append(result.Notes, "安装完成后不会自动启动 dae：透明代理配置不当会切断你当前的连接")
 	result.Possible = len(result.Blockers) == 0
@@ -147,7 +134,7 @@ func (i *Installer) FirstInstall(ctx context.Context, bundle upstream.Bundle, so
 	}
 	// 单元冲突必须在动任何文件之前查出来。放到最后才查的话，二进制早已换掉，
 	// 而报出来的错只谈单元——留下一台"装了一半、错误信息还答非所问"的机器。
-	unit, unitInPlace, err := i.planUnit(bundle, provision.UnitPath)
+	unit, unitInPlace, err := i.units.Plan(bundle)
 	if err != nil {
 		return Status{}, err
 	}
@@ -178,13 +165,8 @@ func (i *Installer) FirstInstall(ctx context.Context, bundle upstream.Bundle, so
 	}
 	committed = true
 
-	if !unitInPlace {
-		if err := writeFileSynced(provision.UnitPath, []byte(unit), unitMode); err != nil {
-			return Status{}, fmt.Errorf("写入服务单元: %w", err)
-		}
-	}
-	if err := i.service.Action(ctx, host.ActionDaemonReload); err != nil {
-		return Status{}, fmt.Errorf("重新加载 systemd 配置: %w", err)
+	if err := i.units.Commit(ctx, unit, unitInPlace); err != nil {
+		return Status{}, err
 	}
 
 	state := &State{Source: source, Ref: ref, Label: label, SHA256: digestBytes(bundle.Binary)}
@@ -245,41 +227,6 @@ func (i *Installer) writeSeedConfig(bundle upstream.Bundle) error {
 	return nil
 }
 
-// planUnit 渲染出最终要落盘的 systemd 单元，并判定它是否已经就位——但不写盘。
-//
-// 拆成"先算后写"是为了让冲突在事务的最前面暴露：这是唯一一处可能因为机器上
-// 已有用户自建单元而中止的检查，必须赶在二进制被替换之前完成。
-//
-// 已存在的单元一律不覆盖，除非它与本次将要写入的内容逐字节相同——那说明它正是
-// 上一轮安装留下的。少了这个例外，一旦 daemon-reload 失败，重试就会被自己写下
-// 的单元永久挡住：systemd 还不认识它，所以预检仍认为没装，而写入又拒绝覆盖。
-func (i *Installer) planUnit(bundle upstream.Bundle, path string) (string, bool, error) {
-	if len(bundle.Unit) == 0 {
-		return "", false, errors.New("发布包内没有 dae.service，无法创建服务单元")
-	}
-	rendered, err := i.render(string(bundle.Unit))
-	if err != nil {
-		return "", false, err
-	}
-
-	switch existing, err := os.ReadFile(path); {
-	case err == nil && string(existing) == rendered:
-		return rendered, true, nil // 上一轮已经写好，继续往下走
-	case err == nil:
-		// 内容不同，但它启动的已经是面板要装的那个文件——官方安装器写的单元、
-		// 用户自己调过的单元都属于这种。它能把新装的二进制起起来，就没有理由
-		// 为了统一格式去覆盖别人的文件。
-		if execStartBinary(unitExecStart(string(existing))) == i.binaryPath {
-			return string(existing), true, nil
-		}
-		return "", false, fmt.Errorf("%s 已存在且启动的不是 %s，面板不覆盖既有服务单元",
-			path, i.binaryPath)
-	case !os.IsNotExist(err):
-		return "", false, err
-	}
-	return rendered, false, nil
-}
-
 // execStartBinary 取出 ExecStart 命令行里的可执行文件路径。
 // systemd 允许在路径前加 -、@、+、! 之类的修饰前缀，要先剥掉。
 func execStartBinary(execStart string) string {
@@ -325,25 +272,6 @@ func (i *Installer) backupExistingBinary(replacement []byte) error {
 	// 被顶掉的那一版不是面板装的，没有账本；留着更旧的那份只会张冠李戴。
 	_ = os.Remove(i.previousStatePath())
 	return nil
-}
-
-// render 生成最终落盘的单元内容，并确认改写确实生效。
-//
-// 替换靠的是上游单元里那两个字面量默认值。上游若换了默认路径，替换会悄无声息
-// 地不生效，写出一个指向别处的单元——那样 dae 起不来，而错误现场离真正的原因
-// 很远。宁可在这里直接拒绝，把原因说清楚。
-func (i *Installer) render(unit string) (string, error) {
-	rendered := retargetUnit(unit, i.binaryPath, i.configPath)
-	execStart := unitExecStart(rendered)
-	if execStart == "" {
-		return "", errors.New("发布包内的 dae.service 没有 ExecStart，无法安装")
-	}
-	if !strings.HasPrefix(execStart, i.binaryPath+" ") && execStart != i.binaryPath {
-		return "", fmt.Errorf(
-			"发布包内的 dae.service 启动的是 %q，面板无法把它改写为 %s；"+
-				"上游可能变更了默认路径，请手动创建服务单元", execStart, i.binaryPath)
-	}
-	return rendered, nil
 }
 
 // unitExecStart 取出单元里 ExecStart= 的值（忽略 ExecStartPre）。
