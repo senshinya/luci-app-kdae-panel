@@ -36,19 +36,19 @@ jobs:
           ./scripts/feeds install luci-base
           cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
 
-      - name: 两种闸门各跑一次 defconfig
+      - name: 查包为什么进不了 Kconfig
         working-directory: ${{ github.workspace }}/sdk
         run: |
-          diagnose() {
+          show() {
             echo "######## $1"
-            echo "-- .config 里的 arch 符号"
-            grep -E '^CONFIG_(x86_64|i386|aarch64)=' .config || echo "(无)"
-            echo "-- tmp 下 arch 符号的定义处"
-            grep -rnE '^config (x86_64|i386|aarch64)$' tmp/*.in 2>/dev/null || echo "(无)"
-            echo "-- PACKAGE_kdae-panel 的 Kconfig 条目"
-            grep -n -A16 '^config PACKAGE_kdae-panel$' tmp/.config-package.in || echo "(没有这个条目)"
+            echo "-- .packageinfo 里的 kdae-panel 条目"
+            grep -n -A22 '^Package: kdae-panel$' tmp/.packageinfo | head -26 || echo "(扫描结果里没有这个包)"
+            echo "-- .packageinfo 里有没有 ca-bundle"
+            grep -n '^Package: ca-bundle$' tmp/.packageinfo || echo "(没有 ca-bundle)"
+            echo "-- .config-package.in 里出现的 kdae 行"
+            grep -n 'kdae' tmp/.config-package.in | head -12 || echo "(没有 kdae 条目)"
             echo "-- .config 里的选中状态"
-            grep -E '^(CONFIG_PACKAGE_kdae-panel|# CONFIG_PACKAGE_kdae-panel)' .config || echo "(不存在)"
+            grep -E 'PACKAGE_kdae-panel' .config || echo "(不存在)"
           }
           select_pkgs() {
             {
@@ -59,18 +59,12 @@ jobs:
 
           select_pkgs
           make defconfig > /dev/null 2>&1
-          diagnose "闸门 = @(x86_64||aarch64||i386)"
+          show "现状：feeds 只装了 luci-base"
 
-          # 这个 SDK 只带 x86 target，aarch64 在它的 Kconfig 里是个未定义符号。
-          # 去掉它单独试一次，就能把"OR 语法不行"和"表达式里有未定义符号"分开。
-          sed -i 's/@(x86_64||aarch64||i386)/@(x86_64||i386)/' package/kdae/kdae-panel/Makefile
+          # 假设：官方 SDK 的 package/ 里没有 ca-bundle，DEPENDS 里那个 +ca-bundle
+          # 因此指向一个不存在的包，包的 Kconfig 条目被整个丢掉。装上再看。
+          ./scripts/feeds install ca-bundle
           rm -rf tmp
           select_pkgs
           make defconfig > /dev/null 2>&1
-          diagnose "闸门 = @(x86_64||i386)"
-
-          sed -i 's/@(x86_64||i386)/@x86_64/' package/kdae/kdae-panel/Makefile
-          rm -rf tmp
-          select_pkgs
-          make defconfig > /dev/null 2>&1
-          diagnose "闸门 = @x86_64（原来的写法，作为基线）"
+          show "装上 ca-bundle 之后"
