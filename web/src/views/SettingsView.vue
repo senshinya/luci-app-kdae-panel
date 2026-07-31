@@ -152,9 +152,15 @@ function applyPanelUpdateStatus(status: PanelUpdateStatus) {
 // 之前这里只把开关置灰，不说原因——用户看到的是一个坏掉的开关。
 const selfUpdateSupported = computed(() => panelUpdate.value?.status !== undefined)
 const selfUpdateUnsupported = computed(() => panelUpdate.value !== null && !selfUpdateSupported.value)
-// checked 为假表示这个部署根本不检查；此时"立即检查"点了也不会发生任何事。
-const updateCheckSupported = computed(() => panelUpdate.value?.check.checked !== false)
 const upgradeCommand = 'opkg update && opkg install kdae-panel luci-app-kdae-panel'
+
+// 发布页链接只显示 owner/repo。整条 URL 在这个窄列里要折两三行，
+// 而它想回答的问题只有一个：面板在跟哪个仓库比版本。
+const releasesRepo = computed(() => {
+  const url = panelUpdate.value?.check.releasesUrl
+  if (!url) return ''
+  return url.replace(/^https:\/\/github\.com\//, '').replace(/\/releases\/latest$/, '')
+})
 
 async function loadGitHubStatus() {
   try {
@@ -365,7 +371,7 @@ onMounted(() => {
               size="small"
               secondary
               :loading="updateChecking"
-              :disabled="updateLoading || updateChecking || !updateCheckSupported"
+              :disabled="updateLoading || updateChecking"
               @click="checkPanelUpdate"
             >
               <template #icon><NIcon><RefreshOutline /></NIcon></template>立即检查
@@ -394,10 +400,10 @@ onMounted(() => {
             <div><dt>上一版副本</dt><dd class="mono">{{ panelUpdate.status?.previousPath || '尚未生成' }}</dd></div>
           </template>
           <div v-if="panelUpdate.check.releasesUrl">
-            <dt>发布页</dt>
+            <dt>发布来源</dt>
             <dd>
-              <a :href="panelUpdate.check.releasesUrl" target="_blank" rel="noopener">
-                {{ panelUpdate.check.releasesUrl }}
+              <a class="mono" :href="panelUpdate.check.releasesUrl" target="_blank" rel="noopener">
+                {{ releasesRepo }}
               </a>
             </dd>
           </div>
