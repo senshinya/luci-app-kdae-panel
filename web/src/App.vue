@@ -26,6 +26,9 @@ const themeOverrides: GlobalThemeOverrides = {
     primaryColorSuppl: token('--accent'),
     bodyColor: token('--bg-page'),
     cardColor: token('--bg-raised'),
+    // Select 等浮动菜单会传送到页面根节点，不能依赖所在卡片的背景。
+    // 明确指定弹层表面，避免菜单只剩文字、看起来像透明背景。
+    popoverColor: token('--bg-raised'),
     fontFamily: token('--font-sans'),
     fontFamilyMono: token('--font-mono'),
     // 自绘元素（outline 卡片、brand-mark）用的是 6-8px 圆角，

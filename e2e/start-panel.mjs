@@ -36,27 +36,6 @@ writeFileSync(join(work, 'config.dae'), `global {
 node {
 }
 
-dns {
-    ipversion_prefer: 4
-    optimistic_cache: true
-    optimistic_cache_ttl: 60
-    max_cache_size: 65536
-    upstream {
-        alidns: 'udp://223.5.5.5:53'
-        googledns: 'tcp+udp://8.8.8.8:53'
-    }
-    routing {
-        request {
-            qname(geosite:cn) -> alidns
-            fallback: googledns
-        }
-        response {
-            upstream(googledns) -> accept
-            fallback: accept
-        }
-    }
-}
-
 routing {
     fallback: direct
 }

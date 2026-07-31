@@ -22,6 +22,7 @@ import {
 import { APIError, getJSON, postJSON, putJSON } from '../api/client'
 import type { ConfigDocument, ConfigSaveResult } from '../types/api'
 import { readSection } from '../utils/daeconf'
+import { defaultConfiguration, withDefaultDNS } from '../utils/dns'
 import GlobalCard from '../components/orchestration/GlobalCard.vue'
 import DNSCard from '../components/orchestration/DNSCard.vue'
 import NodesCard from '../components/orchestration/NodesCard.vue'
@@ -42,6 +43,7 @@ const content = ref('')
 const originalContent = ref('')
 const validationMessage = ref('')
 const validationError = ref('')
+const dnsDraftAdded = ref(false)
 
 const dirty = computed(() => content.value !== originalContent.value)
 const unparsedLines = computed(
@@ -55,16 +57,19 @@ async function load() {
   loading.value = true
   validationMessage.value = ''
   validationError.value = ''
+  dnsDraftAdded.value = false
   try {
     const loaded = await getJSON<ConfigDocument>('/api/v1/config')
     document.value = loaded
-    content.value = loaded.content
+    content.value = withDefaultDNS(loaded.content)
     originalContent.value = loaded.content
+    dnsDraftAdded.value = content.value !== loaded.content
   } catch (error) {
     if (error instanceof APIError && error.status === 404) {
       document.value = null
-      content.value = ''
+      content.value = defaultConfiguration()
       originalContent.value = ''
+      dnsDraftAdded.value = true
     } else {
       message.error(error instanceof Error ? error.message : '读取配置失败')
     }
@@ -102,6 +107,7 @@ async function save(apply: boolean) {
       apply,
     })
     originalContent.value = submitted
+    dnsDraftAdded.value = false
     document.value = {
       path: document.value?.path || '/etc/dae/config.dae',
       content: submitted,
@@ -176,6 +182,9 @@ onMounted(() => void load())
 
     <NAlert v-if="validationMessage" type="success" closable @close="validationMessage = ''">{{ validationMessage }}</NAlert>
     <NAlert v-if="validationError" type="error" closable @close="validationError = ''"><pre class="error-detail">{{ validationError }}</pre></NAlert>
+    <NAlert v-if="dnsDraftAdded" type="info" :bordered="false">
+      检测到入口配置缺少 dns 节，已把默认 DNS 加入当前编排草稿；尚未写入磁盘，保存后才会生效。
+    </NAlert>
     <NAlert v-if="!loading && !document && !dirty" type="info" :bordered="false">
       入口配置尚不存在。在这里导入节点或添加订阅即可从零生成，保存时会自动创建配置文件。
     </NAlert>

@@ -3,8 +3,10 @@ import { setSectionBody } from './daeconf'
 import {
   buildDNSBody,
   defaultDNSDraft,
+  defaultConfiguration,
   readDNSCapabilities,
   readDNSState,
+  withDefaultDNS,
 } from './dns'
 
 const COMPLETE = `global {}
@@ -76,7 +78,20 @@ describe('DNS 配置解析与生成', () => {
     expect(state.draft.upstreams).toHaveLength(0)
     const draft = defaultDNSDraft()
     expect(draft.upstreams.map((item) => item.name)).toEqual(['alidns', 'googledns'])
+    expect(draft.responseRules).toHaveLength(2)
     expect(buildDNSBody(draft)).toContain('qname(geosite:cn) -> alidns')
+  })
+
+  it('旧配置缺少 DNS 时生成待保存默认草稿，重复处理不追加第二份', () => {
+    const old = 'global {}\n\nrouting {}\n'
+    const migrated = withDefaultDNS(old)
+    expect(migrated).toContain('dns {')
+    expect(readDNSState(migrated).draft.upstreams).toHaveLength(2)
+    expect(withDefaultDNS(migrated)).toBe(migrated)
+
+    const fresh = defaultConfiguration()
+    expect(fresh.indexOf('global {}')).toBeLessThan(fresh.indexOf('dns {'))
+    expect(fresh.indexOf('dns {')).toBeLessThan(fresh.lastIndexOf('routing {}'))
   })
 
   it('注释、未知字段与未知块会降级到进阶模式', () => {

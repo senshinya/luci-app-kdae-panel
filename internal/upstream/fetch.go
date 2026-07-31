@@ -30,18 +30,15 @@ const (
 
 // Bundle 是发布包里首次安装用得上的全部物料。
 //
-// 官方发布包不只有可执行文件,还平铺着 systemd 单元、最小配置与两个 geo 数据
+// 官方发布包不只有可执行文件,还平铺着 systemd 单元与两个 geo 数据
 // 文件。它们全都被同一个 sha256 覆盖,因此首次安装不需要引入任何新的下载源
 // 或信任根——这比另外去取 geo 数据安全得多。
 type Bundle struct {
 	Binary []byte
 	// Unit 是发布包自带的 dae.service,可能不存在。
-	Unit []byte
-	// EmptyConfig 是 empty.dae:`global {} routing {}`。
-	// 它不配置任何网卡,因此 dae 起来后不劫持任何流量,适合做首次安装的种子配置。
-	EmptyConfig []byte
-	GeoIP       []byte
-	GeoSite     []byte
+	Unit    []byte
+	GeoIP   []byte
+	GeoSite []byte
 }
 
 // FetchBundle 下载资产、比对 sha256 并取出其中全部可用物料。
@@ -99,7 +96,6 @@ func extractBundle(payload []byte, nested bool) (Bundle, error) {
 	var binaryEntry *zip.File
 	extras := map[string]*[]byte{
 		"dae.service": &bundle.Unit,
-		"empty.dae":   &bundle.EmptyConfig,
 		"geoip.dat":   &bundle.GeoIP,
 		"geosite.dat": &bundle.GeoSite,
 	}

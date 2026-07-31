@@ -381,7 +381,7 @@ func (i *Installer) geoWarnings(ctx context.Context) []string {
 }
 
 // Acquire 优先读取并重新校验本地版本；requireBundle 为真时仍取完整发布包，
-// 因为首次安装还需要服务单元、种子配置与 geo，而缓存只保留可执行文件。
+// 因为首次安装还需要服务单元与 geo，而缓存只保留可执行文件。
 func (i *Installer) Acquire(ctx context.Context, source upstream.Source, ref, label string,
 	requireBundle bool) (upstream.Bundle, bool, error) {
 	platform, err := upstream.DetectPlatform()

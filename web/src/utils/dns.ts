@@ -9,6 +9,7 @@ import {
   quote,
   readSectionBody,
   scanSections,
+  setSectionBody,
   type Entry,
   type Section,
 } from './daeconf'
@@ -105,6 +106,10 @@ export function defaultDNSDraft(): DNSDraft {
   draft.requestRules = [
     { id: rowID('request'), matcher: 'qname(geosite:cn)', target: 'alidns', fallback: false },
     { id: rowID('request'), matcher: '', target: 'googledns', fallback: true },
+  ]
+  draft.responseRules = [
+    { id: rowID('response'), matcher: 'upstream(googledns)', target: 'accept', fallback: false },
+    { id: rowID('response'), matcher: '', target: 'accept', fallback: true },
   ]
   return draft
 }
@@ -479,4 +484,22 @@ export function buildDNSBody(draft: DNSDraft): string {
 export function configuredUnsupported(state: DNSState, capabilities: DNSCapabilities | null): string[] {
   if (!capabilities) return []
   return DNS_FIELDS.filter((field) => state.configured.has(field) && !capabilities.supported.has(field))
+}
+
+/** 给旧版生成的配置补一份待保存的默认 DNS；已有 dns 节时逐字节保持原样。 */
+export function withDefaultDNS(text: string): string {
+  if (findSection(text, 'dns')) return text
+  return setSectionBody(text, 'dns', buildDNSBody(defaultDNSDraft()))
+}
+
+/** 配置文件尚不存在时，配置管理页展示的完整初始草稿。 */
+export function defaultConfiguration(): string {
+  return `global {}
+
+dns {
+${buildDNSBody(defaultDNSDraft())}
+}
+
+routing {}
+`
 }

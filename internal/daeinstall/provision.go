@@ -14,12 +14,32 @@ import (
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
-// SeedConfig 是首次安装时写入的种子配置，与官方发布包内的 empty.dae 一致。
+// SeedConfig 是首次安装时写入的种子配置。
 //
-// 它不声明任何网卡，因此 dae 起来后不劫持任何流量。这一点对首次安装至关重要：
+// 它带一套可直接编辑的默认 DNS，但不声明任何网卡，因此 dae 起来后不劫持任何
+// 流量。这一点对首次安装至关重要：
 // dae 是透明代理，在一台你正通过 SSH 或反向代理访问的机器上，配置不当地启动
 // 会直接切断你自己的连接。装好之后由用户在配置页写真正的规则，再手动启动。
-const SeedConfig = "global {} routing {}"
+const SeedConfig = `global {}
+
+dns {
+  upstream {
+    alidns: 'udp://223.5.5.5:53'
+    googledns: 'tcp+udp://8.8.8.8:53'
+  }
+  routing {
+    request {
+      qname(geosite:cn) -> alidns
+      fallback: googledns
+    }
+    response {
+      upstream(googledns) -> accept
+      fallback: accept
+    }
+  }
+}
+
+routing {}`
 
 const (
 	defaultUnitDirectory = "/etc/systemd/system"
@@ -164,7 +184,7 @@ func (i *Installer) FirstInstall(ctx context.Context, bundle upstream.Bundle, so
 	if err := i.writeGeoAssets(bundle); err != nil {
 		return Status{}, err
 	}
-	if err := i.writeSeedConfig(bundle); err != nil {
+	if err := i.writeSeedConfig(); err != nil {
 		return Status{}, err
 	}
 	staged, cleanup, err := i.stage(bundle.Binary, i.binaryPath, binaryMode)
@@ -230,17 +250,13 @@ func (i *Installer) writeGeoAssets(bundle upstream.Bundle) error {
 	return nil
 }
 
-func (i *Installer) writeSeedConfig(bundle upstream.Bundle) error {
+func (i *Installer) writeSeedConfig() error {
 	if _, err := os.Stat(i.configPath); err == nil {
 		return nil // 已有配置，绝不覆盖
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	seed := bundle.EmptyConfig
-	if len(strings.TrimSpace(string(seed))) == 0 {
-		// kdae 的构建不带 empty.dae，用内置的同等内容兜底。
-		seed = []byte(SeedConfig + "\n")
-	}
+	seed := []byte(SeedConfig + "\n")
 	if err := writeFileSynced(i.configPath, seed, configMode); err != nil {
 		return fmt.Errorf("写入种子配置: %w", err)
 	}

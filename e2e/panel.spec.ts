@@ -147,6 +147,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
       ]),
     }))
     await page.goto('/proxy')
+    await expect(page.getByText('检测到入口配置缺少 dns 节')).toBeVisible()
     await expectCardsAligned(page.locator('.equal-height-grid .panel-card'))
     for (const [toolbar, content] of [
       ['subscription-add', 'subscription-list'],
@@ -193,6 +194,13 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const dnsSimpleTab = dnsModal.locator('.n-tabs-tab', { hasText: '简单模式' })
     const dnsAdvancedTab = dnsModal.locator('.n-tabs-tab', { hasText: '进阶模式' })
     await expect(dnsSimpleTab).toHaveClass(/n-tabs-tab--active/)
+    const ipPreferenceSelect = dnsModal.locator('.dns-settings-grid label', { hasText: 'IP 版本偏好' }).locator('.n-base-selection')
+    await ipPreferenceSelect.click()
+    const dnsSelectMenu = page.locator('.n-base-select-menu:visible')
+    await expect(dnsSelectMenu).toBeVisible()
+    await expect.poll(() => dnsSelectMenu.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .toBe('rgb(23, 26, 29)')
+    await clickVisibleOption(page, '跟随请求（默认）')
     const simpleUpstream = dnsModal.getByTestId('dns-upstreams-editor').getByLabel('上游地址').first().locator('input')
     await simpleUpstream.fill('udp://1.1.1.1:53')
     await dnsAdvancedTab.click()

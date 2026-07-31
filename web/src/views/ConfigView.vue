@@ -17,6 +17,7 @@ import {
 import { CheckmarkCircleOutline, CloudUploadOutline, RefreshOutline, SaveOutline } from '@vicons/ionicons5'
 import { APIError, getJSON, postJSON, putJSON } from '../api/client'
 import type { ConfigDocument, ConfigSaveResult } from '../types/api'
+import { defaultConfiguration, withDefaultDNS } from '../utils/dns'
 import { formatBytes, formatDateTime, shortHash } from '../utils/format'
 
 const message = useMessage()
@@ -29,6 +30,7 @@ const originalContent = ref('')
 const document = ref<ConfigDocument | null>(null)
 const validationMessage = ref('')
 const validationError = ref('')
+const dnsDraftAdded = ref(false)
 
 const dirty = computed(() => content.value !== originalContent.value)
 
@@ -36,17 +38,20 @@ async function load() {
   loading.value = true
   validationMessage.value = ''
   validationError.value = ''
+  dnsDraftAdded.value = false
   try {
     const loaded = await getJSON<ConfigDocument>('/api/v1/config')
     document.value = loaded
-    content.value = loaded.content
+    content.value = withDefaultDNS(loaded.content)
     originalContent.value = loaded.content
+    dnsDraftAdded.value = content.value !== loaded.content
   } catch (error) {
     if (error instanceof APIError && error.status === 404) {
       document.value = null
-      content.value = ''
+      content.value = defaultConfiguration()
       originalContent.value = ''
-      message.info('入口配置尚不存在，可以在这里创建')
+      dnsDraftAdded.value = true
+      message.info('入口配置尚不存在，已载入包含默认 DNS 的初始草稿')
     } else {
       message.error(error instanceof Error ? error.message : '读取配置失败')
     }
@@ -86,6 +91,7 @@ async function save(apply: boolean) {
       apply,
     })
     originalContent.value = submitted
+    dnsDraftAdded.value = false
     document.value = {
       path: document.value?.path || '/etc/dae/config.dae',
       content: submitted,
@@ -163,6 +169,9 @@ onMounted(() => void load())
 
     <NAlert v-if="validationMessage" type="success" closable @close="validationMessage = ''">{{ validationMessage }}</NAlert>
     <NAlert v-if="validationError" type="error" closable @close="validationError = ''"><pre>{{ validationError }}</pre></NAlert>
+    <NAlert v-if="dnsDraftAdded" type="info" :bordered="false">
+      检测到入口配置缺少 dns 节，已把默认 DNS 加入当前编辑草稿；尚未写入磁盘，保存后才会生效。
+    </NAlert>
 
     <NCard class="editor-card" content-style="padding: 0;">
       <div class="editor-meta">
