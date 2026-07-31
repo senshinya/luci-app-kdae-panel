@@ -100,7 +100,7 @@ X-CSRF-Token: <csrfToken>
 
 机器上还没有 dae 时，`GET /dae/install` 的响应会附带 `provision` 字段，说明首次安装是否可行、将要写入哪些路径、以及缺少哪些可写目录。此时提交安装会走首次安装：除可执行文件外还写入 geo 数据与种子配置。systemd 后端下还会写入 `dae.service` 单元并执行 `daemon-reload`；procd 后端下服务定义由 ipk 软件包自带的 `/etc/init.d/<name>` 提供，面板只校验它存在，不写入也不重新加载。安装完成后**不会启动服务**。
 
-任务进行中（`downloading`/`applying`）的响应**不含** `provision`：该字段要靠实际试写目标目录才能算出来，而界面每两秒轮询一次，其中一个探测目标正是 systemd 在 inotify 监视的单元目录。客户端应沿用上一次拿到的值，而不是当作"首次安装已不可行"。
+任务进行中（`downloading`/`applying`）的响应**不含** `provision`：该字段要靠实际试写目标目录才能算出来，而界面每两秒轮询一次——systemd 后端下，其中一个探测目标正是 systemd 在 inotify 监视的单元目录，反复试写并不是没有代价。客户端应沿用上一次拿到的值，而不是当作"首次安装已不可行"。
 
 安装、回滚与卸载都立即返回 `202` 与任务快照，由客户端轮询 `GET /dae/install` 获取进度。安装任务依次经过 `downloading`、`applying`；命中本地版本时仍从 `downloading` 开始，但任务会带 `cached: true` 并很快进入替换阶段。回滚与卸载直接进入 `applying`，终态均为 `done` 或 `failed`。同一时刻只允许一个版本管理任务，重复提交返回 `409 install_in_progress`。
 
@@ -169,6 +169,18 @@ dae 只在重载时重新拉取 `subscription` 链接，因此"订阅定时刷�
 订阅内容本身的缓存由 dae 负责：把链接的 scheme 写成带 `-file` 后缀的形式（如 `https-file://`），dae 会将拉取成功的内容保存到 `config_dir/persist.d/<tag>.sub`，并在后续拉取失败时回退使用。面板只负责在配置里维护这一行，不自行下载或缓存订阅内容。
 
 ## 面板自身更新
+
+procd 部署没有这项能力：`internal/app/app.go` 探测到 procd 后端时既不构造自升级管理器，
+也不发起面板自身的新版本检查——不是默认关闭，而是根本不存在。理由：上游发布的面板二进制不含
+procd 后端，升级一次就会把自己换成一个只会调用 systemctl 的程序，重启即不可用；面板的版本线
+也和上游 tag 不是一回事，检查只会给出误导性的提示。procd 部署走 `opkg upgrade` 升级。
+
+procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /panel/update/check` 只返回
+`check`（`current`、`checkedAt`；不发起联网检查，`latest` 缺失，`updateAvailable` 恒为
+`false`），不含 `status`、不含 `job`；`PUT /panel/update/preference`、`POST /panel/update`
+恒返回 `503 panel_self_update_unavailable`（"当前部署不支持面板自升级"）。
+
+以下响应结构与升级机制的说明仅适用于 systemd 后端：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
