@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -138,7 +139,22 @@ func (c *Client) Validate(ctx context.Context, configPath string) error {
 }
 
 func (c *Client) Reload(ctx context.Context) error {
-	result, err := c.runFor(ctx, max(c.timeout, reloadTimeout), "reload")
+	return c.reload(ctx)
+}
+
+// ReloadPID 使用 systemd 记录的主进程 PID 请求重载。
+//
+// dae 与 kdae 都支持 `dae reload [pid]`。显式传入 PID 可以避免依赖
+// /var/run/dae.pid；服务由 systemd 管理时，MainPID 才是进程身份的权威来源。
+func (c *Client) ReloadPID(ctx context.Context, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("dae 重载 PID 无效: %d", pid)
+	}
+	return c.reload(ctx, strconv.Itoa(pid))
+}
+
+func (c *Client) reload(ctx context.Context, args ...string) error {
+	result, err := c.runFor(ctx, max(c.timeout, reloadTimeout), append([]string{"reload"}, args...)...)
 	if err != nil {
 		return fmt.Errorf("dae 重载失败: %s", command.Describe(err, result))
 	}

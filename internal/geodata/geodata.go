@@ -4,9 +4,9 @@
 // 可执行文件也不碰 systemd 单元，因此不具备"面板缺陷升级为任意代码执行"的
 // 性质，不该逼着用户为了刷新 geo 而放宽二进制目录的写权限。
 //
-// 更新只需 dae reload，不必 restart：reload 会重建控制平面并重新编译路由规则，
-// 从而重读 geo 文件。这与替换二进制必须 restart（要重挂 eBPF）不同，
-// 因此更新 geo 不会中断现有连接。
+// dae 运行时只需 reload，不必 restart：reload 会重建控制平面并重新编译路由规则，
+// 从而重读 geo 文件；dae 未运行时则只需落盘，下次启动会直接读取。这与替换二进制
+// 必须 restart（要重挂 eBPF）不同。
 package geodata
 
 import (
@@ -32,15 +32,33 @@ type Fetcher interface {
 	Fetch(ctx context.Context, release upstream.GeoRelease) (upstream.GeoData, error)
 }
 
+// SourceEditor 是 Fetcher 可选实现的自定义来源维护能力。
+type SourceEditor interface {
+	CustomSources() []upstream.CustomGeoSource
+	CreateCustomSource(source upstream.CustomGeoSource) (upstream.CustomGeoSource, error)
+	UpdateCustomSource(id string, source upstream.CustomGeoSource) (upstream.CustomGeoSource, error)
+	DeleteCustomSource(id string) error
+}
+
 // ServiceController 读取 dae 服务状态，用于发现 DAE_LOCATION_ASSET。
 type ServiceController interface {
 	Status(ctx context.Context) (host.Status, error)
 }
 
-// Reloader 让 dae 重新读取 geo 数据。
+// Reloader 让 dae 重新读取 geo 数据。显式 PID 用于 systemd 管理的运行中服务；
+// 无参数形式仅在无法取得服务状态的兼容场景使用。
 type Reloader interface {
 	Reload(ctx context.Context) error
+	ReloadPID(ctx context.Context, pid int) error
 }
+
+type ServiceState string
+
+const (
+	ServiceStateActive   ServiceState = "active"
+	ServiceStateInactive ServiceState = "inactive"
+	ServiceStateUnknown  ServiceState = "unknown"
+)
 
 // File 是一个 geo 数据文件的现状。
 type File struct {
@@ -72,6 +90,8 @@ type Status struct {
 	// Managed 记录面板上次更新到哪一版。
 	Managed  *State   `json:"managed,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// ServiceState 决定更新后是立即 reload，还是等 dae 下次启动时读取。
+	ServiceState ServiceState `json:"serviceState"`
 }
 
 // State 记录面板上次把 geo 更新到了哪一版。
@@ -137,4 +157,44 @@ func New(options Options) (*Manager, error) {
 		logger:     logger,
 		backend:    backend,
 	}, nil
+}
+
+func (m *Manager) sourceEditor() (SourceEditor, error) {
+	editor, ok := m.fetcher.(SourceEditor)
+	if !ok {
+		return nil, errors.New("当前 geo 取回器不支持自定义来源")
+	}
+	return editor, nil
+}
+
+func (m *Manager) CustomSources() []upstream.CustomGeoSource {
+	editor, err := m.sourceEditor()
+	if err != nil {
+		return nil
+	}
+	return editor.CustomSources()
+}
+
+func (m *Manager) CreateCustomSource(source upstream.CustomGeoSource) (upstream.CustomGeoSource, error) {
+	editor, err := m.sourceEditor()
+	if err != nil {
+		return upstream.CustomGeoSource{}, err
+	}
+	return editor.CreateCustomSource(source)
+}
+
+func (m *Manager) UpdateCustomSource(id string, source upstream.CustomGeoSource) (upstream.CustomGeoSource, error) {
+	editor, err := m.sourceEditor()
+	if err != nil {
+		return upstream.CustomGeoSource{}, err
+	}
+	return editor.UpdateCustomSource(id, source)
+}
+
+func (m *Manager) DeleteCustomSource(id string) error {
+	editor, err := m.sourceEditor()
+	if err != nil {
+		return err
+	}
+	return editor.DeleteCustomSource(id)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,10 +20,17 @@ type KdaeProvider struct {
 	repo     string
 	branch   string
 	workflow string
+	now      func() time.Time
+
+	cacheMu      sync.RWMutex
+	verifiedRuns map[string]time.Time
 }
 
 func NewKdaeProvider(client *httpClient, owner, repo, branch, workflow string) *KdaeProvider {
-	return &KdaeProvider{client: client, owner: owner, repo: repo, branch: branch, workflow: workflow}
+	return &KdaeProvider{
+		client: client, owner: owner, repo: repo, branch: branch, workflow: workflow,
+		now: time.Now, verifiedRuns: make(map[string]time.Time),
+	}
 }
 
 func (p *KdaeProvider) Source() Source {
@@ -105,13 +113,15 @@ func (p *KdaeProvider) List(ctx context.Context, limit int) ([]Version, error) {
 		if !p.trustworthy(run) {
 			continue
 		}
+		ref := strconv.FormatInt(run.ID, 10)
+		p.rememberVerifiedRun(ref)
 		// 产物保留 90 天,过期后无法下载。这里按创建时间推算,
 		// 精确的过期时间在 Resolve 时以 API 返回的 expires_at 为准。
 		expiresAt := run.CreatedAt.Add(90 * 24 * time.Hour)
 		expired := now.After(expiresAt)
 		version := Version{
 			Source:      SourceKdae,
-			Ref:         strconv.FormatInt(run.ID, 10),
+			Ref:         ref,
 			Label:       shortSHA(run.HeadSHA),
 			Description: firstLine(run.HeadCommit.Message),
 			PublishedAt: run.CreatedAt,
@@ -172,6 +182,9 @@ func (p *KdaeProvider) Resolve(ctx context.Context, ref string, platform Platfor
 
 // verifyRun 单独取回该构建并核对它确实产自本仓库自己的分支。
 func (p *KdaeProvider) verifyRun(ctx context.Context, ref string) error {
+	if p.runRecentlyVerified(ref) {
+		return nil
+	}
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%s", p.owner, p.repo, ref)
 	var run workflowRun
 	if err := p.client.getJSON(ctx, endpoint, &run); err != nil {
@@ -180,7 +193,23 @@ func (p *KdaeProvider) verifyRun(ctx context.Context, ref string) error {
 	if !p.trustworthy(run) {
 		return fmt.Errorf("构建 %s 不是 %s/%s 的 %s 分支产物，拒绝安装", ref, p.owner, p.repo, p.branch)
 	}
+	p.rememberVerifiedRun(ref)
 	return nil
+}
+
+// List 已逐项完成了与 Resolve 相同的来源核对。短期记住结论可省去用户点击安装时
+// 对同一个 run 的重复 API 请求；任意外部传入且没在清单出现过的编号仍会重新核验。
+func (p *KdaeProvider) rememberVerifiedRun(ref string) {
+	p.cacheMu.Lock()
+	p.verifiedRuns[ref] = p.now().Add(jsonCacheTTL)
+	p.cacheMu.Unlock()
+}
+
+func (p *KdaeProvider) runRecentlyVerified(ref string) bool {
+	p.cacheMu.RLock()
+	expiresAt, ok := p.verifiedRuns[ref]
+	p.cacheMu.RUnlock()
+	return ok && p.now().Before(expiresAt)
 }
 
 // parseArtifactDigest 解析 "sha256:<64 位十六进制>"。

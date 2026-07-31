@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
+	"github.com/tuoro/kdae-panel/internal/daediag"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -32,8 +33,9 @@ func (m *Manager) Download(ctx context.Context, source upstream.GeoSource) (upst
 // Apply 把已下载的 geo 数据装上去，并让 dae 重新读取。
 // 调用方应在持有全局控制锁时调用它。
 //
-// 事务顺序：暂存新文件 → 把旧文件改名留作回滚点 → 原子替换 → reload
-// → 成功则删掉回滚点，失败则把旧文件放回去并再 reload 一次。
+// 事务顺序：暂存新文件 → 把旧文件改名留作回滚点 → 原子替换 → 运行中的
+// dae 使用 systemd MainPID reload → 成功则删掉回滚点，失败则把旧文件放回去
+// 并再 reload 一次。dae 未运行时不需要 reload，下次启动会直接读取新文件。
 //
 // 之所以必须能回滚：dae validate 察觉不到 geo 的问题，一份语义不兼容或损坏的
 // geo 会让 reload 失败，而 dae 不运行时流量就不再被透明代理接管——这属于
@@ -46,6 +48,7 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 	if len(data.Files) == 0 {
 		return Status{}, errors.New("没有可写入的 geo 数据")
 	}
+	service := m.inspectService(ctx)
 
 	transaction := &geoTransaction{directory: status.TargetDir}
 	defer transaction.cleanup()
@@ -62,16 +65,25 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 		return Status{}, err
 	}
 
-	if err := m.reloader.Reload(ctx); err != nil {
+	reloaded, err := m.reload(ctx, service)
+	if err != nil {
+		err = daediag.ExplainGeoError(err)
 		// 换上去 dae 不认，退回原样并让它重新读回旧数据。
 		restoreErr := transaction.rollback()
 		if restoreErr != nil {
 			return Status{}, fmt.Errorf(
 				"新 geo 数据导致 dae 重载失败（%w），且旧数据未能还原：%v", err, restoreErr)
 		}
-		if reloadErr := m.reloader.Reload(ctx); reloadErr != nil {
+		rollbackService := m.inspectService(ctx)
+		rollbackReloaded, reloadErr := m.reload(ctx, rollbackService)
+		if reloadErr != nil {
+			reloadErr = daediag.ExplainGeoError(reloadErr)
 			return Status{}, fmt.Errorf(
 				"新 geo 数据导致 dae 重载失败（%w），旧数据已还原但重载仍未成功：%v", err, reloadErr)
+		}
+		if !rollbackReloaded {
+			return Status{}, fmt.Errorf(
+				"新 geo 数据导致 dae 重载失败（%w），旧数据已还原；dae 当前未运行，启动后会读取原数据", err)
 		}
 		return Status{}, fmt.Errorf("新 geo 数据导致 dae 重载失败，已还原为原数据：%w", err)
 	}
@@ -88,7 +100,8 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 		m.logger.Warn("记录 geo 更新状态失败", "error", stateErr)
 	}
 	m.logger.Info("已更新 geo 数据",
-		"source", state.Source, "tag", state.Tag, "directory", status.TargetDir)
+		"source", state.Source, "tag", state.Tag, "directory", status.TargetDir,
+		"reloaded", reloaded)
 
 	updated := m.Status(ctx)
 	if stateErr != nil {
@@ -96,6 +109,19 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 			fmt.Sprintf("geo 数据已更新并生效，但更新记录写入失败（%v）", stateErr))
 	}
 	return updated, nil
+}
+
+// reload 只对运行中的 systemd 服务传 MainPID。服务未运行时文件落盘即完成；
+// 服务状态未知时保留无参数调用，以兼容没有 ServiceController 的定制构建。
+func (m *Manager) reload(ctx context.Context, service serviceSnapshot) (bool, error) {
+	switch service.state {
+	case ServiceStateActive:
+		return true, m.reloader.ReloadPID(ctx, service.status.MainPID)
+	case ServiceStateInactive:
+		return false, nil
+	default:
+		return true, m.reloader.Reload(ctx)
+	}
 }
 
 // repositoriesOf 汇总本次数据实际来自哪些仓库。

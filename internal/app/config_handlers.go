@@ -21,6 +21,11 @@ type restoreBackupRequest struct {
 	Apply        *bool  `json:"apply,omitempty"`
 }
 
+type backupMetadataRequest struct {
+	Name string `json:"name"`
+	Note string `json:"note,omitempty"`
+}
+
 func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationService, operations *sync.Mutex) {
 	if service == nil {
 		unavailable := func(writer http.ResponseWriter, _ *http.Request) {
@@ -30,6 +35,9 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		router.HandleFunc("PUT /api/v1/config", unavailable)
 		router.HandleFunc("POST /api/v1/config/validate", unavailable)
 		router.HandleFunc("GET /api/v1/config/backups", unavailable)
+		router.HandleFunc("POST /api/v1/config/backups", unavailable)
+		router.HandleFunc("PUT /api/v1/config/backups/{id}", unavailable)
+		router.HandleFunc("DELETE /api/v1/config/backups/{id}", unavailable)
 		router.HandleFunc("POST /api/v1/config/backups/{id}/restore", unavailable)
 		return
 	}
@@ -81,6 +89,38 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 			return
 		}
 		writeJSON(writer, http.StatusOK, backups)
+	})
+	router.HandleFunc("POST /api/v1/config/backups", func(writer http.ResponseWriter, request *http.Request) {
+		var payload backupMetadataRequest
+		if !decodeJSONBody(writer, request, &payload) {
+			return
+		}
+		backup, err := service.CreateBackup(request.Context(), payload.Name, payload.Note)
+		if err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusCreated, backup)
+	})
+	router.HandleFunc("PUT /api/v1/config/backups/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		var payload backupMetadataRequest
+		if !decodeJSONBody(writer, request, &payload) {
+			return
+		}
+		backup, err := service.UpdateBackup(
+			request.Context(), request.PathValue("id"), payload.Name, payload.Note)
+		if err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, backup)
+	})
+	router.HandleFunc("DELETE /api/v1/config/backups/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		if err := service.DeleteBackup(request.Context(), request.PathValue("id")); err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
 	})
 	router.HandleFunc("POST /api/v1/config/backups/{id}/restore", func(writer http.ResponseWriter, request *http.Request) {
 		var payload restoreBackupRequest
@@ -153,6 +193,8 @@ func writeConfigurationError(writer http.ResponseWriter, err error) {
 		writeAPIError(writer, http.StatusNotFound, "configuration_not_found", err.Error())
 	case errors.Is(err, configstore.ErrConflict):
 		writeAPIError(writer, http.StatusConflict, "configuration_conflict", err.Error())
+	case errors.Is(err, configstore.ErrInvalid):
+		writeAPIError(writer, http.StatusBadRequest, "configuration_backup_invalid", err.Error())
 	case errors.As(err, &validationErr):
 		writeAPIError(writer, http.StatusUnprocessableEntity, "configuration_invalid", err.Error())
 	case errors.As(err, &applyErr):

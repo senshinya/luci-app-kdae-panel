@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,13 @@ type GeoService interface {
 	Status(ctx context.Context) geodata.Status
 	Download(ctx context.Context, source upstream.GeoSource) (upstream.GeoData, error)
 	Apply(ctx context.Context, data upstream.GeoData) (geodata.Status, error)
+}
+
+type GeoSourceService interface {
+	CustomSources() []upstream.CustomGeoSource
+	CreateCustomSource(source upstream.CustomGeoSource) (upstream.CustomGeoSource, error)
+	UpdateCustomSource(id string, source upstream.CustomGeoSource) (upstream.CustomGeoSource, error)
+	DeleteCustomSource(id string) error
 }
 
 type geoRequest struct {
@@ -104,16 +112,19 @@ func (u *geoUpdater) run(ctx context.Context, source upstream.GeoSource, acquire
 	return nil
 }
 
-func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater) {
+func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSourceService) {
 	if updater == nil {
-		// 功能默认关闭。它和 dae 版本管理是两个开关：更新 geo 只写一个数据目录，
-		// 不碰可执行文件也不碰 systemd 单元，不该逼用户为了刷新 geo 而放宽
-		// 二进制目录的写权限。
+		// 生产构造器始终注入 Geo 服务；这个分支只为依赖注入不完整的测试或
+		// 定制构建保留，避免端点落成难以理解的 404。
 		unavailable := func(writer http.ResponseWriter, _ *http.Request) {
 			writeAPIError(writer, http.StatusServiceUnavailable, "geo_update_disabled",
-				"geo 数据更新未启用，请设置 KDAE_PANEL_ENABLE_GEO_UPDATE=true")
+				"Geo 数据服务未初始化，请检查面板启动日志")
 		}
-		for _, pattern := range []string{"GET /api/v1/dae/geo", "POST /api/v1/dae/geo"} {
+		for _, pattern := range []string{
+			"GET /api/v1/dae/geo", "POST /api/v1/dae/geo",
+			"GET /api/v1/dae/geo/sources", "POST /api/v1/dae/geo/sources",
+			"PUT /api/v1/dae/geo/sources/{id}", "DELETE /api/v1/dae/geo/sources/{id}",
+		} {
 			router.HandleFunc(pattern, unavailable)
 		}
 		return
@@ -139,6 +150,10 @@ func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater) {
 				writeAPIError(writer, http.StatusBadRequest, "invalid_geo_source", err.Error())
 				return
 			}
+			if strings.HasPrefix(string(parsed), "custom:") && !geoSourceAvailable(updater.service.Status(request.Context()), parsed) {
+				writeAPIError(writer, http.StatusBadRequest, "invalid_geo_source", "自定义 geo 数据来源不存在或已被删除")
+				return
+			}
 			source = parsed
 		}
 		if !updater.start(source) {
@@ -147,4 +162,99 @@ func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater) {
 		}
 		writeJSON(writer, http.StatusAccepted, map[string]any{"job": updater.jobs.snapshot()})
 	})
+
+	registerGeoSourceRoutes(router, updater, sources)
+}
+
+func geoSourceAvailable(status geodata.Status, source upstream.GeoSource) bool {
+	for _, candidate := range status.Sources {
+		if candidate.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
+func registerGeoSourceRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSourceService) {
+	unavailable := func(writer http.ResponseWriter) bool {
+		if sources != nil {
+			return false
+		}
+		writeAPIError(writer, http.StatusServiceUnavailable, "geo_sources_unavailable", "自定义 geo 来源存储未初始化")
+		return true
+	}
+	busy := func(writer http.ResponseWriter) bool {
+		job := updater.jobs.snapshot()
+		if job.Phase != PhaseDownloading && job.Phase != PhaseApplying {
+			return false
+		}
+		writeAPIError(writer, http.StatusConflict, "geo_update_in_progress", "geo 更新进行中，暂时不能修改来源")
+		return true
+	}
+
+	router.HandleFunc("GET /api/v1/dae/geo/sources", func(writer http.ResponseWriter, _ *http.Request) {
+		if unavailable(writer) {
+			return
+		}
+		customSources := sources.CustomSources()
+		if customSources == nil {
+			customSources = []upstream.CustomGeoSource{}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"sources": customSources})
+	})
+	router.HandleFunc("POST /api/v1/dae/geo/sources", func(writer http.ResponseWriter, request *http.Request) {
+		if unavailable(writer) || busy(writer) {
+			return
+		}
+		var payload upstream.CustomGeoSource
+		if !decodeBody(writer, request, &payload, 64<<10, false) {
+			return
+		}
+		created, err := sources.CreateCustomSource(payload)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_geo_source", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusCreated, created)
+	})
+	router.HandleFunc("PUT /api/v1/dae/geo/sources/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		if unavailable(writer) || busy(writer) {
+			return
+		}
+		var payload upstream.CustomGeoSource
+		if !decodeBody(writer, request, &payload, 64<<10, false) {
+			return
+		}
+		updated, err := sources.UpdateCustomSource(request.PathValue("id"), payload)
+		if err != nil {
+			writeGeoSourceError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, updated)
+	})
+	router.HandleFunc("DELETE /api/v1/dae/geo/sources/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		if unavailable(writer) || busy(writer) {
+			return
+		}
+		id := request.PathValue("id")
+		status := updater.service.Status(request.Context())
+		if status.Managed != nil && status.Managed.Source == upstream.GeoSource("custom:"+id) {
+			writeAPIError(writer, http.StatusConflict, "geo_source_in_use",
+				"该来源是当前 Geo 数据的记录来源；请先用另一个来源更新成功后再删除")
+			return
+		}
+		if err := sources.DeleteCustomSource(id); err != nil {
+			writeGeoSourceError(writer, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func writeGeoSourceError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, upstream.ErrCustomGeoSourceNotFound) {
+		writeAPIError(writer, http.StatusNotFound, "geo_source_not_found", err.Error())
+		return
+	}
+	writeAPIError(writer, http.StatusBadRequest, "invalid_geo_source", err.Error())
 }

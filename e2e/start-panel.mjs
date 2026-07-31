@@ -52,7 +52,9 @@ const child = spawn(bin('kdae-panel'), [
   '-database', join(work, 'panel.db'),
   '-schedule-file', join(work, 'schedule.json'),
   '-geo-schedule-file', join(work, 'geo-schedule.json'),
+  '-geo-sources-file', join(work, 'geo-sources.json'),
   '-install-state-file', join(work, 'install.json'),
+  '-github-token-file', join(work, 'github-token'),
   '-panel-backup-file', join(work, 'kdae-panel.previous'),
   '-geo-state-file', join(work, 'geo.json'),
   // E2E 必须完全离线可重复，不向 GitHub 发任何请求

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,10 +15,22 @@ type OfficialProvider struct {
 	client *httpClient
 	owner  string
 	repo   string
+	now    func() time.Time
+
+	cacheMu  sync.RWMutex
+	releases map[string]cachedRelease
+}
+
+type cachedRelease struct {
+	release   githubRelease
+	expiresAt time.Time
 }
 
 func NewOfficialProvider(client *httpClient, owner, repo string) *OfficialProvider {
-	return &OfficialProvider{client: client, owner: owner, repo: repo}
+	return &OfficialProvider{
+		client: client, owner: owner, repo: repo, now: time.Now,
+		releases: make(map[string]cachedRelease),
+	}
 }
 
 func (p *OfficialProvider) Source() Source {
@@ -55,6 +68,7 @@ func (p *OfficialProvider) List(ctx context.Context, limit int) ([]Version, erro
 		if release.Draft || release.TagName == "" {
 			continue
 		}
+		p.rememberRelease(release)
 		description := release.Name
 		if description == release.TagName {
 			description = ""
@@ -76,11 +90,14 @@ func (p *OfficialProvider) Resolve(ctx context.Context, ref string, platform Pla
 	if !validTag.MatchString(ref) {
 		return Asset{}, fmt.Errorf("版本号 %q 无效", ref)
 	}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
-		p.owner, p.repo, url.PathEscape(ref))
-	var release githubRelease
-	if err := p.client.getJSON(ctx, endpoint, &release); err != nil {
-		return Asset{}, err
+	release, ok := p.cachedRelease(ref)
+	if !ok {
+		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
+			p.owner, p.repo, url.PathEscape(ref))
+		if err := p.client.getJSON(ctx, endpoint, &release); err != nil {
+			return Asset{}, err
+		}
+		p.rememberRelease(release)
 	}
 
 	// 按候选顺序找本机能用的资产,首选没有就退到更保守的变体。
@@ -110,6 +127,29 @@ func (p *OfficialProvider) Resolve(ctx context.Context, ref string, platform Pla
 			ref, strings.Join(rejected, "；"))
 	}
 	return Asset{}, fmt.Errorf("版本 %s 没有提供适配本机架构（%s）的资产", ref, platform.Name)
+}
+
+// rememberRelease 让用户从版本列表点击安装时复用同一份 Release 元数据，
+// 无需立刻再消耗一次 GitHub API。校验和仍从发布资产独立取得。
+func (p *OfficialProvider) rememberRelease(release githubRelease) {
+	if release.TagName == "" {
+		return
+	}
+	p.cacheMu.Lock()
+	p.releases[release.TagName] = cachedRelease{
+		release: release, expiresAt: p.now().Add(jsonCacheTTL),
+	}
+	p.cacheMu.Unlock()
+}
+
+func (p *OfficialProvider) cachedRelease(ref string) (githubRelease, bool) {
+	p.cacheMu.RLock()
+	cached, ok := p.releases[ref]
+	p.cacheMu.RUnlock()
+	if !ok || !p.now().Before(cached.expiresAt) {
+		return githubRelease{}, false
+	}
+	return cached.release, true
 }
 
 // downloadURL 自行拼出发布资产的地址，而不是使用响应里的 browser_download_url。

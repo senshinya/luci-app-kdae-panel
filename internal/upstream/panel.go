@@ -30,11 +30,15 @@ const (
 // 用 releases/latest 而不是列表接口：它天然排除预发布与草稿，
 // 与一键部署脚本取版本的语义完全一致——提示的正是用户重装会得到的那一版。
 func LatestPanelRelease(ctx context.Context, owner, repo string) (string, error) {
+	return latestPanelRelease(ctx, newHTTPClient(), owner, repo)
+}
+
+func latestPanelRelease(ctx context.Context, client *httpClient, owner, repo string) (string, error) {
 	var release struct {
 		TagName string `json:"tag_name"`
 	}
 	target := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
-	if err := newHTTPClient().getJSON(ctx, target, &release); err != nil {
+	if err := client.getJSON(ctx, target, &release); err != nil {
 		return "", err
 	}
 	if release.TagName == "" {
@@ -45,16 +49,25 @@ func LatestPanelRelease(ctx context.Context, owner, repo string) (string, error)
 
 // PanelFetcher 是面板自升级用的默认上游实现，固定指向本仓库。
 type PanelFetcher struct {
-	owner string
-	repo  string
+	owner  string
+	repo   string
+	client *httpClient
 }
 
 func NewPanelFetcher() *PanelFetcher {
-	return &PanelFetcher{owner: PanelRepoOwner, repo: PanelRepoName}
+	return NewPanelFetcherWithGitHubToken(emptyGitHubTokenSource{})
+
+}
+
+func NewPanelFetcherWithGitHubToken(source GitHubTokenSource) *PanelFetcher {
+	return &PanelFetcher{
+		owner: PanelRepoOwner, repo: PanelRepoName,
+		client: newHTTPClientWithTokenSource(source),
+	}
 }
 
 func (f *PanelFetcher) LatestVersion(ctx context.Context) (string, error) {
-	return LatestPanelRelease(ctx, f.owner, f.repo)
+	return latestPanelRelease(ctx, f.client, f.owner, f.repo)
 }
 
 func (f *PanelFetcher) Binary(ctx context.Context, version string) (PanelBinary, error) {

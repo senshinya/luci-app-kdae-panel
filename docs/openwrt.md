@@ -89,7 +89,7 @@ logread -e kdae-panel
 | `enabled` | `1` | 开机自启；关闭后面板不会随系统启动，已在跑的实例不受影响 |
 | `listen_addr` | `0.0.0.0` | 监听地址，默认接受本机与局域网连接 |
 | `listen_port` | `2023` | 监听端口 |
-| `data_dir` | `/etc/kdae-panel` | 数据库、配置备份、状态文件与 dae 本地版本库的位置 |
+| `data_dir` | `/etc/kdae-panel` | 数据库、配置备份与存档、状态文件、GitHub Token、自定义 geo 来源与 dae 本地版本库的位置 |
 | `dae_binary` | `/usr/bin/dae` | dae 可执行文件路径；面板与 `/etc/init.d/dae` 读的是同一个值 |
 | `dae_config` | `/etc/dae/config.dae` | dae 入口配置；geo 数据也放在它所在的目录 |
 | `service_name` | `dae` | dae 的 init 脚本名（LuCI 表单未暴露这一项） |
@@ -106,7 +106,10 @@ logread -e kdae-panel
 
 - **`data_dir` 不要改到 `/var` 或 `/tmp` 下。** OpenWrt 上 `/var` 是 `/tmp` 的软链，两者都是内存
   文件系统，重启即空。数据库、管理员账户和 dae 本地版本库一旦落在这里，重启路由器后会全部丢失。
-  默认值 `/etc/kdae-panel` 在 overlay 上，是持久的。
+  默认值 `/etc/kdae-panel` 在 overlay 上，是持久的。面板自身的默认值（`/var/lib/kdae-panel/...`）
+  是按 systemd 部署选的，init 脚本会把每一个持久化文件逐项改写到 `data_dir` 下——上游新增
+  持久化文件时（例如 GitHub Token、自定义 geo 来源），这里必须同步补一行，否则那份数据
+  在 OpenWrt 上每次重启都会消失。
 - **没有自升级开关，也没有版本检查开关。** 计划阶段设想过给面板加一个一键升级自身的能力，但
   该能力（`internal/panelupdate`）取件坐标写死指向上游仓库 `tuoro/kdae-panel`，那里发布的二进制
   不含本文档描述的 procd 后端。一旦在这个部署上打开它并触发一次升级，面板会以 root 权限把自己

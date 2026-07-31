@@ -100,6 +100,7 @@ func TestControlCommands(t *testing.T) {
 	runner := &fakeRunner{results: map[string]command.Result{
 		"dae validate -c /etc/dae/config.dae": {},
 		"dae reload":                          {Stdout: "OK\n"},
+		"dae reload 4321":                     {Stdout: "OK\n"},
 		"dae suspend --abort":                 {Stdout: "OK\n"},
 		"dae sysdump":                         {Stdout: "System network information collected and saved to dae-sysdump.1.tar.gz\n"},
 	}, errors: map[string]error{}, writeSysdump: true, sysdumpContent: []byte("archive")}
@@ -111,12 +112,36 @@ func TestControlCommands(t *testing.T) {
 	if err := client.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.ReloadPID(context.Background(), 4321); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.Suspend(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 	dump, err := client.Sysdump(context.Background())
 	if err != nil || dump.Filename != "dae-sysdump.1.tar.gz" || string(dump.Content) != "archive" {
 		t.Fatalf("诊断归档 = %+v，错误 = %v", dump, err)
+	}
+	wantCalls := []string{
+		"dae validate -c /etc/dae/config.dae",
+		"dae reload",
+		"dae reload 4321",
+		"dae suspend --abort",
+		"dae sysdump",
+	}
+	if !reflect.DeepEqual(runner.calls, wantCalls) {
+		t.Fatalf("控制命令 = %v，期望 %v", runner.calls, wantCalls)
+	}
+}
+
+func TestReloadPIDRejectsInvalidPID(t *testing.T) {
+	runner := &fakeRunner{results: map[string]command.Result{}, errors: map[string]error{}}
+	client := NewClientWithRunner("dae", runner, time.Second)
+	if err := client.ReloadPID(context.Background(), 0); err == nil {
+		t.Fatal("无效 PID 应在执行命令前被拒绝")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("无效 PID 不应执行 dae: %v", runner.calls)
 	}
 }
 

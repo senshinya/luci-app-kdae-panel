@@ -90,6 +90,8 @@ type fakeService struct {
 	activeState string
 	statusErr   error
 	actionErr   error
+	// logs 供 explainRestartFailure 截取，用来给重启失败附上真实原因。
+	logs []host.LogEntry
 	// staleSamples / inactiveSamples / newPID 模拟 procd 的异步重启：
 	// Action(restart) 立刻返回，之后的前 staleSamples 次状态查询看到的仍是
 	// 正在退出的旧实例（active + 旧 pid），再之后的 inactiveSamples 次两个
@@ -183,6 +185,10 @@ func (s *fakeService) Status(context.Context) (host.Status, error) {
 		Restarts:      s.restartsAt,
 		MainPID:       pid,
 	}, nil
+}
+
+func (s *fakeService) Logs(context.Context, int) ([]host.LogEntry, error) {
+	return append([]host.LogEntry(nil), s.logs...), nil
 }
 
 // newTestInstaller 构造一个 systemd 后端的 Installer。这批测试验证的是
@@ -409,7 +415,10 @@ func TestInstallRejectsBinaryThatRejectsConfig(t *testing.T) {
 func TestInstallRollsBackWhenServiceFailsToStart(t *testing.T) {
 	fetcher := &fakeFetcher{}
 	// 装上去的那次重启起不来；随后的回滚重启能起来
-	service := &fakeService{failRestart: 1}
+	service := &fakeService{
+		failRestart: 1,
+		logs:        []host.LogEntry{{Message: "country code twitter not found in /etc/dae/geoip.dat"}},
+	}
 	installer, binaryPath := newTestInstaller(t, fetcher, service)
 	seed(t, binaryPath, "v1")
 
@@ -428,6 +437,9 @@ func TestInstallRollsBackWhenServiceFailsToStart(t *testing.T) {
 	}
 	if strings.Contains(applyErr.Error(), "服务仍未恢复") {
 		t.Fatalf("服务已恢复，错误描述不应说仍未恢复: %v", applyErr)
+	}
+	if !strings.Contains(applyErr.Error(), "geoip:twitter") || !strings.Contains(applyErr.Error(), "Geo 数据") {
+		t.Fatalf("版本切换失败应指出 Geo 分类根因：%v", applyErr)
 	}
 	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v1")) {
 		t.Fatalf("回滚后磁盘内容 = %q，应恢复为旧版本", content)
@@ -499,7 +511,7 @@ func TestInstallRejectsPIDChurnDuringHealthWindow(t *testing.T) {
 	service := &fakeService{activeState: "active", pidChurn: true}
 	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
 
-	err := installer.waitHealthy(context.Background(), 0)
+	err := installer.waitHealthy(context.Background(), 0, time.Now().UTC())
 	if err == nil {
 		t.Fatal("观察窗口内 pid 变化应当判定为不稳定")
 	}
@@ -535,7 +547,7 @@ func TestWaitHealthyFailsWhenServiceNeverSettles(t *testing.T) {
 	service := &fakeService{activeState: "activating"}
 	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
 
-	err := installer.waitHealthy(context.Background(), 0)
+	err := installer.waitHealthy(context.Background(), 0, time.Now().UTC())
 	if err == nil {
 		t.Fatal("服务始终没起来时应当判定失败")
 	}
@@ -554,7 +566,7 @@ func TestObservationWindowStartsAfterServiceSettles(t *testing.T) {
 	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
 	_ = service.Action(context.Background(), host.ActionRestart)
 
-	err := installer.waitHealthy(context.Background(), initialPID)
+	err := installer.waitHealthy(context.Background(), initialPID, time.Now().UTC())
 	if err == nil {
 		t.Fatal("服务稳定后又开始反复换 pid，观察期应当抓到")
 	}
@@ -571,7 +583,7 @@ func TestSettleIgnoresLingeringPreviousInstance(t *testing.T) {
 	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
 	_ = service.Action(context.Background(), host.ActionRestart)
 
-	if err := installer.waitHealthy(context.Background(), initialPID); err != nil {
+	if err := installer.waitHealthy(context.Background(), initialPID, time.Now().UTC()); err != nil {
 		t.Fatalf("旧实例慢慢退出是正常过程，不应判定为失败: %v", err)
 	}
 }

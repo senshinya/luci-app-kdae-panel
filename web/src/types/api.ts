@@ -88,6 +88,8 @@ export interface ConfigBackup {
   size: number
   createdAt: string
   sourcePath: string
+  name?: string
+  note?: string
 }
 
 export type UpstreamSource = 'official' | 'kdae'
@@ -164,7 +166,7 @@ export interface GeoFile {
   shadowed?: string[]
 }
 
-export type GeoSource = 'loyalsoldier' | 'v2fly'
+export type GeoSource = 'loyalsoldier' | 'v2fly' | `custom:${string}`
 
 export interface GeoSourceInfo {
   source: GeoSource
@@ -172,7 +174,20 @@ export interface GeoSourceInfo {
   /** 如实列出全部信任根；同一来源可能横跨多个仓库。 */
   repositories: string[]
   note: string
+  custom?: boolean
 }
+
+export interface CustomGeoSource {
+  id: string
+  source: `custom:${string}`
+  label: string
+  geoipUrl: string
+  geoipSha256Url: string
+  geositeUrl: string
+  geositeSha256Url: string
+}
+
+export type CustomGeoSourceInput = Omit<CustomGeoSource, 'id' | 'source'>
 
 export interface GeoState {
   source: GeoSource
@@ -192,6 +207,8 @@ export interface GeoStatus {
   problem?: string
   managed?: GeoState
   warnings?: string[]
+  /** active 时立即 reload；inactive 时文件在 dae 下次启动时读取。 */
+  serviceState: 'active' | 'inactive' | 'unknown'
 }
 
 /** 面板自身的新版本检查结果；dev 构建或检查被关闭时 latest 为空。 */
@@ -218,6 +235,12 @@ export interface PanelUpdatePayload {
   check: PanelUpdateCheck
   status?: PanelUpdateStatus
   job?: InstallJob
+}
+
+/** GitHub Token 永不回传；前端只知道是否配置以及由谁管理。 */
+export interface GitHubCredentialStatus {
+  configured: boolean
+  source?: 'environment' | 'panel'
 }
 
 /** 定时任务（订阅自动刷新 / geo 自动更新）的设置与执行状态，两个端点同构。 */

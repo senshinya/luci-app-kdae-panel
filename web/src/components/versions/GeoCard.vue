@@ -5,25 +5,31 @@ import {
   NButton,
   NCard,
   NIcon,
+  NInput,
   NModal,
-  NRadioButton,
-  NRadioGroup,
   NSelect,
   NSpace,
+  NTag,
   NSwitch,
   NText,
   useDialog,
   useMessage,
 } from 'naive-ui'
-import { CloudDownloadOutline, TimerOutline } from '@vicons/ionicons5'
-import { APIError, getJSON, postJSON, putJSON } from '../../api/client'
-import type { GeoSource, GeoStatus, InstallJob, ScheduleStatus } from '../../types/api'
+import { AddOutline, CloudDownloadOutline, CreateOutline, LinkOutline, TimerOutline, TrashOutline } from '@vicons/ionicons5'
+import { APIError, deleteJSON, getJSON, postJSON, putJSON } from '../../api/client'
+import type {
+  CustomGeoSource,
+  CustomGeoSourceInput,
+  GeoSource,
+  GeoStatus,
+  InstallJob,
+  ScheduleStatus,
+} from '../../types/api'
 import { formatBytes, formatDateTime } from '../../utils/format'
 import { useJobPolling } from '../../composables/useJobPolling'
 
-// geo 数据是独立开关（KDAE_PANEL_ENABLE_GEO_UPDATE），因此这张卡片完全
-// 自治：自己加载状态、自己轮询任务、自己管理定时设置，与 dae 版本管理
-// 只开其中一个的部署是正常情况，不是异常。
+// Geo 数据管理与 dae 版本管理相互独立。这张卡片自己加载状态、轮询任务并管理
+// 定时设置；生产构造器始终启用它，禁用态只用于依赖不完整的定制构建。
 const message = useMessage()
 const dialog = useDialog()
 
@@ -36,12 +42,20 @@ const geoBusy = computed(() => geoJob.value?.phase === 'downloading' || geoJob.v
 const activeGeoSource = computed(
   () => geoStatus.value?.sources.find((item) => item.source === geoSource.value) || null,
 )
+const geoSourceOptions = computed(() => (geoStatus.value?.sources || []).map((item) => ({
+  label: item.custom ? `${item.label}（自定义）` : item.label,
+  value: item.source,
+})))
 
 const geoPolling = useJobPolling({
   refresh: () => loadGeo(),
   phase: () => geoJob.value?.phase,
   onSettled: (phase) => {
-    if (phase === 'done') message.success('geo 数据已更新并生效')
+    if (phase === 'done') {
+      message.success(geoStatus.value?.serviceState === 'inactive'
+        ? 'geo 数据已更新，dae 启动后生效'
+        : 'geo 数据已更新')
+    }
     else if (phase === 'failed') message.error(geoJob.value?.error || 'geo 更新失败')
   },
 })
@@ -73,16 +87,29 @@ function confirmUpdateGeo() {
   // 沿用同一个来源只是把数据往前推，把警告一并甩出去反而稀释了真正的风险。
   const previous = geoStatus.value?.managed?.source
   const switching = previous !== undefined && previous !== geoSource.value
+  const serviceState = geoStatus.value?.serviceState
+  const activation = serviceState === 'inactive'
+    ? '当前 dae 未运行，因此不会执行 reload；文件会在 dae 下次启动时读取。面板此时无法检查配置引用的 Geo 分类是否存在，若新数据仍缺少分类，dae 下次启动仍会失败。'
+    : serviceState === 'active'
+      ? '随后会使用 systemd MainPID 执行 dae reload 让它立即生效。'
+      : '面板暂时无法确认 dae 是否运行，将尝试使用 dae 默认 PID 文件执行 reload。'
   dialog.warning({
     title: `更新 geo 数据（${chosen?.label || geoSource.value}）`,
     content: `面板会从 ${repositories} 下载 geoip.dat 与 geosite.dat，逐个比对 sha256，`
-      + `写入 ${geoStatus.value?.targetDir}，然后执行 dae reload 让它生效。`
+      + `写入 ${geoStatus.value?.targetDir}。${activation}`
       + (switching
         ? '⚠ 这次会切换到另一套规则集：geosite: 开头的路由规则所匹配的域名集合会随之改变，'
-          + '而 dae 不会因此报错。请确认你的路由规则在新规则集下仍然成立。'
+          + (serviceState === 'inactive'
+            ? '同名分类内容变化时 dae 不会报错；请确认你的路由规则在新规则集下仍然成立。'
+            : '同名分类内容变化时 dae 不会报错；若新来源完全没有配置引用的分类，reload 会失败，'
+              + '面板会还原旧数据并指出缺失分类。请确认你的路由规则在新规则集下仍然成立。')
         : '')
-      + 'reload 不会中断新连接，但进行中的长连接（大文件下载、SSH、串流）最多约 10 秒后可能被断开；'
-      + '若 dae 不接受新数据，面板会自动还原成原来的 geo 并重新加载。',
+      + (serviceState === 'active'
+        ? 'reload 不会中断新连接，但进行中的长连接（大文件下载、SSH、串流）最多约 10 秒后可能被断开；'
+        : '')
+      + (serviceState === 'inactive'
+        ? ''
+        : '若 dae 不接受新数据，面板会自动还原成原来的 geo 并重新加载。'),
     positiveText: '下载并更新',
     negativeText: '取消',
     onPositiveClick: updateGeo,
@@ -101,6 +128,112 @@ async function updateGeo() {
       await loadGeo()
       if (geoBusy.value) geoPolling.start()
     }
+  }
+}
+
+// ---- 自定义来源：四条链接作为一个整体持久化，避免定时更新只拿到半套数据 ----
+const customSources = ref<CustomGeoSource[]>([])
+const sourceManagerVisible = ref(false)
+const sourceEditorVisible = ref(false)
+const sourceLoading = ref(false)
+const sourceSaving = ref(false)
+const sourceEditingID = ref('')
+const sourceError = ref('')
+
+function emptySource(): CustomGeoSourceInput {
+  return {
+    label: '',
+    geoipUrl: '',
+    geoipSha256Url: '',
+    geositeUrl: '',
+    geositeSha256Url: '',
+  }
+}
+
+const sourceDraft = ref<CustomGeoSourceInput>(emptySource())
+
+async function loadCustomSources() {
+  sourceLoading.value = true
+  try {
+    const payload = await getJSON<{ sources: CustomGeoSource[] }>('/api/v1/dae/geo/sources')
+    customSources.value = payload.sources
+    sourceError.value = ''
+  } catch (error) {
+    sourceError.value = error instanceof Error ? error.message : '读取自定义来源失败'
+  } finally {
+    sourceLoading.value = false
+  }
+}
+
+async function openSourceManager() {
+  sourceManagerVisible.value = true
+  await loadCustomSources()
+}
+
+function createSource() {
+  sourceEditingID.value = ''
+  sourceDraft.value = emptySource()
+  sourceEditorVisible.value = true
+}
+
+function editSource(source: CustomGeoSource) {
+  sourceEditingID.value = source.id
+  sourceDraft.value = {
+    label: source.label,
+    geoipUrl: source.geoipUrl,
+    geoipSha256Url: source.geoipSha256Url,
+    geositeUrl: source.geositeUrl,
+    geositeSha256Url: source.geositeSha256Url,
+  }
+  sourceEditorVisible.value = true
+}
+
+const sourceDraftComplete = computed(() => Object.values(sourceDraft.value).every((value) => value.trim() !== ''))
+
+async function saveSource() {
+  sourceSaving.value = true
+  try {
+    const saved = sourceEditingID.value
+      ? await putJSON<CustomGeoSource>(`/api/v1/dae/geo/sources/${sourceEditingID.value}`, sourceDraft.value)
+      : await postJSON<CustomGeoSource>('/api/v1/dae/geo/sources', sourceDraft.value)
+    sourceEditorVisible.value = false
+    await Promise.all([loadCustomSources(), loadGeo()])
+    geoSource.value = saved.source
+    message.success(sourceEditingID.value ? '自定义来源已更新' : '自定义来源已添加')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '保存自定义来源失败')
+  } finally {
+    sourceSaving.value = false
+  }
+}
+
+function sourceInUse(source: CustomGeoSource): boolean {
+  return geoStatus.value?.managed?.source === source.source
+}
+
+function confirmDeleteSource(source: CustomGeoSource) {
+  dialog.warning({
+    title: `删除来源 ${source.label}`,
+    content: '只删除面板保存的链接，不删除已经落盘的 geoip.dat 或 geosite.dat。',
+    positiveText: '删除来源',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await deleteJSON<void>(`/api/v1/dae/geo/sources/${source.id}`, {})
+        await Promise.all([loadCustomSources(), loadGeo()])
+        message.success('自定义来源已删除')
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '删除自定义来源失败')
+      }
+    },
+  })
+}
+
+function sourceHost(target: string): string {
+  try {
+    return new URL(target).hostname
+  } catch {
+    return target
   }
 }
 
@@ -174,9 +307,16 @@ onMounted(async () => {
 </script>
 
 <template>
-  <NCard v-if="!geoDisabled" title="geo 数据" class="panel-card">
+  <NCard v-if="geoDisabled" title="Geo 数据管理" class="panel-card">
+    <NAlert type="warning" :bordered="false">{{ geoError }}</NAlert>
+  </NCard>
+  <NCard v-else title="文件状态与更新" class="panel-card">
     <template #header-extra>
       <NSpace size="small" align="center">
+        <NButton size="small" quaternary :disabled="geoBusy" @click="openSourceManager">
+          <template #icon><NIcon><LinkOutline /></NIcon></template>
+          来源管理
+        </NButton>
         <NButton size="small" quaternary :disabled="!geoStatus?.updatable" @click="openSchedule">
           <template #icon><NIcon><TimerOutline /></NIcon></template>
           自动更新
@@ -186,7 +326,7 @@ onMounted(async () => {
           secondary
           type="primary"
           :loading="geoBusy"
-          :disabled="geoBusy || !geoStatus?.updatable"
+          :disabled="geoBusy || !geoStatus?.updatable || !activeGeoSource"
           @click="confirmUpdateGeo"
         >
           <template #icon><NIcon><CloudDownloadOutline /></NIcon></template>
@@ -200,7 +340,7 @@ onMounted(async () => {
       正在下载并校验 geo 数据…
     </NAlert>
     <NAlert v-else-if="geoJob?.phase === 'applying'" type="warning" :bordered="false" class="card-alert">
-      正在写入并重新加载 dae…
+      {{ geoStatus?.serviceState === 'inactive' ? '正在写入 Geo 文件…' : '正在写入并重新加载 dae…' }}
     </NAlert>
     <NAlert v-else-if="geoJob?.phase === 'failed'" type="error" :bordered="false" class="card-alert">
       上次更新失败：{{ geoJob.error }}
@@ -252,29 +392,34 @@ onMounted(async () => {
     </dl>
 
     <div v-if="geoStatus" class="geo-sources">
-      <NRadioGroup v-model:value="geoSource" size="small" :disabled="geoBusy">
-        <NRadioButton
-          v-for="item in geoStatus.sources"
-          :key="item.source"
-          :value="item.source"
-        >
-          {{ item.label }}
-        </NRadioButton>
-      </NRadioGroup>
+      <div class="geo-source-picker">
+        <NText depth="3">更新来源</NText>
+        <NSelect
+          v-model:value="geoSource"
+          :options="geoSourceOptions"
+          :disabled="geoBusy"
+          placeholder="选择 Geo 数据来源"
+        />
+      </div>
       <NText v-if="activeGeoSource" depth="3" class="geo-hint">
         <span class="mono">{{ activeGeoSource.repositories.join('、') }}</span> —— {{ activeGeoSource.note }}
       </NText>
+      <NAlert v-else-if="geoSource" type="warning" :bordered="false" class="schedule-alert">
+        上次使用的来源 {{ geoSource }} 已不存在。请选择一个现有来源并手动更新，自动更新不会擅自切换规则集。
+      </NAlert>
     </div>
 
     <NText depth="3" class="geo-hint">
-      更新只需 dae reload，不必重启：新连接不受影响，但进行中的长连接最多约 10 秒后可能被断开。
-      两个来源的规则集不是同一套，切换会改变 <code class="mono">geosite:</code>
-      规则匹配的域名集合，而 dae 不会因此报错。
+      dae 运行时只 reload、不重启；未运行时只更新文件并在下次启动时读取。
+      reload 不影响新连接，但进行中的长连接最多约 10 秒后可能被断开。
+      不同来源的规则集不一定相同，切换会改变 <code class="mono">geosite:</code>
+      规则匹配的域名集合；同名分类内容变化不会报错。运行中的 dae 会在分类不存在时回滚并明确提示，
+      未运行时只能等下次启动检查。
     </NText>
 
     <NModal v-model:show="scheduleVisible" preset="card" title="geo 数据自动更新" class="orchestrate-modal">
       <NText depth="3">
-        到点后面板会重新下载校验并只 reload 不重启。来源沿用当前面板记录的那一个，
+        到点后面板会重新下载校验；dae 运行时只 reload 不重启，未运行时留待下次启动读取。来源沿用当前面板记录的那一个，
         绝不会自动切换规则集；若有其他控制操作正在执行，本轮跳过并在几分钟后重试。
       </NText>
       <NAlert v-if="scheduleError" type="error" :bordered="false" class="card-alert schedule-alert">
@@ -303,6 +448,90 @@ onMounted(async () => {
         <NSpace justify="end">
           <NButton @click="scheduleVisible = false">取消</NButton>
           <NButton type="primary" :loading="scheduleSaving" :disabled="scheduleError !== ''" @click="saveSchedule">保存</NButton>
+        </NSpace>
+      </template>
+    </NModal>
+
+    <NModal v-model:show="sourceManagerVisible" preset="card" title="Geo 数据来源" class="geo-source-modal">
+      <div class="geo-source-manager-head">
+        <NText depth="3">
+          内置来源由面板维护；自定义来源只接受公网 HTTPS，并且两个数据文件都必须提供 SHA-256 校验文件。
+        </NText>
+        <NButton type="primary" secondary @click="createSource">
+          <template #icon><NIcon><AddOutline /></NIcon></template>
+          添加来源
+        </NButton>
+      </div>
+      <NAlert v-if="sourceError" type="error" :bordered="false" class="card-alert">{{ sourceError }}</NAlert>
+      <div v-if="sourceLoading" class="orchestrate-empty"><NText depth="3">正在读取…</NText></div>
+      <div v-else-if="customSources.length === 0" class="orchestrate-empty">
+        <NText depth="3">尚未添加自定义来源</NText>
+      </div>
+      <div v-else class="geo-custom-source-list">
+        <div v-for="item in customSources" :key="item.id" class="geo-custom-source-row">
+          <div class="geo-custom-source-copy">
+            <div class="geo-custom-source-title">
+              <strong>{{ item.label }}</strong>
+              <NTag v-if="sourceInUse(item)" size="small" type="success" :bordered="false">当前来源</NTag>
+            </div>
+            <NText depth="3">
+              {{ sourceHost(item.geoipUrl) }} · {{ sourceHost(item.geositeUrl) }}
+            </NText>
+          </div>
+          <NSpace :wrap="false">
+            <NButton quaternary circle title="编辑来源" @click="editSource(item)">
+              <template #icon><NIcon><CreateOutline /></NIcon></template>
+            </NButton>
+            <NButton
+              quaternary
+              circle
+              type="error"
+              title="删除来源"
+              :disabled="sourceInUse(item)"
+              @click="confirmDeleteSource(item)"
+            >
+              <template #icon><NIcon><TrashOutline /></NIcon></template>
+            </NButton>
+          </NSpace>
+        </div>
+      </div>
+    </NModal>
+
+    <NModal
+      v-model:show="sourceEditorVisible"
+      preset="card"
+      :title="sourceEditingID ? '编辑自定义来源' : '添加自定义来源'"
+      class="geo-source-editor-modal"
+    >
+      <div class="geo-source-form">
+        <label>
+          <NText>来源名称</NText>
+          <NInput v-model:value="sourceDraft.label" maxlength="80" placeholder="例如：自建规则集" />
+        </label>
+        <label>
+          <NText>geoip.dat 链接</NText>
+          <NInput v-model:value="sourceDraft.geoipUrl" placeholder="https://…/geoip.dat" />
+        </label>
+        <label>
+          <NText>geoip.dat SHA-256 链接</NText>
+          <NInput v-model:value="sourceDraft.geoipSha256Url" placeholder="https://…/geoip.dat.sha256sum" />
+        </label>
+        <label>
+          <NText>geosite.dat 链接</NText>
+          <NInput v-model:value="sourceDraft.geositeUrl" placeholder="https://…/geosite.dat" />
+        </label>
+        <label>
+          <NText>geosite.dat SHA-256 链接</NText>
+          <NInput v-model:value="sourceDraft.geositeSha256Url" placeholder="https://…/geosite.dat.sha256sum" />
+        </label>
+      </div>
+      <NAlert type="info" :bordered="false" class="schedule-alert">
+        保存时检查链接格式；真正下载时还会重新解析每次跳转并拒绝内网地址。自定义下载不会携带 GitHub Token。
+      </NAlert>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="sourceEditorVisible = false">取消</NButton>
+          <NButton type="primary" :loading="sourceSaving" :disabled="!sourceDraftComplete" @click="saveSource">保存来源</NButton>
         </NSpace>
       </template>
     </NModal>

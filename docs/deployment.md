@@ -91,13 +91,16 @@ sudo systemctl restart kdae-panel
 | `KDAE_PANEL_SYSTEMCTL` | `/usr/bin/systemctl` | systemctl 路径（仅 systemd 后端使用） |
 | `KDAE_PANEL_JOURNALCTL` | `/usr/bin/journalctl` | journalctl 路径（仅 systemd 后端使用） |
 | `KDAE_PANEL_DATABASE` | `/var/lib/kdae-panel/panel.db` | 认证数据库 |
-| `KDAE_PANEL_BACKUP_DIR` | `/var/lib/kdae-panel/backups` | 配置备份目录 |
+| `KDAE_PANEL_BACKUP_DIR` | `/var/lib/kdae-panel/backups` | 自动备份与手动配置存档目录；存档名称和备注位于对应的 `.meta.json` 文件 |
 | `KDAE_PANEL_SCHEDULE_FILE` | `/var/lib/kdae-panel/schedule.json` | 订阅自动刷新的设置与上次执行时间 |
 | `KDAE_PANEL_INSTALL_STATE_FILE` | `/var/lib/kdae-panel/dae-install.json` | dae 版本安装记录，同目录还存放回滚点与 `dae-versions/` 本地版本库 |
+| `KDAE_PANEL_GITHUB_TOKEN_FILE` | `/var/lib/kdae-panel/github-token` | 设置页保存 GitHub API Token 的独立文件，权限 `0600` |
+| `KDAE_PANEL_GITHUB_TOKEN` | 空 | 可选 GitHub API Token；非空时优先于设置页文件且不能从 UI 修改，只需公开仓库只读权限 |
 | `KDAE_PANEL_ENABLE_DAE_INSTALL` | `true` | 允许通过面板首次安装、升级与切换 dae 版本 |
 | `KDAE_PANEL_GEO_STATE_FILE` | `/var/lib/kdae-panel/geo-update.json` | geo 数据更新记录 |
 | `KDAE_PANEL_GEO_SCHEDULE_FILE` | `/var/lib/kdae-panel/geo-schedule.json` | geo 自动更新的设置与上次执行时间 |
-| `KDAE_PANEL_ENABLE_GEO_UPDATE` | `false` | 允许一键更新 geo 数据，与上一项相互独立 |
+| `KDAE_PANEL_GEO_SOURCES_FILE` | `/var/lib/kdae-panel/geo-sources.json` | 自定义 geo 来源，权限 `0600` |
+| `KDAE_PANEL_ENABLE_GEO_UPDATE` | `true` | 旧版启动参数兼容项；Geo 管理现已始终可用 |
 | `KDAE_PANEL_DISABLE_UPDATE_CHECK` | `false` | 关闭面板自身的新版本检查（检查只读取本仓库 releases/latest 的 tag，结果缓存 6 小时） |
 | `KDAE_PANEL_ENABLE_SELF_UPDATE` | `true` | 面板一键升级的初始值；设置页保存过选择后以 UI 偏好为准 |
 | `KDAE_PANEL_BACKUP_FILE` | `/var/lib/kdae-panel/kdae-panel.previous` | 自升级保留的上一版面板二进制 |
@@ -107,6 +110,8 @@ sudo systemctl restart kdae-panel
 ### dae 版本管理
 
 新安装默认开启，发行单元已经允许写入默认二进制目录 `/usr/bin` 和服务单元目录 `/etc/systemd/system`，因此可以直接完成首次安装、升级与版本切换。dae 若实际位于其他目录，先用 `systemctl show dae --property=ExecStart` 确认路径，再通过 `systemctl edit kdae-panel` 把该目录加入 `ReadWritePaths`。
+
+版本列表、官方 Release 元数据和 kdae Actions 产物摘要依赖 GitHub API。面板会将 JSON 元数据缓存 10 分钟、合并相同的并发请求，并在上游短暂限流时沿用最近一次成功结果；从列表直接安装时还会复用已经核验过的 Release/run 信息。匿名调用仍受同一出口 IP 每小时 60 次限制，共享公网 IP 或频繁管理多台机器时，建议在「面板设置 → GitHub API」填写只读 Token，认证额度通常为每用户每小时 5000 次。Token 只保存于服务器，不会回传前端；也可以通过 `KDAE_PANEL_GITHUB_TOKEN` 交给部署系统管理。
 
 不需要版本管理的部署可以把 `KDAE_PANEL_ENABLE_DAE_INSTALL` 改为 `false`，并用 systemd drop-in 收紧上述写目录。允许写 root 的可执行文件和服务单元意味着面板缺陷可能升级为任意代码执行，这是默认便利性所接受的权限代价。
 
@@ -143,23 +148,13 @@ sudo systemctl restart kdae-panel
 systemd 单元或 env 模板；这些配套文件仍属于最近一次完整安装的版本。Release notes 若注明单元或
 脚本有变更，请重跑一键部署完成整包升级。卸载时优先使用上面的联网命令获取最新脚本。
 
-### 启用 geo 数据更新
+### Geo 数据管理
 
-这是**另一个独立开关**，不需要开启上面的 dae 版本管理：
-
-```bash
-env_file=/etc/kdae-panel/kdae-panel.env
-if grep -q '^KDAE_PANEL_ENABLE_GEO_UPDATE=' "$env_file"; then
-  sed -i 's/^KDAE_PANEL_ENABLE_GEO_UPDATE=.*/KDAE_PANEL_ENABLE_GEO_UPDATE=true/' "$env_file"
-else
-  echo 'KDAE_PANEL_ENABLE_GEO_UPDATE=true' >> "$env_file"
-fi
-systemctl restart kdae-panel
-```
+侧栏的「Geo 数据」是独立入口，不需要开启 dae 版本管理，也不再要求修改环境文件。旧部署残留的 `KDAE_PANEL_ENABLE_GEO_UPDATE=false` 只作为兼容参数接受，不会隐藏页面。
 
 通常不需要额外放宽 `ReadWritePaths`：面板更新的是 dae **当前实际读取**的那份 geo，而它多半就在配置目录（已经可写）。若你的 geo 在 `/usr/local/share/dae`（例如用 `dae-installer` 装的），界面会明确提示该目录不可写以及要追加哪一条。
 
-界面上可以在两个来源之间切换：
+界面内置两个来源：
 
 | 来源 | 仓库 | 适合谁 |
 |---|---|---|
@@ -169,7 +164,11 @@ systemctl restart kdae-panel
 两点务必知悉：
 
 - **切换来源会改变路由行为。** 两套规则集里同名分类所含的域名不同，切换后 `geosite:` 开头的路由规则匹配的范围会变，而 dae 不会因此报错。界面只在切换时警告，沿用同一来源不会反复打扰。
-- **更新会触发 `dae reload`。** 新连接不受影响，但进行中的长连接（大文件下载、SSH、串流）最多约 10 秒后可能被断开。若 dae 不接受新数据，面板会自动还原旧文件并重新加载。
+- **dae 运行时会触发 `dae reload <MainPID>`。** PID 直接取自 systemd，不依赖 `/var/run/dae.pid`。新连接不受影响，但进行中的长连接（大文件下载、SSH、串流）最多约 10 秒后可能被断开。若 dae 不接受新数据，面板会自动还原旧文件并重新加载。dae 未运行时只更新文件，下一次启动会读取新数据；由于此时无法通过 reload 检查配置引用的 Geo 分类，若新数据仍缺少分类，下一次启动仍会失败。
+
+「来源管理」可以添加多组自定义来源，分别填写 `geoip.dat`、`geosite.dat` 与各自的 SHA-256 校验文件直链。只接受公网 HTTPS；每次重定向都重新检查解析地址，自定义下载不携带 GitHub Token，也不能关闭校验。链接可能带查询参数，因此配置单独保存在权限 `0600` 的 `KDAE_PANEL_GEO_SOURCES_FILE`，不会进入配置历史或普通日志。
+
+若路由规则引用当前数据里不存在的分类，dae 会在启动时报类似 `country code ... not found in .../geoip.dat`，但 `dae validate` 仍然成功。面板会从 Geo 更新的 reload 输出，或启动、重启和版本切换后的近期日志中直接指出缺失的 `geoip:` / `geosite:` 分类；此时应在 Geo 数据页更新或切换到包含该分类的来源，或者修改路由规则。切换二进制本身不能修复数据分类缺失。
 
 ## HTTPS
 

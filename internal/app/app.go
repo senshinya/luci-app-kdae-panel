@@ -24,6 +24,7 @@ import (
 	"github.com/tuoro/kdae-panel/internal/dae"
 	"github.com/tuoro/kdae-panel/internal/daeinstall"
 	"github.com/tuoro/kdae-panel/internal/geodata"
+	"github.com/tuoro/kdae-panel/internal/githubauth"
 	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/netprobe"
 	"github.com/tuoro/kdae-panel/internal/panelupdate"
@@ -51,6 +52,9 @@ type ConfigurationService interface {
 	Validate(ctx context.Context, content string) error
 	Save(ctx context.Context, content, expectedHash string, apply bool) (configstore.SaveResult, error)
 	ListBackups(ctx context.Context) ([]configstore.Backup, error)
+	CreateBackup(ctx context.Context, name, note string) (configstore.Backup, error)
+	UpdateBackup(ctx context.Context, backupID, name, note string) (configstore.Backup, error)
+	DeleteBackup(ctx context.Context, backupID string) error
 	Restore(ctx context.Context, backupID, expectedHash string, apply bool) (configstore.SaveResult, error)
 }
 
@@ -66,6 +70,7 @@ type Dependencies struct {
 	Geo            GeoService
 	PanelRelease   PanelReleaseChecker
 	PanelUpdate    PanelUpdateService
+	GitHub         GitHubCredentialService
 }
 
 type AuthenticationService interface {
@@ -110,6 +115,11 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化认证服务: %w", err)
 	}
+	githubCredentials, err := githubauth.Open(cfg.GitHubTokenPath, os.Getenv("KDAE_PANEL_GITHUB_TOKEN"))
+	if err != nil {
+		_ = authStore.Close()
+		return nil, fmt.Errorf("初始化 GitHub API 凭据: %w", err)
+	}
 	initialized, err := authStore.Initialized(context.Background())
 	if err != nil {
 		_ = authStore.Close()
@@ -132,6 +142,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		Host:           hostManager,
 		Authentication: authStore,
 		Probe:          netprobe.New(),
+		GitHub:         githubCredentials,
 	}
 	if cfg.EnableDaeInstall {
 		installer, err := daeinstall.New(daeinstall.Options{
@@ -139,7 +150,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 			ConfigPath:     cfg.DaeConfigPath,
 			StatePath:      cfg.InstallStatePath,
 			ServiceName:    cfg.ServiceName,
-			Fetcher:        upstream.NewDefaultRegistry(),
+			Fetcher:        upstream.NewDefaultRegistryWithGitHubToken(githubCredentials),
 			Service:        hostManager,
 			Logger:         logger,
 			ServiceBackend: cfg.ServiceBackend,
@@ -150,11 +161,22 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 		dependencies.Install = installer
 	}
+	// 上游 v0.8.x 起把 geo 管理改成恒定可用，EnableGeoUpdate 退化成兼容字段。
+	// 本分支保留这道闸：OpenWrt 上面板以完整 root 运行、没有任何沙箱，
+	// enable_geo_update 是 UCI 里真实存在的开关，SECURITY.md 也按"关得掉"写。
+	// 让它变成空开关，等于把我们自己的文档改成假的。
+	// 上游的 registerGeoRoutes 本来就为 updater==nil 留了 503 geo_update_disabled
+	// 分支，走这条路不需要偏离上游代码。
 	if cfg.EnableGeoUpdate {
+		geoRegistry, err := upstream.OpenGeoRegistryWithGitHubToken(githubCredentials, cfg.GeoSourcesPath)
+		if err != nil {
+			_ = authStore.Close()
+			return nil, fmt.Errorf("初始化 geo 数据来源: %w", err)
+		}
 		manager, err := geodata.New(geodata.Options{
 			ConfigPath:     cfg.DaeConfigPath,
 			StatePath:      cfg.GeoStatePath,
-			Fetcher:        upstream.NewGeoRegistry(),
+			Fetcher:        geoRegistry,
 			Service:        hostManager,
 			Reloader:       daeClient,
 			Logger:         logger,
@@ -176,11 +198,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if resolvedBackend == host.BackendProcd {
 		cfg.DisableUpdateCheck = true
 	} else {
+		panelFetcher := upstream.NewPanelFetcherWithGitHubToken(githubCredentials)
 		updater, err := panelupdate.New(panelupdate.Options{
 			Version:    cfg.Version,
 			BackupPath: cfg.PanelBackupPath,
 			Enabled:    cfg.EnableSelfUpdate,
-			Fetcher:    upstream.NewPanelFetcher(),
+			Fetcher:    panelFetcher,
 			Service:    hostManager,
 			Logger:     logger,
 		})
@@ -189,6 +212,9 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 			return nil, fmt.Errorf("初始化面板自升级: %w", err)
 		}
 		dependencies.PanelUpdate = updater
+		if !cfg.DisableUpdateCheck {
+			dependencies.PanelRelease = panelFetcher.LatestVersion
+		}
 	}
 	application, err := NewWithDependencies(cfg, logger, dependencies)
 	if err != nil {
@@ -253,8 +279,10 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 
 	// geo 更新器同时服务手动端点与定时任务，任务追踪器只有一份。
 	var geo *geoUpdater
+	var geoSources GeoSourceService
 	if dependencies.Geo != nil {
 		geo = newGeoUpdater(dependencies.Geo, operations, logger)
+		geoSources, _ = dependencies.Geo.(GeoSourceService)
 	}
 	geoScheduleService := dependencies.GeoSchedule
 	if geoScheduleService == nil && geo != nil && cfg.GeoSchedulePath != "" {
@@ -285,6 +313,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 		}
 	}
 	registerPanelUpdateRoutes(router, cfg.Version, panelRelease, dependencies.PanelUpdate, operations, logger)
+	registerGitHubCredentialRoutes(router, dependencies.GitHub)
 	router.HandleFunc("GET /api/v1/dae/capabilities", func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusOK, dependencies.Dae.Inspect(request.Context()))
 	})
@@ -302,7 +331,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)
 	registerScheduleRoutes(router, "/api/v1/schedule/geo", geoScheduleService)
 	registerUpstreamRoutes(router, dependencies.Install, operations, logger, backend)
-	registerGeoRoutes(router, geo)
+	registerGeoRoutes(router, geo, geoSources)
 	registerAuthenticationRoutes(router, dependencies.Authentication, cfg.SecureCookie, cfg.BootstrapToken, cfg.SetupURLFile, proxyTrust, logger)
 	apiNotFound := func(writer http.ResponseWriter, _ *http.Request) {
 		writeAPIError(writer, http.StatusNotFound, "api_not_found", "API 路径不存在")

@@ -79,13 +79,17 @@ if [[ ${purge} == true ]]; then
   schedule_file=$(config_of KDAE_PANEL_SCHEDULE_FILE)
   geo_state=$(config_of KDAE_PANEL_GEO_STATE_FILE)
   geo_schedule=$(config_of KDAE_PANEL_GEO_SCHEDULE_FILE)
+  geo_sources=$(config_of KDAE_PANEL_GEO_SOURCES_FILE)
   panel_backup=$(config_of KDAE_PANEL_BACKUP_FILE)
+  github_token=$(config_of KDAE_PANEL_GITHUB_TOKEN_FILE)
   database=${database:-/var/lib/kdae-panel/panel.db}
   backup_dir=${backup_dir:-/var/lib/kdae-panel/backups}
   schedule_file=${schedule_file:-/var/lib/kdae-panel/schedule.json}
   geo_state=${geo_state:-/var/lib/kdae-panel/geo-update.json}
   geo_schedule=${geo_schedule:-/var/lib/kdae-panel/geo-schedule.json}
+  geo_sources=${geo_sources:-/var/lib/kdae-panel/geo-sources.json}
   panel_backup=${panel_backup:-/var/lib/kdae-panel/kdae-panel.previous}
+  github_token=${github_token:-/var/lib/kdae-panel/github-token}
 
   # 备份目录来自 env 配置，又要以 root 递归删除。只有位于默认数据目录之内的
   # 路径才自动删（那里本来就会被整体清掉），其余一律留给用户手工处理——
@@ -112,7 +116,7 @@ if [[ ${purge} == true ]]; then
   }
 
   # 先删按配置挪到别处的文件，再删两个默认目录；路径在默认目录里时前者是空操作。
-  rm -f "${database}" "${schedule_file}" "${geo_state}" "${geo_schedule}" "${panel_backup}" \
+  rm -f "${database}" "${schedule_file}" "${geo_state}" "${geo_schedule}" "${geo_sources}" "${panel_backup}" "${github_token}" \
     "${state_file}" "${state_file}.previous" \
     "${state_file}.previous-dae" "${state_file}.previous-dae.pending"
   purge_backup_dir "${backup_dir}"
@@ -120,8 +124,8 @@ if [[ ${purge} == true ]]; then
 
   # 删完逐个核对：将来提取逻辑若再与 systemd 语义出现偏差，
   # 也不能以"删净"的虚假声明收场。
-  for leftover in "${database}" "${schedule_file}" "${geo_state}" "${geo_schedule}" \
-    "${panel_backup}" "${state_file}"; do
+  for leftover in "${database}" "${schedule_file}" "${geo_state}" "${geo_schedule}" "${geo_sources}" \
+    "${panel_backup}" "${github_token}" "${state_file}"; do
     if [[ -n ${leftover} && -e ${leftover} ]]; then
       echo "警告：${leftover} 未能删除，请自行确认后手工处理" >&2
     fi

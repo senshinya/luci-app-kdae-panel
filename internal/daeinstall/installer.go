@@ -26,6 +26,7 @@ import (
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
 	"github.com/tuoro/kdae-panel/internal/dae"
+	"github.com/tuoro/kdae-panel/internal/daediag"
 	"github.com/tuoro/kdae-panel/internal/geodata"
 	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
@@ -732,6 +733,7 @@ func (i *Installer) restorePrevious(ctx context.Context, target string) restoreO
 // restart 重启服务，然后在一个观察窗口内反复确认它稳住了。
 // 替换二进制后必须整体重启：dae 的 eBPF 程序要重新挂载，reload 不足以生效。
 func (i *Installer) restart(ctx context.Context) error {
+	startedAt := time.Now().UTC()
 	restartCtx, cancel := context.WithTimeout(ctx, restartTimeout)
 	defer cancel()
 	// 先记下重启前的主进程号。procd 的 restart 立刻返回，之后一两秒里查到的
@@ -743,9 +745,9 @@ func (i *Installer) restart(ctx context.Context) error {
 		previousPID = status.MainPID
 	}
 	if err := i.service.Action(restartCtx, host.ActionRestart); err != nil {
-		return err
+		return i.explainRestartFailure(ctx, startedAt, err)
 	}
-	return i.waitHealthy(restartCtx, previousPID)
+	return i.waitHealthy(restartCtx, previousPID, startedAt)
 }
 
 // waitHealthy 是重启后的观察循环，与真正发起重启的那一步分开，
@@ -754,12 +756,19 @@ func (i *Installer) restart(ctx context.Context) error {
 // 分成稳定期和观察期两段，各自独立计时。稳定期负责等服务落到终态并取得基线，
 // 观察期从基线成立那一刻才开始算——合在一起计时的话，重启越慢真正用于观察的
 // 时间越短，而重启慢恰恰是最该多看两眼的情形。
-func (i *Installer) waitHealthy(ctx context.Context, previousPID int) error {
+//
+// startedAt 一路传到底：每条失败路径都要经过 explainRestartFailure，
+// 它按这个时刻去截日志，好把"起不来"的真实原因（例如 geo 文件缺失）
+// 附到错误上，而不是只报一句状态码。
+func (i *Installer) waitHealthy(ctx context.Context, previousPID int, startedAt time.Time) error {
 	baseline, err := i.settleAfterRestart(ctx, previousPID)
 	if err != nil {
-		return err
+		return i.explainRestartFailure(ctx, startedAt, err)
 	}
-	return i.observeAfterRestart(ctx, baseline)
+	if err := i.observeAfterRestart(ctx, baseline); err != nil {
+		return i.explainRestartFailure(ctx, startedAt, err)
+	}
+	return nil
 }
 
 // settleAfterRestart 轮询到服务达到终态为止，返回作为观察基线的那次采样。
@@ -867,6 +876,24 @@ func (i *Installer) observeAfterRestart(ctx context.Context, baseline host.Statu
 			return nil
 		}
 	}
+}
+
+type serviceLogReader interface {
+	Logs(context.Context, int) ([]host.LogEntry, error)
+}
+
+func (i *Installer) explainRestartFailure(ctx context.Context, startedAt time.Time, cause error) error {
+	reader, ok := i.service.(serviceLogReader)
+	if !ok {
+		return cause
+	}
+	logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	entries, err := reader.Logs(logCtx, 80)
+	if err != nil {
+		return cause
+	}
+	return daediag.ExplainGeoFailure(cause, entries, startedAt)
 }
 
 func (i *Installer) previousStatePath() string {

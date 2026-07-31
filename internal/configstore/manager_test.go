@@ -188,6 +188,75 @@ func TestListAndRestoreBackup(t *testing.T) {
 	}
 }
 
+func TestNamedBackupCanBeEditedRestoredAndDeleted(t *testing.T) {
+	controller := &fakeController{}
+	manager, _ := newTestManager(t, "stable config", controller)
+
+	backup, err := manager.CreateBackup(context.Background(), " 稳定线路 ", " 切换前保留 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup.Name != "稳定线路" || backup.Note != "切换前保留" {
+		t.Fatalf("存档信息未规范化: %+v", backup)
+	}
+	content, err := os.ReadFile(filepath.Join(manager.backupDir, backup.ID))
+	if err != nil || string(content) != "stable config" {
+		t.Fatalf("存档内容异常: content=%q err=%v", content, err)
+	}
+
+	updated, err := manager.UpdateBackup(context.Background(), backup.ID, "日常配置", "确认可用")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "日常配置" || updated.Note != "确认可用" {
+		t.Fatalf("编辑后的信息异常: %+v", updated)
+	}
+	listed, err := manager.ListBackups(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].Name != "日常配置" {
+		t.Fatalf("列表未读回元数据: backups=%+v err=%v", listed, err)
+	}
+
+	manager.now = func() time.Time { return time.Date(2026, 7, 21, 1, 2, 4, 4, time.UTC) }
+	document, _ := manager.Read(context.Background())
+	if _, err := manager.Save(context.Background(), "temporary config", document.Hash, false); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := manager.Read(context.Background())
+	if _, err := manager.Restore(context.Background(), backup.ID, current.Hash, false); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := manager.Read(context.Background())
+	if restored.Content != "stable config" {
+		t.Fatalf("恢复内容 = %q", restored.Content)
+	}
+
+	if err := manager.DeleteBackup(context.Background(), backup.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(manager.backupDir, backup.ID)); !os.IsNotExist(err) {
+		t.Fatalf("存档内容未删除: %v", err)
+	}
+	if _, err := os.Stat(manager.backupMetadataPath(backup.ID)); !os.IsNotExist(err) {
+		t.Fatalf("存档元数据未删除: %v", err)
+	}
+}
+
+func TestBackupMetadataValidationAndTraversal(t *testing.T) {
+	manager, _ := newTestManager(t, "current", &fakeController{})
+	if _, err := manager.CreateBackup(context.Background(), "   ", ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("空名称错误 = %v", err)
+	}
+	if _, err := manager.CreateBackup(context.Background(), strings.Repeat("字", maxBackupNameRunes+1), ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("过长名称错误 = %v", err)
+	}
+	if _, err := manager.UpdateBackup(context.Background(), "../config.dae", "名称", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("编辑路径穿越错误 = %v", err)
+	}
+	if err := manager.DeleteBackup(context.Background(), "../config.dae"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("删除路径穿越错误 = %v", err)
+	}
+}
+
 func TestBackupRetentionRemovesOldestBackup(t *testing.T) {
 	controller := &fakeController{}
 	dir := t.TempDir()
@@ -226,6 +295,30 @@ func TestBackupRetentionRemovesOldestBackup(t *testing.T) {
 		if string(content) == "version one" {
 			t.Fatal("最旧备份没有被清理")
 		}
+	}
+}
+
+func TestBackupRetentionRemovesMetadataWithOldestBackup(t *testing.T) {
+	controller := &fakeController{}
+	dir := t.TempDir()
+	entryPath := filepath.Join(dir, "config.dae")
+	if err := os.WriteFile(entryPath, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManagerWithBackupLimits(entryPath, filepath.Join(dir, "backups"), controller, 1, MaxConfigBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return time.Date(2026, 7, 21, 1, 2, 3, 0, time.UTC) }
+	first, err := manager.CreateBackup(context.Background(), "第一份", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Save(context.Background(), "two", hashBytes([]byte("one")), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(manager.backupMetadataPath(first.ID)); !os.IsNotExist(err) {
+		t.Fatalf("旧存档元数据应随内容清理: %v", err)
 	}
 }
 

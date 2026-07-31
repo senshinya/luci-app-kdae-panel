@@ -99,7 +99,12 @@ func newRegistry(client *httpClient, providers ...Provider) *Registry {
 
 // NewDefaultRegistry 构造指向上游默认仓库的 provider 集合。
 func NewDefaultRegistry() *Registry {
-	client := newHTTPClient()
+	return NewDefaultRegistryWithGitHubToken(emptyGitHubTokenSource{})
+}
+
+// NewDefaultRegistryWithGitHubToken 构造可即时读取面板凭据的默认 provider 集合。
+func NewDefaultRegistryWithGitHubToken(source GitHubTokenSource) *Registry {
+	client := newHTTPClientWithTokenSource(source)
 	return newRegistry(client,
 		NewOfficialProvider(client, "daeuniverse", "dae"),
 		NewKdaeProvider(client, "olicesx", "dae", "kdae", "build.yml"),

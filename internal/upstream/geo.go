@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -42,9 +43,13 @@ func ParseGeoSource(value string) (GeoSource, error) {
 		return GeoSourceLoyalsoldier, nil
 	case GeoSourceV2fly:
 		return GeoSourceV2fly, nil
-	default:
-		return "", fmt.Errorf("未知的 geo 数据来源 %q", value)
 	}
+	if source := GeoSource(value); source != "" {
+		if _, ok := customGeoSourceID(source); ok {
+			return source, nil
+		}
+	}
+	return "", fmt.Errorf("未知的 geo 数据来源 %q", value)
 }
 
 // geoOrigin 是某个来源里一个 geo 文件的出处。
@@ -67,6 +72,7 @@ type GeoSourceInfo struct {
 	// Repositories 如实列出信任根，可能不止一个。
 	Repositories []string `json:"repositories"`
 	Note         string   `json:"note"`
+	Custom       bool     `json:"custom,omitempty"`
 }
 
 // GeoFile 是一个 geo 数据文件的元数据。
@@ -80,6 +86,9 @@ type GeoFile struct {
 	Asset       string    `json:"asset"`
 	Size        int64     `json:"size"`
 	PublishedAt time.Time `json:"publishedAt"`
+	// 自定义来源的直链只在 Latest → Fetch 的内存事务中传递，不进入 API 或账本。
+	downloadURL string
+	digestURL   string
 }
 
 // GeoRelease 描述一次可安装的 geo 数据。
@@ -132,8 +141,12 @@ func (p *GeoProvider) Info() GeoSourceInfo {
 
 // NewGeoRegistry 构造指向上游默认仓库的 geo provider 集合。
 func NewGeoRegistry() *GeoRegistry {
-	client := newHTTPClient()
-	return newGeoRegistry(
+	return NewGeoRegistryWithGitHubToken(emptyGitHubTokenSource{})
+}
+
+func NewGeoRegistryWithGitHubToken(source GitHubTokenSource) *GeoRegistry {
+	client := newHTTPClientWithTokenSource(source)
+	registry := newGeoRegistry(
 		&GeoProvider{
 			client: client,
 			source: GeoSourceLoyalsoldier,
@@ -151,24 +164,47 @@ func NewGeoRegistry() *GeoRegistry {
 			source: GeoSourceV2fly,
 			label:  "v2fly 官方（与 dae 发布包同源）",
 			note: "dae 的 CI 正是从这两个仓库取 geo 打进发布包的，" +
-				"因此它与首次安装写入的数据是同一套，切换到它不会改变现有 " +
-				"geosite: 规则的含义。geosite.dat 在上游名为 dlc.dat。",
+				"因此它与首次安装写入的数据属于同一规则体系；若当前仍使用随包数据，" +
+				"更新到它不会换来源。geosite.dat 在上游名为 dlc.dat。",
 			origins: map[string]geoOrigin{
 				GeoIPName:   {"v2fly", "geoip", GeoIPName},
 				GeoSiteName: {"v2fly", "domain-list-community", "dlc.dat"},
 			},
 		},
 	)
+	registry.customClient = newCustomHTTPClient()
+	registry.custom, _ = openCustomGeoStore("")
+	return registry
+}
+
+// OpenGeoRegistryWithGitHubToken 在内置来源之外加载可由面板维护的自定义来源。
+func OpenGeoRegistryWithGitHubToken(source GitHubTokenSource, customSourcePath string) (*GeoRegistry, error) {
+	registry := NewGeoRegistryWithGitHubToken(source)
+	store, err := openCustomGeoStore(customSourcePath)
+	if err != nil {
+		return nil, err
+	}
+	registry.custom = store
+	return registry, nil
 }
 
 // GeoRegistry 按来源持有 provider。
 type GeoRegistry struct {
-	providers map[GeoSource]*GeoProvider
+	providers map[GeoSource]geoProvider
 	order     []GeoSource
+	custom    *customGeoStore
+	// 自定义来源永远使用不带 GitHub Token 的独立客户端。
+	customClient *httpClient
+}
+
+type geoProvider interface {
+	Info() GeoSourceInfo
+	Latest(context.Context) (GeoRelease, error)
+	Fetch(context.Context, GeoRelease) (GeoData, error)
 }
 
 func newGeoRegistry(providers ...*GeoProvider) *GeoRegistry {
-	registry := &GeoRegistry{providers: make(map[GeoSource]*GeoProvider, len(providers))}
+	registry := &GeoRegistry{providers: make(map[GeoSource]geoProvider, len(providers))}
 	for _, provider := range providers {
 		registry.providers[provider.source] = provider
 		registry.order = append(registry.order, provider.source)
@@ -178,19 +214,28 @@ func newGeoRegistry(providers ...*GeoProvider) *GeoRegistry {
 
 // Sources 按呈现顺序返回全部来源。
 func (r *GeoRegistry) Sources() []GeoSourceInfo {
-	infos := make([]GeoSourceInfo, 0, len(r.order))
+	custom := r.CustomSources()
+	infos := make([]GeoSourceInfo, 0, len(r.order)+len(custom))
 	for _, source := range r.order {
 		infos = append(infos, r.providers[source].Info())
+	}
+	for _, source := range custom {
+		infos = append(infos, (&customGeoProvider{client: r.customClient, source: source}).Info())
 	}
 	return infos
 }
 
-func (r *GeoRegistry) provider(source GeoSource) (*GeoProvider, error) {
+func (r *GeoRegistry) provider(source GeoSource) (geoProvider, error) {
 	provider, ok := r.providers[source]
-	if !ok {
-		return nil, fmt.Errorf("未知的 geo 数据来源 %q", source)
+	if ok {
+		return provider, nil
 	}
-	return provider, nil
+	if r.custom != nil {
+		if custom, found := r.custom.get(source); found {
+			return &customGeoProvider{client: r.customClient, source: custom}, nil
+		}
+	}
+	return nil, fmt.Errorf("未知的 geo 数据来源 %q", source)
 }
 
 func (r *GeoRegistry) Latest(ctx context.Context, source GeoSource) (GeoRelease, error) {
@@ -202,11 +247,42 @@ func (r *GeoRegistry) Latest(ctx context.Context, source GeoSource) (GeoRelease,
 }
 
 func (r *GeoRegistry) Fetch(ctx context.Context, release GeoRelease) (GeoData, error) {
+	if _, custom := customGeoSourceID(release.Source); custom {
+		return (&customGeoProvider{client: r.customClient}).Fetch(ctx, release)
+	}
 	provider, err := r.provider(release.Source)
 	if err != nil {
 		return GeoData{}, err
 	}
 	return provider.Fetch(ctx, release)
+}
+
+func (r *GeoRegistry) CustomSources() []CustomGeoSource {
+	if r.custom == nil {
+		return nil
+	}
+	return r.custom.list()
+}
+
+func (r *GeoRegistry) CreateCustomSource(source CustomGeoSource) (CustomGeoSource, error) {
+	if r.custom == nil {
+		return CustomGeoSource{}, errors.New("自定义 geo 来源存储未初始化")
+	}
+	return r.custom.create(source)
+}
+
+func (r *GeoRegistry) UpdateCustomSource(id string, source CustomGeoSource) (CustomGeoSource, error) {
+	if r.custom == nil {
+		return CustomGeoSource{}, errors.New("自定义 geo 来源存储未初始化")
+	}
+	return r.custom.update(id, source)
+}
+
+func (r *GeoRegistry) DeleteCustomSource(id string) error {
+	if r.custom == nil {
+		return errors.New("自定义 geo 来源存储未初始化")
+	}
+	return r.custom.delete(id)
 }
 
 // Latest 解析每个文件各自最新的发布，确认资产与校验和文件都在。

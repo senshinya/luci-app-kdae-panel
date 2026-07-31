@@ -10,21 +10,25 @@ import {
   NGridItem,
   NIcon,
   NInput,
+  NSpace,
   NSwitch,
+  NTag,
   NText,
+  useDialog,
   useMessage,
   type FormInst,
   type FormRules,
 } from 'naive-ui'
-import { DownloadOutline, KeyOutline, RefreshOutline } from '@vicons/ionicons5'
-import { getDownload, getJSON, postJSON, putJSON } from '../api/client'
-import type { PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
+import { DownloadOutline, KeyOutline, LogoGithub, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
+import { deleteJSON, getDownload, getJSON, postJSON, putJSON } from '../api/client'
+import type { GitHubCredentialStatus, PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
 import PanelUpdateAction from '../components/PanelUpdateAction.vue'
 import { useAuthStore } from '../stores/auth'
 import { formatDateTime } from '../utils/format'
 
 const auth = useAuthStore()
 const message = useMessage()
+const dialog = useDialog()
 const form = ref<FormInst | null>(null)
 const passwordLoading = ref(false)
 const dumpLoading = ref(false)
@@ -33,6 +37,11 @@ const updateChecking = ref(false)
 const updateSaving = ref(false)
 const panelUpdate = ref<PanelUpdatePayload | null>(null)
 const updateError = ref('')
+const githubStatus = ref<GitHubCredentialStatus | null>(null)
+const githubToken = ref('')
+const githubLoading = ref(true)
+const githubSaving = ref(false)
+const githubError = ref('')
 const model = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
 const rules: FormRules = {
   currentPassword: { required: true, message: '请输入当前密码', trigger: ['input', 'blur'] },
@@ -133,7 +142,67 @@ function applyPanelUpdateStatus(status: PanelUpdateStatus) {
   if (panelUpdate.value) panelUpdate.value.status = status
 }
 
-onMounted(() => void loadPanelUpdate())
+async function loadGitHubStatus() {
+  try {
+    const payload = await getJSON<{ status: GitHubCredentialStatus }>('/api/v1/settings/github')
+    githubStatus.value = payload.status
+    githubError.value = ''
+  } catch (error) {
+    githubError.value = error instanceof Error ? error.message : '读取 GitHub API 设置失败'
+  } finally {
+    githubLoading.value = false
+  }
+}
+
+async function saveGitHubToken() {
+  if (!githubToken.value.trim()) {
+    message.warning('请填写 GitHub Token')
+    return
+  }
+  githubSaving.value = true
+  try {
+    const payload = await putJSON<{ status: GitHubCredentialStatus }>('/api/v1/settings/github', {
+      token: githubToken.value,
+    })
+    githubStatus.value = payload.status
+    githubToken.value = ''
+    githubError.value = ''
+    message.success('GitHub Token 已保存并立即生效')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '保存 GitHub Token 失败')
+  } finally {
+    githubSaving.value = false
+  }
+}
+
+function confirmClearGitHubToken() {
+  dialog.warning({
+    title: '清除 GitHub Token',
+    content: '清除后将恢复匿名 API 额度；版本列表、首次安装和 kdae 构建解析可能再次受每小时 60 次限制。',
+    positiveText: '清除',
+    negativeText: '取消',
+    onPositiveClick: clearGitHubToken,
+  })
+}
+
+async function clearGitHubToken() {
+  githubSaving.value = true
+  try {
+    const payload = await deleteJSON<{ status: GitHubCredentialStatus }>('/api/v1/settings/github', {})
+    githubStatus.value = payload.status
+    githubToken.value = ''
+    message.success('GitHub Token 已清除')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '清除 GitHub Token 失败')
+  } finally {
+    githubSaving.value = false
+  }
+}
+
+onMounted(() => {
+  void loadPanelUpdate()
+  void loadGitHubStatus()
+})
 </script>
 
 <template>
@@ -183,6 +252,61 @@ onMounted(() => void loadPanelUpdate())
         </NCard>
       </NGridItem>
     </NGrid>
+
+    <NCard title="GitHub API" class="panel-card settings-github">
+      <template #header-extra><NIcon size="20"><LogoGithub /></NIcon></template>
+      <NAlert v-if="githubError" type="error" :bordered="false" class="card-alert">{{ githubError }}</NAlert>
+      <template v-else>
+        <div class="settings-github-heading">
+          <div>
+            <strong>版本发现与安装凭据</strong>
+            <NText depth="3">
+              匿名调用每个出口 IP 每小时仅 60 次；配置只读 Token 后通常提升到每用户每小时 5000 次。
+            </NText>
+          </div>
+          <NTag :type="githubStatus?.configured ? 'success' : 'warning'" size="small" :bordered="false">
+            {{ githubLoading ? '读取中' : githubStatus?.configured ? '已配置' : '匿名访问' }}
+          </NTag>
+        </div>
+
+        <NAlert
+          v-if="githubStatus?.source === 'environment'"
+          type="info"
+          :bordered="false"
+          class="settings-github-note"
+        >
+          当前 Token 由 KDAE_PANEL_GITHUB_TOKEN 环境变量管理，请在部署配置中修改。
+        </NAlert>
+        <template v-else>
+          <NText depth="3" class="settings-github-note">
+            Token 以 0600 权限保存在服务器，保存后立即生效；面板不会读取后回显，也不会发送给下载站或 dae 子进程。
+          </NText>
+          <NSpace class="settings-github-actions" :wrap="true">
+            <NInput
+              v-model:value="githubToken"
+              type="password"
+              show-password-on="click"
+              autocomplete="off"
+              placeholder="github_pat_..."
+              :disabled="githubLoading || githubSaving"
+              @keyup.enter="saveGitHubToken"
+            />
+            <NButton type="primary" :loading="githubSaving" :disabled="githubLoading" @click="saveGitHubToken">
+              保存 Token
+            </NButton>
+            <NButton
+              v-if="githubStatus?.configured"
+              type="error"
+              secondary
+              :disabled="githubSaving"
+              @click="confirmClearGitHubToken"
+            >
+              <template #icon><NIcon><TrashOutline /></NIcon></template>清除
+            </NButton>
+          </NSpace>
+        </template>
+      </template>
+    </NCard>
 
     <NCard title="面板更新" class="panel-card settings-update">
       <NAlert v-if="updateError" type="error" :bordered="false" class="card-alert">{{ updateError }}</NAlert>

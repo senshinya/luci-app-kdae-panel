@@ -53,6 +53,8 @@ start_service() {
 		--install-state-file "$data_dir/dae-install.json" \
 		--geo-state-file "$data_dir/geo-update.json" \
 		--geo-schedule-file "$data_dir/geo-schedule.json" \
+		--github-token-file "$data_dir/github-token" \
+		--geo-sources-file "$data_dir/geo-sources.json" \
 		--panel-backup-file "$data_dir/kdae-panel.previous" \
 		--setup-url-file "$RUN_DIR/setup-url" \
 		--enable-dae-install="$enable_dae_install" \

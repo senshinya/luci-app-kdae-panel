@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
@@ -90,16 +91,38 @@ func SandboxHidesHome() bool {
 	return errors.Is(err, fs.ErrPermission)
 }
 
-// searchPath 取回本机当前的搜索顺序。
-// 读不到服务状态就当没设置环境变量：少一条提示，好过据此把 geo 写到错误的地方。
-func (m *Manager) searchPath(ctx context.Context) []string {
-	var environment map[string]string
-	if m.service != nil {
-		if status, err := m.service.Status(ctx); err == nil {
-			environment = status.Environment
+type serviceSnapshot struct {
+	status  host.Status
+	state   ServiceState
+	problem string
+}
+
+// inspectService 同时提供 geo 搜索路径所需的环境变量，以及 reload 所需的 PID。
+func (m *Manager) inspectService(ctx context.Context) serviceSnapshot {
+	if m.service == nil {
+		return serviceSnapshot{state: ServiceStateUnknown}
+	}
+	status, err := m.service.Status(ctx)
+	if err != nil {
+		return serviceSnapshot{
+			state:   ServiceStateUnknown,
+			problem: fmt.Sprintf("无法确认 dae 服务状态（%v）；更新时将使用 dae 默认的 PID 文件", err),
 		}
 	}
-	return SearchPath(m.configPath, environment)
+	if status.ActiveState == "active" && status.MainPID > 0 {
+		return serviceSnapshot{status: status, state: ServiceStateActive}
+	}
+	if status.ActiveState == "active" {
+		return serviceSnapshot{
+			status: status,
+			state:  ServiceStateUnknown,
+			// 上游原文点名 systemd。procd 上同样够得到这条：procdManager.Status
+			// 在 ubus 报 running 但没给出 PID 时，正是 active + MainPID==0。
+			// 措辞保持后端中性，否则 OpenWrt 用户会去查一个不存在的 systemd。
+			problem: "dae 服务显示为 active，但服务管理器没有提供有效 MainPID；更新时将使用 dae 默认的 PID 文件",
+		}
+	}
+	return serviceSnapshot{status: status, state: ServiceStateInactive}
 }
 
 // locate 沿搜索顺序找出每个文件实际生效的那一份，以及被它遮蔽的其余副本。
@@ -146,7 +169,8 @@ func targetDir(files []File, fallback string) string {
 
 // Status 汇报 geo 数据的现状与可更新性。
 func (m *Manager) Status(ctx context.Context) Status {
-	search := m.searchPath(ctx)
+	service := m.inspectService(ctx)
+	search := SearchPath(m.configPath, service.status.Environment)
 	files := locate(search, Names)
 	target := targetDir(files, filepath.Dir(m.configPath))
 
@@ -156,6 +180,10 @@ func (m *Manager) Status(ctx context.Context) Status {
 		TargetDir:     target,
 		SearchPath:    search,
 		Files:         files,
+		ServiceState:  service.state,
+	}
+	if service.problem != "" {
+		status.Warnings = append(status.Warnings, service.problem)
 	}
 	if state, err := m.readState(); err == nil && state != nil {
 		status.Managed = state
@@ -163,6 +191,12 @@ func (m *Manager) Status(ctx context.Context) Status {
 		// 每次都把选择重置回默认值等于诱导用户反复来回切。
 		if state.Source != "" {
 			status.DefaultSource = state.Source
+			if !slices.ContainsFunc(status.Sources, func(info upstream.GeoSourceInfo) bool {
+				return info.Source == state.Source
+			}) {
+				status.Warnings = append(status.Warnings,
+					fmt.Sprintf("上次使用的 geo 来源 %s 已不存在；自动更新会保持失败而不会静默切换规则集，请先选择一个现有来源手动更新", state.Source))
+			}
 		}
 	}
 
@@ -171,7 +205,7 @@ func (m *Manager) Status(ctx context.Context) Status {
 		return status
 	}
 	status.Updatable = true
-	status.Warnings = warnings(files, target, filepath.Dir(m.configPath))
+	status.Warnings = append(status.Warnings, warnings(files, target, filepath.Dir(m.configPath))...)
 	return status
 }
 

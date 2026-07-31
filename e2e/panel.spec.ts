@@ -8,6 +8,37 @@ const configPath = join(here, '.work', 'config.dae')
 
 const PASSWORD = 'e2e-Password-2026'
 const NODE_LINK = 'trojan://demo@e2e-node.example.com:443?sni=e2e-node.example.com#E2E-01'
+const NODE_LINKS = [
+  NODE_LINK,
+  'ss://YWVzLTI1Ni1nY206ZGVtbw@sg1.example.com:8388#SG-01',
+  'vless://00000000-0000-4000-8000-000000000001@us1.example.com:443?security=reality#US-01',
+].join('\n')
+const UPDATE_SCREENSHOTS = process.env.UPDATE_README_SCREENSHOTS === 'true'
+
+async function capture(page: import('@playwright/test').Page, name: string, width: number, height: number) {
+  if (!UPDATE_SCREENSHOTS) return
+  await page.setViewportSize({ width, height })
+  await page.evaluate(() => window.scrollTo(0, 0))
+  const content = page.locator('.app-content > .n-layout-scroll-container')
+  if (await content.count()) {
+    await content.evaluate((element) => {
+      element.scrollTop = 0
+      element.scrollLeft = 0
+    })
+  }
+  await expect(page.locator('.n-message:visible')).toHaveCount(0, { timeout: 6_000 })
+  await page.screenshot({
+    path: join(here, '..', 'docs', 'screenshots', name),
+    animations: 'disabled',
+  })
+}
+
+async function clickVisibleOption(page: import('@playwright/test').Page, text: string) {
+  const option = page.locator('.n-base-select-option:visible', { hasText: text })
+  await option.waitFor({ state: 'visible' })
+  // Naive UI 的选项会随下拉动画移动，DOM 点击可避免 Playwright 在稳定性等待期间错过它。
+  await option.evaluate((element) => (element as HTMLElement).click())
+}
 
 async function expectCardsAligned(locator: import('@playwright/test').Locator) {
   await expect.poll(async () => {
@@ -37,6 +68,7 @@ async function expectColumnsAligned(locator: import('@playwright/test').Locator)
 // 这是唯一同时压到路由守卫、CSRF、配置事务与 dae 校验桩的测试，
 // 步骤之间共享账号与磁盘状态，因此收在一个用例里按序执行。
 test('首次初始化到编排保存的完整链路', async ({ page }) => {
+  test.setTimeout(UPDATE_SCREENSHOTS ? 120_000 : 60_000)
   await test.step('通过一次性链接初始化管理员', async () => {
     await page.goto('/setup#bootstrap=e2e-bootstrap')
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible()
@@ -51,6 +83,58 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.locator('.metric-card').first()).toContainText('运行中')
     await expect(page.getByText('dae version v1.0.6')).toBeVisible()
     await expectCardsAligned(page.locator('.equal-height-grid .panel-card'))
+  })
+
+  await test.step('Geo 数据是独立入口并可持久化自定义来源', async () => {
+    await page.goto('/geo')
+    await expect(page.getByRole('heading', { name: 'Geo 数据', level: 2 })).toBeVisible()
+    await expect(page.getByText('geoip.dat', { exact: true })).toBeVisible()
+    await expect(page.getByText('geosite.dat', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '来源管理' }).click()
+    const manager = page.locator('.n-modal', { hasText: 'Geo 数据来源' })
+    await manager.getByRole('button', { name: '添加来源' }).click()
+    const editor = page.locator('.n-modal', { hasText: '添加自定义来源' })
+    await editor.getByPlaceholder('例如：自建规则集').fill('E2E 自建规则')
+    await editor.getByPlaceholder('https://…/geoip.dat', { exact: true }).fill('https://assets.example.com/geoip.dat')
+    await editor.getByPlaceholder('https://…/geoip.dat.sha256sum', { exact: true }).fill('https://checks.example.com/geoip.dat.sha256sum')
+    await editor.getByPlaceholder('https://…/geosite.dat', { exact: true }).fill('https://assets.example.com/geosite.dat')
+    await editor.getByPlaceholder('https://…/geosite.dat.sha256sum', { exact: true }).fill('https://checks.example.com/geosite.dat.sha256sum')
+    await editor.getByRole('button', { name: '保存来源' }).click()
+    await expect(manager.getByText('E2E 自建规则')).toBeVisible()
+    await manager.locator('.n-base-close').click()
+
+    await page.reload()
+    await page.getByRole('button', { name: '来源管理' }).click()
+    const reopenedManager = page.locator('.n-modal', { hasText: 'Geo 数据来源' })
+    const sourceRow = reopenedManager.locator('.geo-custom-source-row', { hasText: 'E2E 自建规则' })
+    await expect(sourceRow).toContainText('assets.example.com')
+    await reopenedManager.locator('.n-base-close').click()
+    await expect(reopenedManager).toBeHidden()
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.getByRole('button', { name: '来源管理' }).click()
+    const mobileManager = page.locator('.n-modal', { hasText: 'Geo 数据来源' })
+    await expect(mobileManager.getByText('E2E 自建规则')).toBeVisible()
+    const modalBox = await mobileManager.boundingBox()
+    expect(modalBox).not.toBeNull()
+    expect(modalBox!.x).toBeGreaterThanOrEqual(0)
+    expect(modalBox!.x + modalBox!.width).toBeLessThanOrEqual(390)
+    expect(await mobileManager.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await mobileManager.locator('.n-base-close').click()
+    await expect(mobileManager).toBeHidden()
+
+    await page.setViewportSize({ width: 1600, height: 900 })
+    await page.getByRole('button', { name: '来源管理' }).click()
+    const cleanupManager = page.locator('.n-modal', { hasText: 'Geo 数据来源' })
+    const cleanupRow = cleanupManager.locator('.geo-custom-source-row', { hasText: 'E2E 自建规则' })
+    await expect(cleanupRow).toBeVisible()
+    await cleanupRow.getByRole('button', { name: '删除来源' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '删除来源' }).click()
+    await expect(cleanupRow).toHaveCount(0)
+    await expect(cleanupManager.getByText('尚未添加自定义来源')).toBeVisible()
+    await cleanupManager.locator('.n-base-close').click()
   })
 
   await test.step('导入节点并保存重载，改动落到磁盘', async () => {
@@ -83,7 +167,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const logLevelSelect = logLevel.locator('.n-base-selection')
     await expect(logLevelSelect).toContainText('info')
     await logLevelSelect.click()
-    await page.locator('.n-base-select-option', { hasText: 'debug' }).click()
+    await clickVisibleOption(page, 'debug')
     const lanInterface = globalModal.locator('.global-field', { hasText: '局域网接口' })
     await lanInterface.locator('.n-base-selection').click()
     const ens2Option = page.locator('.interface-option', { hasText: 'ens2' })
@@ -102,7 +186,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(global).toContainText('auto')
 
     await page.getByRole('button', { name: '导入节点' }).click()
-    await page.getByPlaceholder(/vmess/).fill(NODE_LINK)
+    await page.getByPlaceholder(/vmess/).fill(NODE_LINKS)
     await page.getByRole('button', { name: '加入编排' }).click()
     await expect(page.getByText('e2e-node.example.com').first()).toBeVisible()
     await page.getByTestId('nodes-card').getByRole('button', { name: '编辑原文' }).click()
@@ -131,10 +215,10 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const groupModal = page.getByTestId('group-editor-modal')
     await groupModal.getByRole('button', { name: '选择节点' }).click()
     await groupModal.getByTestId('group-node-picker').locator('.n-base-selection').click()
-    await page.locator('.n-base-select-option', { hasText: 'E2E-01' }).click()
+    await clickVisibleOption(page, 'E2E-01')
     await groupModal.getByRole('button', { name: '选择订阅' }).click()
     await groupModal.getByTestId('group-subscription-picker').locator('.n-base-selection').click()
-    await page.locator('.n-base-select-option', { hasText: 'e2e_sub' }).click()
+    await clickVisibleOption(page, 'e2e_sub')
     await groupModal.getByRole('button', { name: '应用到编排' }).click()
     await expect(groupItem).toContainText('节点：E2E-01')
     await expect(groupItem).toContainText('订阅：e2e_sub')
@@ -183,6 +267,53 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(saved).toContain('log_level: debug')
     expect(saved).toContain("lan_interface: 'ens2'")
     expect(saved).toContain("wan_interface: 'auto'")
+
+    await capture(page, 'orchestration.png', 1600, 1120)
+    const capabilityPattern = '**/api/v1/dae/capabilities'
+    const maskCapabilityPath = async (route: import('@playwright/test').Route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      await route.fulfill({ response, json: { ...body, binary: '/usr/bin/dae' } })
+    }
+    if (UPDATE_SCREENSHOTS) {
+      await page.route(capabilityPattern, maskCapabilityPath)
+    }
+    await page.goto('/')
+    await expect(page.getByRole('heading', { name: '运行状态' })).toBeVisible()
+    await expect(page.getByText('运行中', { exact: true })).toBeVisible()
+    await expect(page.getByText('dae version v1.0.6')).toBeVisible()
+    await expect(page.locator('.metric-card .n-skeleton')).toHaveCount(0)
+    await capture(page, 'dashboard.png', 1600, 900)
+    if (UPDATE_SCREENSHOTS) {
+      await page.unroute(capabilityPattern, maskCapabilityPath)
+    }
+  })
+
+  await test.step('配置存档可以命名、恢复并删除', async () => {
+    await page.goto('/backups')
+    await expect(page.getByRole('heading', { name: '配置历史', level: 2 })).toBeVisible()
+    await page.getByRole('button', { name: '保存当前配置' }).click()
+    const editor = page.locator('.n-modal', { hasText: '保存当前配置' })
+    await editor.getByPlaceholder('例如：稳定线路').fill('E2E 稳定配置')
+    await editor.getByPlaceholder('记录这份配置的用途或适用场景').fill('E2E 回档测试')
+    await editor.getByRole('button', { name: '保存存档' }).click()
+    const row = page.locator('tr', { hasText: 'E2E 稳定配置' })
+    await expect(row).toContainText('E2E 回档测试')
+
+    await row.getByTitle('编辑名称和备注').click()
+    const editModal = page.locator('.n-modal', { hasText: '编辑配置存档' })
+    await editModal.getByPlaceholder('例如：稳定线路').fill('E2E 已命名配置')
+    await editModal.getByRole('button', { name: '保存修改' }).click()
+    const renamedRow = page.locator('tr', { hasText: 'E2E 已命名配置' })
+    await expect(renamedRow).toContainText('E2E 回档测试')
+
+    await renamedRow.getByRole('button', { name: '恢复' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '恢复并重载' }).click()
+    await expect(page.getByText('配置已恢复并完成无损重载')).toBeVisible()
+
+    await renamedRow.getByTitle('删除配置存档').click()
+    await page.locator('.n-dialog').getByRole('button', { name: '删除存档' }).click()
+    await expect(page.locator('tr', { hasText: 'E2E 已命名配置' })).toHaveCount(0)
   })
 
   await test.step('设置页左右列保持同一底边', async () => {
@@ -227,6 +358,16 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.goto('/settings')
     await expect(page.getByRole('heading', { name: '面板设置', level: 2 })).toBeVisible()
     await expectColumnsAligned(page.locator('.settings-page .equal-height-grid > *'))
+
+    const githubCard = page.locator('.settings-github')
+    await expect(githubCard.getByText('匿名访问')).toBeVisible()
+    await githubCard.getByPlaceholder('github_pat_...').fill('github_pat_e2e0123456789abcdefghijklmnop')
+    await githubCard.getByRole('button', { name: '保存 Token' }).click()
+    await expect(githubCard.getByText('已配置')).toBeVisible()
+    await expect(githubCard.getByPlaceholder('github_pat_...')).toHaveValue('')
+    await githubCard.getByRole('button', { name: '清除' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '清除' }).click()
+    await expect(githubCard.getByText('匿名访问')).toBeVisible()
 
     const forcedPanelCheck = page.waitForResponse((response) =>
       response.url().endsWith('/api/v1/panel/update/check') && response.request().method() === 'POST')
@@ -305,6 +446,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     }))
 
     await page.goto('/versions')
+    await expect(page.getByRole('button', { name: '去设置 Token' })).toBeVisible()
     await page.getByRole('button', { name: '卸载 dae' }).click()
     const dialog = page.locator('.n-dialog')
     const purgeConfig = dialog.getByRole('checkbox', { name: '同时删除 dae 主配置文件' })
@@ -356,17 +498,25 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.route('**/api/v1/dae/versions**', (route) => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        versions: [{
-          source: 'official',
-          ref: 'v1.9.0',
-          label: 'v1.9.0',
-          description: 'Local cache E2E',
-          publishedAt: '2026-07-01T00:00:00Z',
-          installable: true,
-          cached,
-          cachedAt: '2026-07-30T00:00:00Z',
-          cachedBytes: 33_554_432,
-        }],
+        versions: [
+          {
+            source: 'official', ref: 'v2.0.0', label: 'v2.0.0', description: '当前稳定版',
+            publishedAt: '2026-07-09T00:00:00Z', installable: true,
+          },
+          {
+            source: 'official', ref: 'v1.9.0', label: 'v1.9.0', description: '已保存在本机',
+            publishedAt: '2026-07-01T00:00:00Z', installable: true, cached,
+            cachedAt: '2026-07-30T00:00:00Z', cachedBytes: 33_554_432,
+          },
+          {
+            source: 'official', ref: 'v1.8.0', label: 'v1.8.0', description: '历史稳定版',
+            publishedAt: '2026-06-12T00:00:00Z', installable: true,
+          },
+          {
+            source: 'official', ref: 'v1.7.2', label: 'v1.7.2', description: '历史稳定版',
+            publishedAt: '2026-05-18T00:00:00Z', installable: true,
+          },
+        ],
       }),
     }))
     await page.route('**/api/v1/dae/cache', async (route) => {
@@ -385,6 +535,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.reload()
     const row = page.locator('tr', { hasText: 'v1.9.0' })
     await expect(row.getByText('已下载')).toBeVisible()
+    await capture(page, 'versions.png', 1600, 1120)
     await row.getByRole('button', { name: '删除 v1.9.0 的本地缓存' }).click()
     await page.locator('.n-dialog').getByRole('button', { name: '删除缓存' }).click()
     await expect.poll(() => deleted).toEqual({ source: 'official', ref: 'v1.9.0' })
@@ -429,6 +580,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   await test.step('退出后凭密码重新登录', async () => {
     await page.getByRole('button', { name: '退出登录' }).click()
     await expect(page.getByRole('heading', { name: '管理员登录' })).toBeVisible()
+    await capture(page, 'login.png', 1600, 900)
     await page.getByPlaceholder('admin').fill('admin')
     await page.getByPlaceholder('输入管理员密码').fill(PASSWORD)
     await page.getByRole('button', { name: '登录', exact: true }).click()

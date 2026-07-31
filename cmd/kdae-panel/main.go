@@ -68,10 +68,12 @@ func run() error {
 	databasePath := flag.String("database", envOr("KDAE_PANEL_DATABASE", cfg.DatabasePath), "面板 SQLite 数据库路径")
 	schedulePath := flag.String("schedule-file", envOr("KDAE_PANEL_SCHEDULE_FILE", cfg.SchedulePath), "订阅自动刷新设置文件路径")
 	installStatePath := flag.String("install-state-file", envOr("KDAE_PANEL_INSTALL_STATE_FILE", cfg.InstallStatePath), "dae 版本安装状态文件路径")
+	githubTokenPath := flag.String("github-token-file", envOr("KDAE_PANEL_GITHUB_TOKEN_FILE", cfg.GitHubTokenPath), "GitHub API Token 持久化文件路径")
 	geoStatePath := flag.String("geo-state-file", envOr("KDAE_PANEL_GEO_STATE_FILE", cfg.GeoStatePath), "geo 数据更新状态文件路径")
 	geoSchedulePath := flag.String("geo-schedule-file", envOr("KDAE_PANEL_GEO_SCHEDULE_FILE", cfg.GeoSchedulePath), "geo 数据自动更新设置文件路径")
+	geoSourcesPath := flag.String("geo-sources-file", envOr("KDAE_PANEL_GEO_SOURCES_FILE", cfg.GeoSourcesPath), "自定义 geo 数据来源文件路径")
 	enableDaeInstall := flag.Bool("enable-dae-install", enableDaeInstallDefault, "允许通过面板安装与切换 dae 版本")
-	enableGeoUpdate := flag.Bool("enable-geo-update", enableGeoUpdateDefault, "允许通过面板一键更新 geo 数据")
+	enableGeoUpdate := flag.Bool("enable-geo-update", enableGeoUpdateDefault, "兼容旧版本；Geo 数据管理现已始终启用")
 	disableUpdateCheck := flag.Bool("disable-update-check", disableUpdateCheckDefault, "关闭面板自身的新版本检查")
 	enableSelfUpdate := flag.Bool("enable-self-update", enableSelfUpdateDefault, "允许面板一键升级自身")
 	panelBackupPath := flag.String("panel-backup-file", envOr("KDAE_PANEL_BACKUP_FILE", cfg.PanelBackupPath), "自升级时保留的上一版面板二进制路径")
@@ -98,8 +100,10 @@ func run() error {
 	cfg.DatabasePath = *databasePath
 	cfg.SchedulePath = *schedulePath
 	cfg.InstallStatePath = *installStatePath
+	cfg.GitHubTokenPath = *githubTokenPath
 	cfg.GeoStatePath = *geoStatePath
 	cfg.GeoSchedulePath = *geoSchedulePath
+	cfg.GeoSourcesPath = *geoSourcesPath
 	cfg.EnableDaeInstall = *enableDaeInstall
 	cfg.EnableGeoUpdate = *enableGeoUpdate
 	cfg.DisableUpdateCheck = *disableUpdateCheck

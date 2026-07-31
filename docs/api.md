@@ -42,8 +42,22 @@ X-CSRF-Token: <csrfToken>
 | `GET` | `/config` | 入口配置文本、SHA-256 和文件元数据 |
 | `POST` | `/config/validate` | 只校验候选内容 |
 | `PUT` | `/config` | 保存候选内容，可选择立即重载 |
-| `GET` | `/config/backups` | 列出自动备份 |
-| `POST` | `/config/backups/{id}/restore` | 恢复指定备份 |
+| `GET` | `/config/backups` | 列出自动备份和手动配置存档 |
+| `POST` | `/config/backups` | 将当前入口配置保存为带名称、备注的手动存档 |
+| `PUT` | `/config/backups/{id}` | 修改存档名称和备注 |
+| `DELETE` | `/config/backups/{id}` | 删除存档内容及其元数据 |
+| `POST` | `/config/backups/{id}/restore` | 恢复指定备份或存档 |
+
+创建和编辑存档请求体：
+
+```json
+{
+  "name": "稳定线路",
+  "note": "家庭网络使用"
+}
+```
+
+`name` 必填，去除首尾空白后最多 80 个字符；`note` 可选，最多 500 个字符。没有名称和备注的旧备份在前端显示为“自动备份”，也可以通过编辑接口补充。备份内容仍是独立的 `.dae` 文件，名称和备注保存在同编号的 `.meta.json` 文件中；删除存档会同时删除两者。
 
 保存示例：
 
@@ -59,10 +73,13 @@ X-CSRF-Token: <csrfToken>
 
 配置保存、备份恢复和服务控制操作会共享串行门；已有操作执行时返回 `409 operation_in_progress`，避免多个控制动作交叉执行。
 
+所有备份（包括手动存档）共用最多 50 份、总大小 256 MiB 的保留上限。达到上限时按文件创建时间清理最旧的备份，手动存档的元数据会随对应内容一起清理。
+
 常见错误码：
 
 | HTTP | code | 含义 |
 |---|---|---|
+| `400` | `configuration_backup_invalid` | 存档名称或备注不符合长度要求 |
 | `409` | `configuration_conflict` | 磁盘内容已经变化 |
 | `422` | `configuration_invalid` | dae 拒绝候选配置 |
 | `502` | `configuration_apply_failed` | 保存后重载失败，响应包含回滚状态 |
@@ -89,6 +106,14 @@ X-CSRF-Token: <csrfToken>
 `source` 只接受 `official` 与 `kdae` 两个枚举值，仓库地址在代码中写死，不接受外部指定。`ref` 对官方来源是发布 tag，对 kdae 是构建编号。`GET /dae/versions` 另接受 `limit` 参数（1–100，默认 30），超出范围返回 `400 invalid_limit`。
 
 版本响应在上游字段之外附带 `cached`、`cachedAt`、`cachedBytes`；只存在于本机、不在当前上游清单中的版本还会带 `cachedOnly`。已过期的 kdae 构建只要本地缓存完整仍然可切换；上游暂时不可访问时，只要存在缓存也会返回本地版本。缓存按来源、版本与本机 CPU 平台隔离，真正安装前会重新计算二进制 SHA-256，而不是只信任缓存索引。
+
+GitHub JSON 元数据另有 10 分钟进程内缓存；同 URL 的并发请求只访问上游一次，刷新失败时继续使用最近成功结果。凭据管理端点如下，任何响应都只返回 `configured` 与 `source`，不会返回 Token：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/settings/github` | 查询是否配置 GitHub Token 及来源（`panel` / `environment`） |
+| `PUT` | `/settings/github` | 保存 `{"token":"..."}`，写入 `0600` 独立文件并立即生效 |
+| `DELETE` | `/settings/github` | 清除面板保存的 Token；环境变量管理时返回 `409` |
 
 删除缓存请求体：
 
@@ -122,8 +147,12 @@ X-CSRF-Token: <csrfToken>
 |---|---|---|
 | `GET` | `/dae/geo` | geo 数据现状、可选来源与正在进行的任务 |
 | `POST` | `/dae/geo` | 更新到指定来源的最新版 |
+| `GET` | `/dae/geo/sources` | 列出管理员保存的自定义来源 |
+| `POST` | `/dae/geo/sources` | 添加自定义来源 |
+| `PUT` | `/dae/geo/sources/{id}` | 修改自定义来源 |
+| `DELETE` | `/dae/geo/sources/{id}` | 删除未在使用的自定义来源 |
 
-独立开关 `KDAE_PANEL_ENABLE_GEO_UPDATE`，与 dae 版本管理互不影响；未启用时返回 `503 geo_update_disabled`。
+Geo 数据管理在登录后始终可用，与 dae 版本管理互不影响；旧版环境文件里的 `KDAE_PANEL_ENABLE_GEO_UPDATE` 仅为启动参数兼容保留，不再隐藏功能。
 
 更新请求体（可省略，此时沿用 `status.defaultSource`）：
 
@@ -131,13 +160,17 @@ X-CSRF-Token: <csrfToken>
 { "source": "loyalsoldier" }
 ```
 
-`source` 只接受 `loyalsoldier` 与 `v2fly` 两个枚举值，仓库地址在代码中写死，不接受外部指定；未知值返回 `400 invalid_geo_source`。**两个来源的规则集不是同一套**，切换会改变 `geosite:` 规则匹配的域名集合。
+`source` 接受内置的 `loyalsoldier`、`v2fly`，或由来源管理接口生成的 `custom:<id>`；未知或已经删除的来源返回 `400 invalid_geo_source`。不同来源的规则集可能不同，切换会改变 `geosite:` 规则匹配的域名集合。
+
+自定义来源请求体包含 `label`、`geoipUrl`、`geoipSha256Url`、`geositeUrl`、`geositeSha256Url`。四条地址都必须是公网 HTTPS；保存时拒绝 userinfo、内网字面地址与 URL 片段，下载首跳和每次重定向会重新解析 DNS，并在实际连接前再次拒绝非公网地址。自定义请求使用独立客户端，不携带 GitHub Token。每个数据文件上限 64 MiB，校验文件上限 64 KiB，没有跳过 SHA-256 的开关。来源保存在权限 `0600` 的 `KDAE_PANEL_GEO_SOURCES_FILE`；当前更新记录正在引用的来源不能直接删除，需先用另一个来源成功更新。
 
 `GET` 返回 `status.sources`（每个来源的标识、展示名、全部信任根仓库与说明）、`status.defaultSource`（界面该预选哪个——用过就是上次那个）、`status.targetDir`（本次会写入哪个目录）、`status.searchPath`（dae 的完整查找顺序）、每个文件的实际路径与大小，以及 `files[].shadowed`——被优先级更高的副本遮蔽、因而不会生效的同名文件。
 
 `POST` 立即返回 `202` 与任务快照，进度靠轮询 `GET /dae/geo`，阶段与安装任务一致（`downloading` → `applying` → `done`/`failed`）。同一时刻只允许一个 geo 任务，重复提交返回 `409 geo_update_in_progress`；它与安装任务各有各的任务槽，但落盘阶段共用全局控制门。
 
-更新只触发 `dae reload`，不重启服务。若 dae 不接受新数据，面板会自动还原旧文件并再 reload 一次，任务标记为 `failed`。
+dae 正在运行时，更新会把 systemd 的 `MainPID` 显式传给 `dae reload`，不依赖 `/var/run/dae.pid`，也不重启服务。dae 未运行时只更新文件并成功结束，下一次启动会直接读取新数据；此时无法借助 reload 检查配置引用的 Geo 分类是否存在，若新数据仍缺少分类，下一次启动仍会失败。若运行中的 dae 不接受新数据，面板会自动还原旧文件并再 reload 一次，任务标记为 `failed`。
+
+dae 的 `validate` 不检查 `geoip:` / `geosite:` 分类是否真实存在。Geo 更新重载、启动、重启或版本切换因分类缺失失败时，面板会从 dae 命令输出或本次操作后的 journald 日志明确指出缺失分类并引导到 Geo 数据页；版本切换仍按原事务回滚二进制。
 
 ## 定时任务（订阅自动刷新 / geo 自动更新）
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,17 +14,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
 	MaxConfigBytes        = 8 << 20
 	defaultMaxBackups     = 50
 	defaultMaxBackupBytes = 256 << 20
+	maxBackupNameRunes    = 80
+	maxBackupNoteRunes    = 500
 )
 
 var (
 	ErrNotFound = errors.New("配置不存在")
 	ErrConflict = errors.New("配置已经被其他操作修改")
+	ErrInvalid  = errors.New("配置存档信息无效")
 )
 
 type Controller interface {
@@ -64,6 +69,13 @@ type Backup struct {
 	Size       int64     `json:"size"`
 	CreatedAt  time.Time `json:"createdAt"`
 	SourcePath string    `json:"sourcePath"`
+	Name       string    `json:"name,omitempty"`
+	Note       string    `json:"note,omitempty"`
+}
+
+type backupMetadata struct {
+	Name string `json:"name"`
+	Note string `json:"note,omitempty"`
 }
 
 type ValidationError struct {
@@ -278,12 +290,18 @@ func (m *Manager) ListBackups(_ context.Context) ([]Backup, error) {
 		if err != nil {
 			return nil, err
 		}
+		metadata, err := m.readBackupMetadata(entry.Name())
+		if err != nil {
+			return nil, err
+		}
 		backups = append(backups, Backup{
 			ID:         entry.Name(),
 			Hash:       hashBytes(content),
 			Size:       info.Size(),
 			CreatedAt:  info.ModTime().UTC(),
 			SourcePath: m.entryPath,
+			Name:       metadata.Name,
+			Note:       metadata.Note,
 		})
 	}
 	sort.Slice(backups, func(i, j int) bool {
@@ -292,11 +310,89 @@ func (m *Manager) ListBackups(_ context.Context) ([]Backup, error) {
 	return backups, nil
 }
 
+// CreateBackup 把当前入口配置保存为用户可辨识的存档。
+// 配置内容仍沿用自动备份的格式，名称和备注放在独立元数据文件里，
+// 因此旧版本面板仍能恢复这些存档。
+func (m *Manager) CreateBackup(_ context.Context, name, note string) (Backup, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	metadata, err := validateBackupMetadata(name, note)
+	if err != nil {
+		return Backup{}, err
+	}
+	content, _, _, existed, err := m.readCurrentBytes()
+	if err != nil {
+		return Backup{}, err
+	}
+	if !existed {
+		return Backup{}, ErrNotFound
+	}
+	id, err := m.createBackup(content)
+	if err != nil {
+		return Backup{}, err
+	}
+	if err := m.writeBackupMetadata(id, metadata); err != nil {
+		_ = os.Remove(filepath.Join(m.backupDir, id))
+		return Backup{}, err
+	}
+	return m.backupByID(id)
+}
+
+func (m *Manager) UpdateBackup(_ context.Context, backupID, name, note string) (Backup, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !validBackupID(backupID) {
+		return Backup{}, ErrNotFound
+	}
+	metadata, err := validateBackupMetadata(name, note)
+	if err != nil {
+		return Backup{}, err
+	}
+	if _, err := m.backupByID(backupID); err != nil {
+		return Backup{}, err
+	}
+	if err := m.writeBackupMetadata(backupID, metadata); err != nil {
+		return Backup{}, err
+	}
+	return m.backupByID(backupID)
+}
+
+func (m *Manager) DeleteBackup(_ context.Context, backupID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !validBackupID(backupID) {
+		return ErrNotFound
+	}
+	path := filepath.Join(m.backupDir, backupID)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return ErrNotFound
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("删除配置存档: %w", err)
+	}
+	// 内容已经删除，残留元数据不会被列出；尽力同步清理即可。
+	_ = os.Remove(m.backupMetadataPath(backupID))
+	if err := syncDirectory(m.backupDir); err != nil {
+		return fmt.Errorf("同步配置备份目录: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) Restore(ctx context.Context, backupID, expectedHash string, apply bool) (SaveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if filepath.Base(backupID) != backupID || !strings.HasSuffix(backupID, ".dae") {
+	if !validBackupID(backupID) {
 		return SaveResult{}, ErrNotFound
 	}
 	content, err := readFileLimited(filepath.Join(m.backupDir, backupID))
@@ -307,6 +403,107 @@ func (m *Manager) Restore(ctx context.Context, backupID, expectedHash string, ap
 		return SaveResult{}, err
 	}
 	return m.saveUnlocked(ctx, string(content), expectedHash, apply)
+}
+
+func validBackupID(backupID string) bool {
+	return backupID != "" && filepath.Base(backupID) == backupID && strings.HasSuffix(backupID, ".dae")
+}
+
+func validateBackupMetadata(name, note string) (backupMetadata, error) {
+	metadata := backupMetadata{Name: strings.TrimSpace(name), Note: strings.TrimSpace(note)}
+	if metadata.Name == "" {
+		return backupMetadata{}, fmt.Errorf("%w: 名称不能为空", ErrInvalid)
+	}
+	if utf8.RuneCountInString(metadata.Name) > maxBackupNameRunes {
+		return backupMetadata{}, fmt.Errorf("%w: 名称不能超过 %d 个字符", ErrInvalid, maxBackupNameRunes)
+	}
+	if utf8.RuneCountInString(metadata.Note) > maxBackupNoteRunes {
+		return backupMetadata{}, fmt.Errorf("%w: 备注不能超过 %d 个字符", ErrInvalid, maxBackupNoteRunes)
+	}
+	return metadata, nil
+}
+
+func (m *Manager) backupMetadataPath(backupID string) string {
+	return filepath.Join(m.backupDir, backupID+".meta.json")
+}
+
+func (m *Manager) readBackupMetadata(backupID string) (backupMetadata, error) {
+	content, err := readFileLimited(m.backupMetadataPath(backupID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return backupMetadata{}, nil
+		}
+		return backupMetadata{}, fmt.Errorf("读取配置存档信息 %s: %w", backupID, err)
+	}
+	var metadata backupMetadata
+	if err := json.Unmarshal(content, &metadata); err != nil {
+		return backupMetadata{}, fmt.Errorf("解析配置存档信息 %s: %w", backupID, err)
+	}
+	metadata, err = validateBackupMetadata(metadata.Name, metadata.Note)
+	if err != nil {
+		return backupMetadata{}, fmt.Errorf("解析配置存档信息 %s: %w", backupID, err)
+	}
+	return metadata, nil
+}
+
+func (m *Manager) writeBackupMetadata(backupID string, metadata backupMetadata) error {
+	content, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(m.backupDir, 0o700); err != nil {
+		return fmt.Errorf("创建配置备份目录: %w", err)
+	}
+	file, err := os.CreateTemp(m.backupDir, ".kdae-panel-backup-meta-*")
+	if err != nil {
+		return fmt.Errorf("创建配置存档信息: %w", err)
+	}
+	temp := file.Name()
+	cleanup := func() { _ = os.Remove(temp) }
+	defer cleanup()
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("写入配置存档信息: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("设置配置存档信息权限: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("同步配置存档信息: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭配置存档信息: %w", err)
+	}
+	if err := replaceFile(temp, m.backupMetadataPath(backupID)); err != nil {
+		return fmt.Errorf("替换配置存档信息: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) backupByID(backupID string) (Backup, error) {
+	path := filepath.Join(m.backupDir, backupID)
+	content, err := readFileLimited(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Backup{}, ErrNotFound
+		}
+		return Backup{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return Backup{}, err
+	}
+	metadata, err := m.readBackupMetadata(backupID)
+	if err != nil {
+		return Backup{}, err
+	}
+	return Backup{
+		ID: backupID, Hash: hashBytes(content), Size: info.Size(),
+		CreatedAt: info.ModTime().UTC(), SourcePath: m.entryPath,
+		Name: metadata.Name, Note: metadata.Note,
+	}, nil
 }
 
 func (m *Manager) readUnlocked() (Document, error) {
@@ -500,6 +697,7 @@ func (m *Manager) pruneBackups(reservedBytes int64) error {
 		if err := os.Remove(filepath.Join(m.backupDir, oldest.id)); err != nil {
 			return fmt.Errorf("清理旧备份 %s: %w", oldest.id, err)
 		}
+		_ = os.Remove(m.backupMetadataPath(oldest.id))
 		backups = backups[1:]
 		total -= oldest.size
 		removed = true

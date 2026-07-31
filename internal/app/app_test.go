@@ -61,6 +61,18 @@ func (s stubConfigurationService) ListBackups(_ context.Context) ([]configstore.
 	return []configstore.Backup{}, nil
 }
 
+func (s stubConfigurationService) CreateBackup(_ context.Context, name, note string) (configstore.Backup, error) {
+	return configstore.Backup{Name: name, Note: note}, nil
+}
+
+func (s stubConfigurationService) UpdateBackup(_ context.Context, id, name, note string) (configstore.Backup, error) {
+	return configstore.Backup{ID: id, Name: name, Note: note}, nil
+}
+
+func (s stubConfigurationService) DeleteBackup(_ context.Context, _ string) error {
+	return nil
+}
+
 func (s stubConfigurationService) Restore(_ context.Context, _, _ string, _ bool) (configstore.SaveResult, error) {
 	return configstore.SaveResult{}, nil
 }
@@ -71,6 +83,10 @@ func (s stubDaeService) Inspect(_ context.Context) dae.Report {
 
 func (s stubDaeService) Outline(_ context.Context) (dae.Outline, error) {
 	return s.outline, s.err
+}
+
+func (s stubDaeService) Validate(_ context.Context, _ string) error {
+	return s.err
 }
 
 func (s stubDaeService) Reload(_ context.Context) error {
@@ -90,6 +106,8 @@ type stubHostService struct {
 	interfaces []host.NetworkInterface
 	actions    []host.Action
 	err        error
+	logs       []host.LogEntry
+	logsErr    error
 }
 
 type stubAuthenticationService struct {
@@ -137,7 +155,7 @@ func (s *stubHostService) Action(_ context.Context, action host.Action) error {
 }
 
 func (s *stubHostService) Logs(_ context.Context, _ int) ([]host.LogEntry, error) {
-	return []host.LogEntry{}, s.err
+	return append([]host.LogEntry(nil), s.logs...), s.logsErr
 }
 
 func (s *stubHostService) Interfaces(_ context.Context) ([]host.NetworkInterface, error) {
@@ -269,6 +287,61 @@ func TestConfigurationConflictResponse(t *testing.T) {
 	}
 }
 
+func TestConfigurationBackupMetadataRoutes(t *testing.T) {
+	dir := t.TempDir()
+	entryPath := filepath.Join(dir, "config.dae")
+	if err := os.WriteFile(entryPath, []byte("global {}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := configstore.NewManager(entryPath, filepath.Join(dir, "backups"), stubDaeService{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := NewWithDependencies(
+		Config{Version: "test-panel"},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Dependencies{Dae: stubDaeService{}, Configuration: configuration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/config/backups", strings.NewReader(`{"name":"稳定配置","note":"切换前"}`))
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	application.Handler().ServeHTTP(created, create)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("创建存档状态码 = %d，响应 = %s", created.Code, created.Body.String())
+	}
+	var backup configstore.Backup
+	if err := json.NewDecoder(created.Body).Decode(&backup); err != nil {
+		t.Fatal(err)
+	}
+	if backup.Name != "稳定配置" || backup.Note != "切换前" || backup.ID == "" {
+		t.Fatalf("创建存档响应异常: %+v", backup)
+	}
+
+	update := httptest.NewRequest(http.MethodPut, "/api/v1/config/backups/"+url.PathEscape(backup.ID), strings.NewReader(`{"name":"日常配置","note":"已验证"}`))
+	update.Header.Set("Content-Type", "application/json")
+	updated := httptest.NewRecorder()
+	application.Handler().ServeHTTP(updated, update)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), "日常配置") {
+		t.Fatalf("编辑存档响应异常: status=%d body=%s", updated.Code, updated.Body.String())
+	}
+
+	deleted := httptest.NewRecorder()
+	application.Handler().ServeHTTP(deleted, httptest.NewRequest(
+		http.MethodDelete, "/api/v1/config/backups/"+url.PathEscape(backup.ID), nil))
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("删除存档状态码 = %d，响应 = %s", deleted.Code, deleted.Body.String())
+	}
+	listed := httptest.NewRecorder()
+	application.Handler().ServeHTTP(listed, httptest.NewRequest(http.MethodGet, "/api/v1/config/backups", nil))
+	if listed.Code != http.StatusOK || listed.Body.String() != "[]\n" {
+		t.Fatalf("删除后列表异常: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
 func TestServiceRestartAction(t *testing.T) {
 	hostService := &stubHostService{}
 	application, err := NewWithDependencies(
@@ -289,6 +362,27 @@ func TestServiceRestartAction(t *testing.T) {
 	}
 	if len(hostService.actions) != 1 || hostService.actions[0] != host.ActionRestart {
 		t.Fatalf("服务动作异常: %v", hostService.actions)
+	}
+}
+
+func TestServiceStartFailureExplainsMissingGeoClassification(t *testing.T) {
+	hostService := &stubHostService{
+		err:  errors.New("执行 systemd start 失败"),
+		logs: []host.LogEntry{{Message: "country code twitter not found in /etc/dae/geoip.dat"}},
+	}
+	application, err := NewWithDependencies(
+		Config{Version: "test-panel"},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Dependencies{Dae: stubDaeService{}, Host: hostService},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/service/actions/start", nil))
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "geoip:twitter") {
+		t.Fatalf("启动失败应指出 Geo 分类：%d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -1312,6 +1406,7 @@ type stubGeoService struct {
 	mu        sync.Mutex
 	applied   int
 	requested upstream.GeoSource
+	custom    []upstream.CustomGeoSource
 }
 
 func (s *stubGeoService) Status(context.Context) geodata.Status { return s.status }
@@ -1346,6 +1441,47 @@ func (s *stubGeoService) applyCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.applied
+}
+
+func (s *stubGeoService) CustomSources() []upstream.CustomGeoSource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]upstream.CustomGeoSource(nil), s.custom...)
+}
+
+func (s *stubGeoService) CreateCustomSource(source upstream.CustomGeoSource) (upstream.CustomGeoSource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	source.ID = "0123456789abcdef"
+	source.Source = "custom:" + upstream.GeoSource(source.ID)
+	s.custom = append(s.custom, source)
+	return source, nil
+}
+
+func (s *stubGeoService) UpdateCustomSource(id string, source upstream.CustomGeoSource) (upstream.CustomGeoSource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.custom {
+		if s.custom[index].ID == id {
+			source.ID = id
+			source.Source = upstream.GeoSource("custom:" + id)
+			s.custom[index] = source
+			return source, nil
+		}
+	}
+	return upstream.CustomGeoSource{}, upstream.ErrCustomGeoSourceNotFound
+}
+
+func (s *stubGeoService) DeleteCustomSource(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.custom {
+		if s.custom[index].ID == id {
+			s.custom = append(s.custom[:index], s.custom[index+1:]...)
+			return nil
+		}
+	}
+	return upstream.ErrCustomGeoSourceNotFound
 }
 
 func newGeoApp(t *testing.T, service GeoService) *App {
@@ -1583,6 +1719,64 @@ func TestGeoUpdateRejectsUnknownSource(t *testing.T) {
 	}
 	if service.requestedSource() != "" {
 		t.Fatal("来源非法时不该发起任何下载")
+	}
+}
+
+func TestGeoCustomSourceCRUD(t *testing.T) {
+	service := &stubGeoService{status: geodata.Status{Updatable: true}}
+	application := newGeoApp(t, service)
+	body := `{"label":"自建规则","geoipUrl":"https://example.com/geoip.dat",` +
+		`"geoipSha256Url":"https://example.com/geoip.dat.sha256sum",` +
+		`"geositeUrl":"https://example.com/geosite.dat",` +
+		`"geositeSha256Url":"https://example.com/geosite.dat.sha256sum"}`
+
+	create := httptest.NewRecorder()
+	application.Handler().ServeHTTP(create, httptest.NewRequest(http.MethodPost,
+		"/api/v1/dae/geo/sources", strings.NewReader(body)))
+	if create.Code != http.StatusCreated || !strings.Contains(create.Body.String(), "custom:0123456789abcdef") {
+		t.Fatalf("创建来源失败：%d %s", create.Code, create.Body.String())
+	}
+
+	update := httptest.NewRecorder()
+	application.Handler().ServeHTTP(update, httptest.NewRequest(http.MethodPut,
+		"/api/v1/dae/geo/sources/0123456789abcdef",
+		strings.NewReader(strings.Replace(body, "自建规则", "更新后的规则", 1))))
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), "更新后的规则") {
+		t.Fatalf("修改来源失败：%d %s", update.Code, update.Body.String())
+	}
+
+	list := httptest.NewRecorder()
+	application.Handler().ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/v1/dae/geo/sources", nil))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "更新后的规则") {
+		t.Fatalf("来源列表异常：%d %s", list.Code, list.Body.String())
+	}
+
+	remove := httptest.NewRecorder()
+	application.Handler().ServeHTTP(remove, httptest.NewRequest(http.MethodDelete,
+		"/api/v1/dae/geo/sources/0123456789abcdef", nil))
+	if remove.Code != http.StatusNoContent {
+		t.Fatalf("删除来源失败：%d %s", remove.Code, remove.Body.String())
+	}
+
+	empty := httptest.NewRecorder()
+	application.Handler().ServeHTTP(empty, httptest.NewRequest(http.MethodGet, "/api/v1/dae/geo/sources", nil))
+	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"sources":[]`) {
+		t.Fatalf("空来源列表必须编码成数组：%d %s", empty.Code, empty.Body.String())
+	}
+}
+
+func TestGeoCustomSourceInUseCannotBeDeleted(t *testing.T) {
+	const id = "0123456789abcdef"
+	service := &stubGeoService{
+		status: geodata.Status{Managed: &geodata.State{Source: upstream.GeoSource("custom:" + id)}},
+		custom: []upstream.CustomGeoSource{{ID: id, Source: upstream.GeoSource("custom:" + id), Label: "使用中"}},
+	}
+	application := newGeoApp(t, service)
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete,
+		"/api/v1/dae/geo/sources/"+id, nil))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "geo_source_in_use") {
+		t.Fatalf("使用中的来源应拒绝删除：%d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

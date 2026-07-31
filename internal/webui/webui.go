@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-//go:embed dist
+// all: 必须保留：Vite 可能生成 _common-*.js，而普通 embed 模式会静默排除
+// 以下划线或点开头的文件，导致浏览器拿到 SPA 回退页而无法启动。
+//
+//go:embed all:dist
 var assets embed.FS
 
 func Handler() http.Handler {

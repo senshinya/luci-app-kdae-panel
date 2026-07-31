@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/tuoro/kdae-panel/internal/daediag"
 	"github.com/tuoro/kdae-panel/internal/host"
 )
 
@@ -51,6 +53,7 @@ func registerServiceRoutes(router *http.ServeMux, daeService DaeService, hostSer
 		defer operations.Unlock()
 
 		var err error
+		startedAt := time.Now().UTC()
 		switch action {
 		case string(host.ActionStart), string(host.ActionStop), string(host.ActionRestart):
 			if hostService == nil {
@@ -67,6 +70,11 @@ func registerServiceRoutes(router *http.ServeMux, daeService DaeService, hostSer
 			return
 		}
 		if err != nil {
+			if hostService != nil && (action == string(host.ActionStart) || action == string(host.ActionRestart)) {
+				if entries, logErr := hostService.Logs(request.Context(), 80); logErr == nil {
+					err = daediag.ExplainGeoFailure(err, entries, startedAt)
+				}
+			}
 			writeAPIError(writer, http.StatusBadGateway, "service_action_failed", err.Error())
 			return
 		}
