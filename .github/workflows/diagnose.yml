@@ -1,0 +1,76 @@
+name: 诊断架构闸门（临时）
+
+# workflow_dispatch 要求文件已经在默认分支上，这份用完即删的工作流不进 main，
+# 因此改成只在诊断分支的 push 上触发。
+on:
+  push:
+    branches: [ci/diagnose-arch-gate]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 SDK 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git \
+            gettext libssl-dev xsltproc rsync wget unzip python3 zstd
+
+      - name: 拉取 SDK
+        env:
+          SDK_URL: https://downloads.openwrt.org/releases/24.10.8/targets/x86/64/openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/sdk"
+          wget -q "${SDK_URL}" -O sdk.tar.zst
+          tar --zstd -xf sdk.tar.zst -C "${GITHUB_WORKSPACE}/sdk" --strip-components=1
+
+      - name: 准备 feeds
+        working-directory: ${{ github.workspace }}/sdk
+        run: |
+          ./scripts/feeds update base luci packages
+          ./scripts/feeds install luci-base
+          cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
+
+      - name: 两种闸门各跑一次 defconfig
+        working-directory: ${{ github.workspace }}/sdk
+        run: |
+          diagnose() {
+            echo "######## $1"
+            echo "-- .config 里的 arch 符号"
+            grep -E '^CONFIG_(x86_64|i386|aarch64)=' .config || echo "(无)"
+            echo "-- tmp 下 arch 符号的定义处"
+            grep -rnE '^config (x86_64|i386|aarch64)$' tmp/*.in 2>/dev/null || echo "(无)"
+            echo "-- PACKAGE_kdae-panel 的 Kconfig 条目"
+            grep -n -A16 '^config PACKAGE_kdae-panel$' tmp/.config-package.in || echo "(没有这个条目)"
+            echo "-- .config 里的选中状态"
+            grep -E '^(CONFIG_PACKAGE_kdae-panel|# CONFIG_PACKAGE_kdae-panel)' .config || echo "(不存在)"
+          }
+          select_pkgs() {
+            {
+              echo 'CONFIG_PACKAGE_kdae-panel=m'
+              echo 'CONFIG_PACKAGE_luci-app-kdae-panel=m'
+            } >> .config
+          }
+
+          select_pkgs
+          make defconfig > /dev/null 2>&1
+          diagnose "闸门 = @(x86_64||aarch64||i386)"
+
+          # 这个 SDK 只带 x86 target，aarch64 在它的 Kconfig 里是个未定义符号。
+          # 去掉它单独试一次，就能把"OR 语法不行"和"表达式里有未定义符号"分开。
+          sed -i 's/@(x86_64||aarch64||i386)/@(x86_64||i386)/' package/kdae/kdae-panel/Makefile
+          rm -rf tmp
+          select_pkgs
+          make defconfig > /dev/null 2>&1
+          diagnose "闸门 = @(x86_64||i386)"
+
+          sed -i 's/@(x86_64||i386)/@x86_64/' package/kdae/kdae-panel/Makefile
+          rm -rf tmp
+          select_pkgs
+          make defconfig > /dev/null 2>&1
+          diagnose "闸门 = @x86_64（原来的写法，作为基线）"
