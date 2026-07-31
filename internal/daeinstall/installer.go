@@ -39,6 +39,16 @@ const (
 	// 仍可能在真正挂载 eBPF 时崩掉,只查一次状态会把这种失败当成成功。
 	healthWindow   = 10 * time.Second
 	healthInterval = time.Second
+	// settleWindow 是"重启已经发起，但服务还没落到终态"这段过程的上限。
+	//
+	// systemd 的 restart 是同步的，返回时新进程已经起来；procd 不是：
+	// rc.common 对 USE_PROCD=1 把 restart 展开成 stop + start，stop 只是一次
+	// ubus service delete，procd 发完 SIGTERM 就立刻返回，最多等 term_timeout
+	// （默认 5 秒）才补 SIGKILL，而新实例要等旧进程真正退干净才会被拉起。
+	// dae 退出时正好要卸载 eBPF/TC 挂载点，这一两秒实打实存在。
+	// 于是重启后的头几秒里，"查到的还是正在退出的旧 pid"和"两个实例都不在"
+	// 都是正常过程而非故障，按第一次采样定生死等于随机回滚正常版本。
+	settleWindow = 15 * time.Second
 )
 
 // Probe 用某个具体路径上的 dae 可执行文件做验证。
@@ -121,6 +131,8 @@ type Installer struct {
 	// health/interval 是重启后的健康观察窗口与采样间隔，测试会调短它们。
 	health   time.Duration
 	interval time.Duration
+	// settle 是观察窗口之前那段"等服务落到终态"的上限，与 health 分开计时。
+	settle time.Duration
 }
 
 type Options struct {
@@ -176,6 +188,7 @@ func New(options Options) (*Installer, error) {
 		logger:      logger,
 		health:      healthWindow,
 		interval:    healthInterval,
+		settle:      settleWindow,
 	}
 	backend, err := options.ServiceBackend.Resolve()
 	if err != nil {
@@ -715,19 +728,107 @@ func (i *Installer) restorePrevious(ctx context.Context, target string) restoreO
 func (i *Installer) restart(ctx context.Context) error {
 	restartCtx, cancel := context.WithTimeout(ctx, restartTimeout)
 	defer cancel()
+	// 先记下重启前的主进程号。procd 的 restart 立刻返回，之后一两秒里查到的
+	// 可能仍是正在退出的旧实例；不记下这个号，就会把旧 pid 当成新实例的基线，
+	// 等真正的新 pid 出现时反过来判成"服务在观察窗口内挂过"——回滚一个
+	// 完全正常的版本。读不到就当没有，判据会自动退回到"连续两次相同"。
+	previousPID := 0
+	if status, err := i.service.Status(restartCtx); err == nil {
+		previousPID = status.MainPID
+	}
 	if err := i.service.Action(restartCtx, host.ActionRestart); err != nil {
 		return err
 	}
-	return i.waitHealthy(restartCtx)
+	return i.waitHealthy(restartCtx, previousPID)
 }
 
 // waitHealthy 是重启后的观察循环，与真正发起重启的那一步分开，
 // 便于测试直接驱动观察窗口而不依赖 ServiceController.Action 的行为。
-func (i *Installer) waitHealthy(ctx context.Context) error {
+//
+// 分成稳定期和观察期两段，各自独立计时。稳定期负责等服务落到终态并取得基线，
+// 观察期从基线成立那一刻才开始算——合在一起计时的话，重启越慢真正用于观察的
+// 时间越短，而重启慢恰恰是最该多看两眼的情形。
+func (i *Installer) waitHealthy(ctx context.Context, previousPID int) error {
+	baseline, err := i.settleAfterRestart(ctx, previousPID)
+	if err != nil {
+		return err
+	}
+	return i.observeAfterRestart(ctx, baseline)
+}
+
+// settleAfterRestart 轮询到服务达到终态为止，返回作为观察基线的那次采样。
+//
+// 终态的判据有两条，都要满足：ActiveState 为 active 且 MainPID 连续两次相同，
+// 以及这个 MainPID 不再是重启前的那一个。原先的实现只看第一次采样，
+// 那建立在 systemctl restart 的同步语义上，procd 不满足（见 settleWindow），
+// 结果是每次版本切换都可能回滚一个完全正常的版本，理由还是编造的。
+//
+// 第二条不能省。procd 的重启中间态有两种，只挡住其一等于没挡：新实例尚未拉起时
+// 查到的是 inactive，"连续两次相同"能挡住；而旧实例还在退出时查到的是
+// active + 旧 pid，dae 卸载 eBPF 挂载点要一两秒，一秒一采就足以连续两次
+// 采到同一个旧 pid——把它当基线，等新实例真的起来就会被判成"观察窗口内挂过"。
+//
+// 稳定期不会放过真正的崩溃循环，两种情形都有出口：
+//   - 崩溃周期长于采样间隔：能凑出连续两次相同的 pid，基线成立，随后 pid 变化
+//     会在观察期里被抓到；
+//   - 崩溃周期短于采样间隔：每次采样都是新 pid，"连续两次相同"永远不成立，
+//     稳定期到点即失败，不会被误判成起来了。
+//
+// 对 systemd 无害：它返回时新进程已经起稳且 pid 必然与重启前不同，
+// 第二次采样必然与第一次相同，代价只是多花一个采样间隔。
+func (i *Installer) settleAfterRestart(ctx context.Context, previousPID int) (host.Status, error) {
+	deadline := time.Now().Add(i.settle)
+	var previous host.Status
+	first := true
+	for {
+		select {
+		case <-time.After(i.interval):
+		case <-ctx.Done():
+			return host.Status{}, ctx.Err()
+		}
+		status, err := i.service.Status(ctx)
+		if err != nil {
+			return host.Status{}, fmt.Errorf("重启后无法读取服务状态: %w", err)
+		}
+		if first {
+			// 第一次采样没有可比较的对象，只能记下来。稳定期到点的判定也一并
+			// 推迟到下一轮，否则 settle 被调到 0 的测试连比较都做不了一次。
+			previous, first = status, false
+			continue
+		}
+		stale := previousPID != 0 && status.MainPID == previousPID
+		if status.ActiveState == "active" && previous.ActiveState == "active" &&
+			status.MainPID == previous.MainPID && !stale {
+			return status, nil
+		}
+		if !time.Now().Before(deadline) {
+			return host.Status{}, settleTimeout(i.settle, previous, status, stale)
+		}
+		previous = status
+	}
+}
+
+// settleTimeout 说明服务到底卡在哪一步。三种停不下来的原因对用户是三件事：
+// 根本没起来、旧实例赖着不退、起来就崩——含糊成一句"没稳定"等于让人无从下手。
+func settleTimeout(window time.Duration, previous, last host.Status, stale bool) error {
+	if last.ActiveState != "active" {
+		return fmt.Errorf("重启后 %s 内服务没有起来，最后一次查到的状态是 %s/%s",
+			window, last.ActiveState, last.SubState)
+	}
+	if stale {
+		return fmt.Errorf("重启后 %s 内主进程号仍是重启前的 %d，服务没有换成新实例",
+			window, last.MainPID)
+	}
+	return fmt.Errorf(
+		"重启后 %s 内服务的主进程号一直在变（先是 %d，接着是 %d），说明它起来就崩、反复被拉起，新版本很可能起不稳",
+		window, previous.MainPID, last.MainPID)
+}
+
+// observeAfterRestart 在观察窗口里盯住已经稳定下来的服务。
+// dae validate 不加载 eBPF，能通过自检的版本仍可能在真正挂载 eBPF 时崩掉，
+// 因此稳定之后还要多看一段时间。
+func (i *Installer) observeAfterRestart(ctx context.Context, baseline host.Status) error {
 	deadline := time.Now().Add(i.health)
-	var baseline uint64
-	var baselinePID int
-	sampled := false
 	for {
 		select {
 		case <-time.After(i.interval):
@@ -738,29 +839,23 @@ func (i *Installer) waitHealthy(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("重启后无法读取服务状态: %w", err)
 		}
-		// 崩溃重启循环里 ActiveState 会在 activating/failed 之间跳，
-		// 任何一次不是 active 都判定失败，而不是等到窗口结束再看最后一眼。
+		// 服务已经稳定过一次，此后任何一次不是 active 都是真的掉了，
+		// 不必等到窗口结束再看最后一眼。
 		if status.ActiveState != "active" {
 			return fmt.Errorf("重启后服务状态为 %s/%s", status.ActiveState, status.SubState)
 		}
 		// 只看 ActiveState 会漏掉采样间隔内跑完的崩溃-重启循环：
 		// 两次采样都是 active，中间其实已经挂掉并被拉起来过。
-		if !sampled {
-			baseline, baselinePID, sampled = status.Restarts, status.MainPID, true
-			// 第一次采样只建立基线，不能因为调度延迟已经越过 deadline 就直接成功。
-			// 至少再采一次，才能判断观察期间有没有发生崩溃重启。
-			continue
-		}
 		// systemd 的 NRestarts 单调递增，是最直接的证据。
-		if status.Restarts > baseline {
+		if status.Restarts > baseline.Restarts {
 			return fmt.Errorf("重启后服务在观察窗口内又重启了 %d 次，新版本很可能起不稳",
-				status.Restarts-baseline)
+				status.Restarts-baseline.Restarts)
 		}
 		// procd 不暴露重启计数器，NRestarts 恒为 0，上面那条永远不成立。
 		// 但重新拉起必然换主进程号，pid 变了就等于中间挂过一次。
-		if baselinePID != 0 && status.MainPID != 0 && status.MainPID != baselinePID {
+		if baseline.MainPID != 0 && status.MainPID != 0 && status.MainPID != baseline.MainPID {
 			return fmt.Errorf("重启后服务的主进程号从 %d 变成 %d，说明它在观察窗口内挂掉并被重新拉起，新版本很可能起不稳",
-				baselinePID, status.MainPID)
+				baseline.MainPID, status.MainPID)
 		}
 		if !time.Now().Before(deadline) {
 			return nil

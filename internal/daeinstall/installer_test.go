@@ -79,17 +79,48 @@ type fakeService struct {
 	// pidChurn 为真时每次状态查询都换一个 pid，模拟"两次采样之间服务已经
 	// 崩过一轮又被拉起来"，而 ActiveState 全程 active。procd 不暴露重启
 	// 计数器，这是那边唯一能发现崩溃循环的信号。
-	pidChurn    bool
+	pidChurn bool
+	// churnAfter 让 pid 从第几次状态查询之后才开始每次都变，用来模拟
+	// "先稳住、稳定期结束之后才开始崩"的服务。pidChurn 是从头就崩，
+	// 两者覆盖的是稳定期与观察期两段不同的判定。
+	churnAfter  int
+	samples     int
 	pidAt       int
+	nextPID     int
 	activeState string
 	statusErr   error
 	actionErr   error
+	// staleSamples / inactiveSamples / newPID 模拟 procd 的异步重启：
+	// Action(restart) 立刻返回，之后的前 staleSamples 次状态查询看到的仍是
+	// 正在退出的旧实例（active + 旧 pid），再之后的 inactiveSamples 次两个
+	// 实例都不在（inactive），最后才稳定在新 pid。没有这套模拟，fakeService
+	// 就是个瞬时纯函数，procd 上每次安装都会失败回滚这件事在测试里根本看不见。
+	staleSamples    int
+	inactiveSamples int
+	newPID          int
+	pendingStale    int
+	pendingInactive int
 }
+
+// initialPID 是首个实例的主进程号，重启会换成别的号。
+const initialPID = 4321
 
 func (s *fakeService) Action(_ context.Context, action host.Action) error {
 	s.actions = append(s.actions, action)
 	if action == host.ActionRestart {
 		s.restarts++
+		// 重启一发出就进入中间态；在此之前的状态查询（预检、目标解析）
+		// 不该被这套脚本消费掉。
+		s.pendingStale, s.pendingInactive = s.staleSamples, s.inactiveSamples
+		if s.pidAt == 0 {
+			s.pidAt = initialPID
+		}
+		// 重启必然拉起一个新进程，systemd 与 procd 都如此。旧实现让 pid 跨重启
+		// 保持不变，等于替安装事务掩盖了"面板可能把旧实例当成新实例"这件事。
+		s.nextPID = s.newPID
+		if s.nextPID == 0 {
+			s.nextPID = s.pidAt + 1000
+		}
 	}
 	if failures := s.actionErrors[action]; len(failures) > 0 {
 		s.actionErrors[action] = failures[1:]
@@ -114,19 +145,43 @@ func (s *fakeService) Status(context.Context) (host.Status, error) {
 	if s.restartsGrow {
 		s.restartsAt++
 	}
-	if s.pidChurn {
-		s.pidAt++
-	} else if s.pidAt == 0 {
-		s.pidAt = 4321
+	s.samples++
+	if s.pidAt == 0 {
+		s.pidAt = initialPID
+	}
+	subState := "running"
+	switch {
+	case s.pendingStale > 0:
+		// 旧实例还在退出：procd 已经发了 SIGTERM，但 dae 要卸载 eBPF 挂载点，
+		// 这段时间里查到的仍是旧实例，pid 也还是旧的。
+		s.pendingStale--
+	case s.pendingInactive > 0:
+		// 旧实例已退，新实例还没被拉起来——procd 不会在旧进程退干净前 service add。
+		s.pendingInactive--
+		state, subState = "inactive", "dead"
+	default:
+		if s.nextPID != 0 {
+			s.pidAt, s.nextPID = s.nextPID, 0
+		}
+		if s.pidChurn || (s.churnAfter > 0 && s.samples > s.churnAfter) {
+			s.pidAt++
+		}
+	}
+	pid := s.pidAt
+	if state != "active" {
+		pid = 0
+		if subState == "running" {
+			subState = "dead"
+		}
 	}
 	return host.Status{
 		ActiveState:   state,
-		SubState:      "running",
+		SubState:      subState,
 		ExecStartPath: s.execStart,
 		UnitPath:      s.unitPath,
 		UnitFileState: s.unitFileState,
 		Restarts:      s.restartsAt,
-		MainPID:       s.pidAt,
+		MainPID:       pid,
 	}, nil
 }
 
@@ -164,6 +219,9 @@ func newTestInstaller(t *testing.T, fetcher *fakeFetcher, service *fakeService) 
 	// 测试不必真的观察十秒，但仍多次采样以覆盖"起来后又崩"的判定
 	installer.health = 3 * time.Millisecond
 	installer.interval = time.Millisecond
+	// 稳定期同样按毫秒计：真值 15 秒会让"服务永远起不来"的用例每条卡十几秒。
+	// 仍留出十几个采样间隔，异步重启的模拟才有机会走完中间态。
+	installer.settle = 50 * time.Millisecond
 	if err := os.WriteFile(filepath.Join(directory, "config.dae"), []byte("global {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -424,16 +482,87 @@ func TestInstallDetectsCrashLoopWithinObservationWindow(t *testing.T) {
 
 // procd 不暴露重启计数器，崩溃循环只能靠主进程号变化发现。
 // 没有这一条，respawn 循环里反复崩溃的新版本会被判定为安装成功。
+//
+// pid 每次查询都换，稳定期的"连续两次相同"永远凑不齐——稳定期必须到点报失败，
+// 而不是把这种服务当成"还在起来"一路放过去。
 func TestInstallRejectsPIDChurnDuringHealthWindow(t *testing.T) {
 	service := &fakeService{activeState: "active", pidChurn: true}
 	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
 
-	err := installer.waitHealthy(context.Background())
+	err := installer.waitHealthy(context.Background(), 0)
 	if err == nil {
 		t.Fatal("观察窗口内 pid 变化应当判定为不稳定")
 	}
 	if !strings.Contains(err.Error(), "进程号") {
 		t.Fatalf("错误信息 = %q，应当说明是进程号变化", err.Error())
+	}
+}
+
+// procd 的 restart 展开成 stop + start 且立刻返回：面板会先看到正在退出的
+// 旧实例，再看到两个实例都不在的空窗，最后才看到新实例。稳定期必须容忍
+// 这段过程，否则每次版本切换都会回滚一个完全正常的版本，理由还是编造的
+// （"主进程号从 X 变成 Y"——那其实是旧实例换成新实例）。
+func TestInstallToleratesAsynchronousProcdRestart(t *testing.T) {
+	service := &fakeService{staleSamples: 2, inactiveSamples: 3, newPID: 9876}
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, service)
+	seed(t, binaryPath, "v1")
+
+	status, err := installer.Install(context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2")
+	if err != nil {
+		t.Fatalf("异步重启是 procd 的正常过程，不应判定为安装失败: %v", err)
+	}
+	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v2")) {
+		t.Fatalf("磁盘内容 = %q，新版本应当留在磁盘上而不是被回滚", content)
+	}
+	if status.Managed == nil || status.Managed.Ref != "v2.0.0" {
+		t.Fatalf("账本应记下新版本: %+v", status.Managed)
+	}
+}
+
+// 稳定期只是给"正在起来"留出时间，不是给"起不来"发免死金牌：
+// 服务始终不 active 时必须到点失败，并且如实说出最后查到的状态。
+func TestWaitHealthyFailsWhenServiceNeverSettles(t *testing.T) {
+	service := &fakeService{activeState: "activating"}
+	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
+
+	err := installer.waitHealthy(context.Background(), 0)
+	if err == nil {
+		t.Fatal("服务始终没起来时应当判定失败")
+	}
+	if !strings.Contains(err.Error(), "没有起来") || !strings.Contains(err.Error(), "activating") {
+		t.Fatalf("错误信息 = %q，应当说明服务没起来并带上最后状态", err.Error())
+	}
+}
+
+// 稳定期与观察期必须分开计时。合并计时的话，异步重启耗掉的时间会从观察窗口里
+// 扣走，重启越慢观察越短——而重启慢恰恰最该多看两眼。这里让服务先走完异步重启
+// 的中间态，稳定之后才开始崩：观察窗口若被稳定期吃掉，这次崩溃就会被漏掉。
+func TestObservationWindowStartsAfterServiceSettles(t *testing.T) {
+	// 前 4 次采样用于走完中间态并稳定下来（旧实例退出 → 空窗 → 新实例
+	// 连续两次同号），第 5 次起 pid 每查一次变一次。
+	service := &fakeService{staleSamples: 1, inactiveSamples: 1, newPID: 5000, churnAfter: 4}
+	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
+	_ = service.Action(context.Background(), host.ActionRestart)
+
+	err := installer.waitHealthy(context.Background(), initialPID)
+	if err == nil {
+		t.Fatal("服务稳定后又开始反复换 pid，观察期应当抓到")
+	}
+	if !strings.Contains(err.Error(), "观察窗口内挂掉") {
+		t.Fatalf("错误信息 = %q，应当指出是观察窗口内的崩溃重启", err.Error())
+	}
+}
+
+// 旧实例退出得慢时，重启后连续两次都能采到同一个旧 pid。只按"连续两次相同"
+// 建立基线，会把旧实例当成新实例，等新实例真的起来再判成"观察窗口内挂过"——
+// 这正是 procd 上回滚正常版本的第二种路径，必须靠"pid 要与重启前不同"挡住。
+func TestSettleIgnoresLingeringPreviousInstance(t *testing.T) {
+	service := &fakeService{staleSamples: 4, newPID: 7777}
+	installer, _ := newTestInstaller(t, &fakeFetcher{}, service)
+	_ = service.Action(context.Background(), host.ActionRestart)
+
+	if err := installer.waitHealthy(context.Background(), initialPID); err != nil {
+		t.Fatalf("旧实例慢慢退出是正常过程，不应判定为失败: %v", err)
 	}
 }
 
