@@ -1182,6 +1182,166 @@ pre,
   gap: 4px;
 }
 
+.dns-card-alert {
+  margin-bottom: 14px;
+}
+
+.dns-issue-detail {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dns-not-configured {
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.dns-not-configured > div,
+.dns-section-head > div,
+.dns-setting-toggle > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.dns-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.dns-summary-item {
+  min-width: 0;
+  padding-left: 14px;
+  display: grid;
+  gap: 5px;
+  border-left: 2px solid var(--border-strong);
+}
+
+.dns-summary-value {
+  overflow-wrap: anywhere;
+}
+
+.orchestrate-dns-modal {
+  width: min(1080px, 96vw);
+  max-height: 92vh;
+}
+
+.orchestrate-dns-modal > .n-card__content {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.dns-template-warning {
+  margin-bottom: 14px;
+}
+
+.dns-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+}
+
+.dns-settings-grid > label {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+
+.dns-setting-toggle {
+  min-width: 0;
+  min-height: 66px;
+  padding: 10px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.dns-reset-field {
+  justify-self: start;
+}
+
+.dns-editor-stack {
+  margin-top: 22px;
+  display: grid;
+  gap: 24px;
+}
+
+.dns-editor-section {
+  min-width: 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.dns-section-head {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.dns-upstream-list,
+.dns-fixed-ttl-list,
+.dns-rule-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dns-upstream-row {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 10px;
+}
+
+.dns-fixed-ttl-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px 34px;
+  align-items: center;
+  gap: 10px;
+}
+
+.dns-rule-row {
+  display: grid;
+  grid-template-columns: 92px minmax(220px, 1fr) minmax(190px, 0.65fr) 34px;
+  align-items: center;
+  gap: 10px;
+}
+
+.dns-rule-matcher {
+  min-width: 0;
+}
+
+.dns-rule-hint {
+  display: block;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.dns-empty {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.dns-source-input {
+  margin-top: 14px;
+}
+
+.dns-source-input textarea {
+  line-height: 1.6;
+  tab-size: 2;
+}
+
 .error-detail {
   margin: 0;
   white-space: pre-wrap;
@@ -1343,6 +1503,70 @@ pre,
     padding: 18px 0 0;
     border-left: 0;
     border-top: 1px solid var(--border);
+  }
+
+  .dns-card .n-card-header,
+  .dns-section-head,
+  .dns-not-configured {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dns-card .n-card-header__extra {
+    margin-left: 0;
+  }
+
+  .dns-card .n-card-header__extra .n-space {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .dns-summary-grid,
+  .dns-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dns-setting-toggle {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .dns-setting-toggle > .n-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .dns-upstream-row,
+  .dns-fixed-ttl-row,
+  .dns-rule-row {
+    grid-template-columns: minmax(0, 1fr) 34px;
+    align-items: center;
+  }
+
+  .dns-upstream-row > :first-child,
+  .dns-fixed-ttl-row > :first-child,
+  .dns-rule-row > :nth-child(2),
+  .dns-rule-row > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+
+  .dns-upstream-row > :nth-child(2),
+  .dns-fixed-ttl-row > :nth-child(2) {
+    grid-column: 1;
+  }
+
+  .dns-upstream-row > :last-child,
+  .dns-fixed-ttl-row > :last-child,
+  .dns-rule-row > :last-child {
+    grid-column: 2;
+  }
+
+  .dns-rule-row > :first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .dns-rule-row > :last-child {
+    grid-row: 1;
   }
 
   .geo-source-picker {

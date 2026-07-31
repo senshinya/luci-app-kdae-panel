@@ -185,6 +185,38 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(global).toContainText('debug')
     await expect(global).toContainText('auto')
 
+    const dns = page.getByTestId('dns-card')
+    await expect(dns).toContainText('2 个上游')
+    await expect(dns).toContainText('4 条规则')
+    await dns.getByRole('button', { name: '编辑 DNS' }).click()
+    const dnsModal = page.getByTestId('dns-editor-modal')
+    const dnsSimpleTab = dnsModal.locator('.n-tabs-tab', { hasText: '简单模式' })
+    const dnsAdvancedTab = dnsModal.locator('.n-tabs-tab', { hasText: '进阶模式' })
+    await expect(dnsSimpleTab).toHaveClass(/n-tabs-tab--active/)
+    const simpleUpstream = dnsModal.getByTestId('dns-upstreams-editor').getByLabel('上游地址').first().locator('input')
+    await simpleUpstream.fill('udp://1.1.1.1:53')
+    await dnsAdvancedTab.click()
+    const dnsSource = dnsModal.locator('textarea')
+    const originalDNSBody = await dnsSource.inputValue()
+    await expect(originalDNSBody).toContain("alidns: 'udp://223.5.5.5:53'")
+    const advancedDNSDraft = `${originalDNSBody}\n# 仅保留在进阶草稿`
+    await dnsSource.fill(advancedDNSDraft)
+    await dnsSimpleTab.click()
+    await expect(simpleUpstream).toHaveValue('udp://1.1.1.1:53')
+    await dnsAdvancedTab.click()
+    await expect(dnsSource).toHaveValue(advancedDNSDraft)
+    await dnsModal.getByRole('button', { name: '取消' }).click()
+
+    // 取消后两份草稿都应丢弃；重开看到的仍是配置正文，而不是任一未应用草稿。
+    await dns.getByRole('button', { name: '编辑 DNS' }).click()
+    const reopenedDNSModal = page.getByTestId('dns-editor-modal')
+    await reopenedDNSModal.locator('.n-tabs-tab', { hasText: '进阶模式' }).click()
+    await expect(reopenedDNSModal.locator('textarea')).toHaveValue(originalDNSBody)
+    await reopenedDNSModal.locator('.n-tabs-tab', { hasText: '简单模式' }).click()
+    await reopenedDNSModal.getByTestId('dns-upstreams-editor').getByLabel('上游地址').first().locator('input').fill('udp://1.1.1.1:53')
+    await reopenedDNSModal.getByRole('button', { name: '应用到编排' }).click()
+    await expect(page.getByText('DNS 设置已应用到编排，保存并重载后生效')).toBeVisible()
+
     await page.getByRole('button', { name: '导入节点' }).click()
     await page.getByPlaceholder(/vmess/).fill(NODE_LINKS)
     await page.getByRole('button', { name: '加入编排' }).click()
@@ -267,6 +299,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(saved).toContain('log_level: debug')
     expect(saved).toContain("lan_interface: 'ens2'")
     expect(saved).toContain("wan_interface: 'auto'")
+    expect(saved).toContain("alidns: 'udp://1.1.1.1:53'")
+    expect(saved).not.toContain('仅保留在进阶草稿')
 
     await capture(page, 'orchestration.png', 1600, 1120)
     const capabilityPattern = '**/api/v1/dae/capabilities'
@@ -561,6 +595,15 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(globalModalBox!.x + globalModalBox!.width).toBeLessThanOrEqual(390)
     expect(await globalModal.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     await globalModal.getByRole('button', { name: '取消' }).click()
+
+    await page.getByTestId('dns-card').getByRole('button', { name: '编辑 DNS' }).click()
+    const dnsModal = page.getByTestId('dns-editor-modal')
+    const dnsModalBox = await dnsModal.boundingBox()
+    expect(dnsModalBox).not.toBeNull()
+    expect(dnsModalBox!.x).toBeGreaterThanOrEqual(0)
+    expect(dnsModalBox!.x + dnsModalBox!.width).toBeLessThanOrEqual(390)
+    expect(await dnsModal.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    await dnsModal.getByRole('button', { name: '取消' }).click()
 
     await page.getByTestId('routing-card').getByRole('button', { name: '编辑路由' }).click()
     const routingModal = page.getByTestId('routing-editor-modal')

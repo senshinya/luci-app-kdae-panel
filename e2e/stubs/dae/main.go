@@ -30,7 +30,7 @@ Available Commands:
 `)
 	case "export":
 		if len(args) > 1 && args[1] == "outline" {
-			fmt.Print(`{"version":"v1.0.6","structure":[{"name":"Global","mapping":"global","structure":[{"name":"LogLevel","mapping":"log_level","defaultValue":"info"},{"name":"LanInterface","mapping":"lan_interface"},{"name":"WanInterface","mapping":"wan_interface"},{"name":"DialMode","mapping":"dial_mode","defaultValue":"domain"},{"name":"TproxyPort","mapping":"tproxy_port","defaultValue":"12345"},{"name":"TlsImplementation","mapping":"tls_implementation","defaultValue":"tls"},{"name":"CheckInterval","mapping":"check_interval","defaultValue":"30s"}]}]}`)
+			fmt.Print(`{"version":"v1.0.6","structure":[{"name":"Global","mapping":"global","structure":[{"name":"LogLevel","mapping":"log_level","defaultValue":"info"},{"name":"LanInterface","mapping":"lan_interface"},{"name":"WanInterface","mapping":"wan_interface"},{"name":"DialMode","mapping":"dial_mode","defaultValue":"domain"},{"name":"TproxyPort","mapping":"tproxy_port","defaultValue":"12345"},{"name":"TlsImplementation","mapping":"tls_implementation","defaultValue":"tls"},{"name":"CheckInterval","mapping":"check_interval","defaultValue":"30s"}]},{"name":"Dns","mapping":"dns","structure":[{"name":"IpVersionPrefer","mapping":"ipversion_prefer"},{"name":"FixedDomainTtl","mapping":"fixed_domain_ttl"},{"name":"Upstream","mapping":"upstream"},{"name":"Routing","mapping":"routing"},{"name":"Bind","mapping":"bind"},{"name":"OptimisticCache","mapping":"optimistic_cache","defaultValue":"true"},{"name":"OptimisticCacheTtl","mapping":"optimistic_cache_ttl","defaultValue":"60"},{"name":"MaxCacheSize","mapping":"max_cache_size","defaultValue":"65536"}]}]}`)
 		}
 	}
 }

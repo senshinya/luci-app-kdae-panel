@@ -407,10 +407,9 @@ function outboundArrow(value: string): number {
   return arrow
 }
 
-export function parseRoutingRules(text: string): RoutingRule[] {
+/** 解析指定节内的规则；供顶层 routing 与 dns.routing 子节复用。 */
+export function parseRoutingRulesInSection(text: string, section: Section): RoutingRule[] {
   const masked = maskWithSpans(text)
-  const section = scanMasked(masked.text, 0, text.length).find((candidate) => candidate.name === 'routing')
-  if (!section) return []
   const rules: RoutingRule[] = []
   let pendingParts: string[] = []
   let pendingStart = -1
@@ -457,6 +456,12 @@ export function parseRoutingRules(text: string): RoutingRule[] {
     }
   }
   return rules
+}
+
+export function parseRoutingRules(text: string): RoutingRule[] {
+  const masked = maskWithSpans(text)
+  const section = scanMasked(masked.text, 0, text.length).find((candidate) => candidate.name === 'routing')
+  return section ? parseRoutingRulesInSection(text, section) : []
 }
 
 function splice(text: string, start: number, end: number, replacement: string): string {

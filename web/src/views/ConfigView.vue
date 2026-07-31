@@ -183,7 +183,7 @@ onMounted(() => void load())
           v-model:value="content"
           type="textarea"
           class="config-editor"
-          placeholder="global {&#10;  ...&#10;}&#10;&#10;routing {&#10;  fallback: direct&#10;}"
+          placeholder="global {&#10;  ...&#10;}&#10;&#10;dns {&#10;  upstream {&#10;    ...&#10;  }&#10;}&#10;&#10;routing {&#10;  fallback: direct&#10;}"
           :autosize="false"
           :rows="30"
           spellcheck="false"
@@ -192,4 +192,3 @@ onMounted(() => void load())
     </NCard>
   </div>
 </template>
-

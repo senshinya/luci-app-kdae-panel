@@ -23,6 +23,7 @@ import { APIError, getJSON, postJSON, putJSON } from '../api/client'
 import type { ConfigDocument, ConfigSaveResult } from '../types/api'
 import { readSection } from '../utils/daeconf'
 import GlobalCard from '../components/orchestration/GlobalCard.vue'
+import DNSCard from '../components/orchestration/DNSCard.vue'
 import NodesCard from '../components/orchestration/NodesCard.vue'
 import SubscriptionsCard from '../components/orchestration/SubscriptionsCard.vue'
 import GroupsCard from '../components/orchestration/GroupsCard.vue'
@@ -155,7 +156,7 @@ onMounted(() => void load())
     <div class="page-toolbar">
       <div>
         <h2>代理编排</h2>
-        <NText depth="3">可视化编辑全局设置、节点、订阅、分组与路由，未涉及的配置和注释保持原样</NText>
+        <NText depth="3">可视化编辑全局设置、DNS、节点、订阅、分组与路由，未涉及的配置和注释保持原样</NText>
       </div>
       <NSpace>
         <NButton secondary :disabled="loading" @click="load">
@@ -189,6 +190,7 @@ onMounted(() => void load())
     <NSpin :show="loading">
       <div class="page-stack">
         <GlobalCard v-model="content" />
+        <DNSCard v-model="content" />
         <NodesCard v-model="content" />
 
         <NGrid class="equal-height-grid" responsive="screen" cols="1 l:2" :x-gap="16" :y-gap="16">
