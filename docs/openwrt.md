@@ -148,7 +148,7 @@ logread -e kdae-panel
 以上 12 项与 `/etc/config/kdae-panel` 的默认模板逐项一致；LuCI 的设置表单暴露其中 11 项，
 `service_name` 有意不放进界面（改错这一项会让面板和 init 脚本互相认不出对方）。
 
-三条必须知道的说明：
+四条必须知道的说明：
 
 - **`data_dir` 不要改到 `/var` 或 `/tmp` 下。** OpenWrt 上 `/var` 是 `/tmp` 的软链，两者都是内存
   文件系统，重启即空。数据库、管理员账户和 dae 本地版本库一旦落在这里，重启路由器后会全部丢失。
@@ -156,15 +156,24 @@ logread -e kdae-panel
   是按 systemd 部署选的，init 脚本会把每一个持久化文件逐项改写到 `data_dir` 下——上游新增
   持久化文件时（例如 GitHub Token、自定义 geo 来源），这里必须同步补一行，否则那份数据
   在 OpenWrt 上每次重启都会消失。
-- **没有自升级开关，也没有版本检查开关。** 计划阶段设想过给面板加一个一键升级自身的能力，但
+- **没有自升级开关，但版本检查照做。** 计划阶段设想过给面板加一个一键升级自身的能力，但
   该能力（`internal/panelupdate`）取件坐标写死指向上游仓库 `tuoro/kdae-panel`，那里发布的二进制
   不含本文档描述的 procd 后端。一旦在这个部署上打开它并触发一次升级，面板会以 root 权限把自己
   替换成一个只认识 `systemctl` 的程序，重启后彻底无法工作——这不是需要提示用户注意的风险，而是
-  必然发生的故障，因此 procd 后端下面板启动时压根不构造这项能力，也不做版本检查。设置页的
-  「允许一键升级」开关在本部署里恒为置灰，「面板更新」卡片不会给出可用版本。**这是预期行为，
-  不是故障。升级面板请安装新的软件包。**
-- 上述两项在 systemd 后端下由 `KDAE_PANEL_ENABLE_SELF_UPDATE` 与 `KDAE_PANEL_DISABLE_UPDATE_CHECK`
-  两个环境变量控制；OpenWrt 的 `/etc/config/kdae-panel` 里没有对应选项，不要照着别处的说明来找。
+  必然发生的故障，因此 procd 后端下面板启动时压根不构造这项能力，设置页也就没有「允许一键升级」
+  这个开关（取而代之的是一句说明和上面那条 `opkg install` 命令）。**这是预期行为，不是故障。**
+  但**检查仍然做**：能不能自己动手升级，与该不该知道有新版本，是两件事。procd 下面板问的是
+  `senshinya/luci-app-kdae-panel` 的最新 release——那才是这台机器装得上的那条版本线，沿用上游
+  `tuoro/kdae-panel` 的 tag 报出来的"新版本"既装不上也不该装。
+- 版本检查在 systemd 后端下由 `KDAE_PANEL_DISABLE_UPDATE_CHECK` 控制，自升级由
+  `KDAE_PANEL_ENABLE_SELF_UPDATE` 控制；OpenWrt 的 `/etc/config/kdae-panel` 里两个选项都没有，
+  不要照着别处的说明来找。
+- **「面板更新」卡片如果写着「本部署不做新版本检查」**，那是面板认不出自己的版本号、因而放弃了
+  比对，不是这个部署没有检查能力。比对只在版本形如 `vX.Y.Z` 时进行
+  （`internal/app/panelupdate_handlers.go` 的 `parseSemver`），认不出就宁可不提示，也不拿一个没法
+  比较的字符串去和 tag 硬比。正式发布的软件包不会出现这种情况；自己从源码编译时要让
+  `main.version` 带上版本号（仓库根目录的 `make build` 用 `git describe` 自动填），否则二进制里的
+  版本是 `dev`。
 
 ## 升级与卸载
 

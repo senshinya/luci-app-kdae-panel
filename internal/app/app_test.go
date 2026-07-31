@@ -1438,6 +1438,30 @@ func TestVersionBehind(t *testing.T) {
 	}
 }
 
+// OpenWrt 软件包编进二进制的版本号必须能被 parseSemver 认出来。
+//
+// 认不出的后果不是报错而是静默降级：checked 恒为 false，设置页显示"本部署不做新版本
+// 检查"——检查能力明明注册好了，用户看到的却是"这个部署不检查"。曾经就是这样：
+// .github/workflows/openwrt.yml 拿 GITHUB_REF_NAME 当版本号，非 release 触发时它是
+// 分支名 "main"，于是每个快照包装上去都不检查。
+//
+// 这里钉的是那条流水线「计算软件包版本」步骤产出的形状，改动那边要同步改这里。
+func TestOpenWrtPackageVersionsAreComparable(t *testing.T) {
+	for _, version := range []string{
+		"v1.0.0",                 // release：tag 原样
+		"v1.0.0-rc1",             // 预发布 tag
+		"v0.0.1-git136.b39515f2", // push/PR 的快照构建
+	} {
+		if _, ok := parseSemver(version); !ok {
+			t.Fatalf("parseSemver(%q) 解析失败，面板会据此关掉新版本检查", version)
+		}
+	}
+	// 快照排在任何正式发布之前：装着快照的机器应当被如实告知最新发布是哪一版。
+	if !versionBehind("v0.0.1-git136.b39515f2", "v1.0.0") {
+		t.Fatal("快照构建应当被判为落后于正式发布")
+	}
+}
+
 type stubGeoService struct {
 	status    geodata.Status
 	err       error
