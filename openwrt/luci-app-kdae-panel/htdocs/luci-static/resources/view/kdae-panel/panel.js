@@ -83,8 +83,10 @@ return view.extend({
 			callServiceList('kdae-panel'),
 			callServiceList('dae'),
 			setupURL(),
-			callInitList('kdae-panel'),
-			callInitList('dae')
+			// 开机自启状态取不到时退回空对象而不是让整页加载失败：它只决定一个
+			// 徽标怎么显示，不该因为它把服务状态和配置表单一起拖下水。
+			L.resolveDefault(callInitList('kdae-panel'), {}),
+			L.resolveDefault(callInitList('dae'), {})
 		]);
 	},
 
@@ -117,8 +119,8 @@ return view.extend({
 
 				function refresh() {
 					return Promise.all([
-						callServiceList(service.name),
-						callInitList(service.name)
+						L.resolveDefault(callServiceList(service.name), {}),
+						L.resolveDefault(callInitList(service.name), {})
 					]).then(function (reply) {
 						paint(serviceRunning(reply[0] || {}, service.name),
 							serviceEnabled(reply[1], service.name));
