@@ -2,7 +2,7 @@
 
 `kdae-panel` 是面向 [dae](https://github.com/daeuniverse/dae) 及其兼容分支的零侵入式 Web 管理面板。
 
-面板不引用 dae 的内部 Go 包，也不读取其内部 eBPF Map。它只依赖 dae 的公开命令、`.dae` 配置文件、systemd 和 journald，因此 dae 内部重构、协议实现变化和普通配置字段新增通常不需要同步修改面板。
+面板不引用 dae 的内部 Go 包，也不读取其内部 eBPF Map。它只依赖 dae 的公开命令、`.dae` 配置文件，以及系统的服务与日志接口（systemd/journald 或 OpenWrt 的 procd/logread），因此 dae 内部重构、协议实现变化和普通配置字段新增通常不需要同步修改面板。
 
 ## 界面预览
 

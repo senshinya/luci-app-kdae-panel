@@ -98,7 +98,7 @@ X-CSRF-Token: <csrfToken>
 
 删除只影响 `/var/lib/kdae-panel/dae-versions/` 下的对应缓存，不修改当前运行的 `/usr/bin/dae`，也不删除安装事务的上一版回滚点。版本不存在返回 `404 cached_version_not_found`。
 
-机器上还没有 dae 时，`GET /dae/install` 的响应会附带 `provision` 字段，说明首次安装是否可行、将要写入哪些路径、以及缺少哪些可写目录。此时提交安装会走首次安装：除可执行文件外还写入 geo 数据、种子配置与 systemd 单元，然后 `daemon-reload`，但**不会启动服务**。
+机器上还没有 dae 时，`GET /dae/install` 的响应会附带 `provision` 字段，说明首次安装是否可行、将要写入哪些路径、以及缺少哪些可写目录。此时提交安装会走首次安装：除可执行文件外还写入 geo 数据与种子配置。systemd 后端下还会写入 `dae.service` 单元并执行 `daemon-reload`；procd 后端下服务定义由 ipk 软件包自带的 `/etc/init.d/<name>` 提供，面板只校验它存在，不写入也不重新加载。安装完成后**不会启动服务**。
 
 任务进行中（`downloading`/`applying`）的响应**不含** `provision`：该字段要靠实际试写目标目录才能算出来，而界面每两秒轮询一次，其中一个探测目标正是 systemd 在 inotify 监视的单元目录。客户端应沿用上一次拿到的值，而不是当作"首次安装已不可行"。
 
@@ -110,9 +110,9 @@ X-CSRF-Token: <csrfToken>
 { "purgeConfig": false, "purgeGeo": false }
 ```
 
-`purgeConfig` 与 `purgeGeo` 相互独立，只有显式设为 `true` 才删除对应数据。geo 清理覆盖 dae 搜索路径里所有面板可见的副本，受 `ProtectHome=true` 隐藏的 `/root/.local/share/dae` 不在其中。卸载只接受面板有安装账本且二进制摘要未漂移的 dae，并要求 systemd 单元位于面板管理的标准路径。它会停止并禁用 dae，移除可执行文件、服务单元与版本回滚记录；文件移除、可选的数据清理与 `daemon-reload` 属于同一事务，失败时会恢复文件、开机启动状态和原运行状态。
+`purgeConfig` 与 `purgeGeo` 相互独立，只有显式设为 `true` 才删除对应数据。geo 清理覆盖 dae 搜索路径里所有面板可见的副本，受 `ProtectHome=true` 隐藏的 `/root/.local/share/dae` 不在其中。卸载只接受面板有安装账本且二进制摘要未漂移的 dae；systemd 后端下还要求服务单元位于面板管理的标准路径，procd 后端没有单元可校验——服务定义属于 ipk 软件包，不属于某一次 dae 安装。它会停止并禁用 dae，移除可执行文件与版本回滚记录；systemd 后端下一并移除服务单元并执行 `daemon-reload`，procd 后端下服务定义由软件包保留、不删除也无需重新加载。文件移除、可选的数据清理与服务定义变更属于同一事务，失败时会恢复文件、开机启动状态和原运行状态。
 
-读取缓存、下载与校验不占用全局控制门，只有替换与重启阶段才进入串行区，避免几十兆的 I/O 把配置保存一并堵住。普通升级和切换只缓存可执行文件；首次安装还需要服务单元、种子配置与 geo，因此即使该版本已有二进制缓存，也会重新取得并校验完整发布包。
+读取缓存、下载与校验不占用全局控制门，只有替换与重启阶段才进入串行区，避免几十兆的 I/O 把配置保存一并堵住。普通升级和切换只缓存可执行文件；首次安装还需要种子配置与 geo 数据（systemd 后端下还需要用来渲染服务单元的模板），因此即使该版本已有二进制缓存，也会重新取得并校验完整发布包。
 
 校验和缺失或格式不符时拒绝安装，没有跳过校验的开关。kdae 的构建产物保留 90 天，过期版本在列表中标记为不可安装；面板只接受本仓库自己的构建，解析时会重新核对 `head_repository`、事件类型、分支与工作流文件路径四项。
 
@@ -233,13 +233,13 @@ dae 只在重载时重新拉取 `subscription` 链接，因此"订阅定时刷�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/host/interfaces` | 本机网络接口及其 IP/CIDR 地址，供 global 接口选择器使用 |
-| `GET` | `/service` | systemd 状态与资源数据 |
+| `GET` | `/service` | 服务状态与资源数据（systemd 后端读 `systemctl show`，procd 后端读 ubus 与 `/proc`） |
 | `POST` | `/service/actions/start` | 启动 dae |
 | `POST` | `/service/actions/stop` | 停止 dae |
 | `POST` | `/service/actions/restart` | 重启 dae |
 | `POST` | `/service/actions/reload` | 执行 `dae reload` |
 | `POST` | `/service/actions/suspend` | 执行 `dae suspend` |
-| `GET` | `/logs?limit=200` | 最近 1–500 条 journald 日志 |
+| `GET` | `/logs?limit=200` | 最近 1–500 条服务日志（systemd 后端读 journald，procd 后端读 `logread`） |
 | `GET` | `/diagnostics/sysdump` | 执行 dae sysdump，并以 `application/gzip` 下载生成的归档 |
 
 所有动作名和参数都由服务端白名单决定。URL、请求体和查询参数都不能注入额外命令参数。
