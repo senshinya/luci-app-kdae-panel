@@ -18,7 +18,7 @@
   一致、kmod 依赖名一致，依赖在设备上按本机软件源解析），维护两套 SDK 只会让 CI 时长
   和 Release 页资产数翻倍。
 - 不扩到 armv7 等 32 位 ARM：面板与 dae 的 32 位 ARM 组合没有验证过，参考项目也没发。
-- 不动 systemd 路径的 `scripts/build-release.sh`，它按 GOARCH 出 tar.gz，与 ipk/apk 无关。
+- 不动 systemd 发布路径（后来在本次发布前整条下线，见 README 与 SECURITY.md）。
 
 ## 一、构建矩阵
 
@@ -119,7 +119,7 @@ apk 是 ADB 二进制格式，`tar` 打不开，改用 SDK 自带的 `staging_di
 
 **触发方式必须改成显式调用。** `openwrt.yml` 原来只挂 `release: published`，而本仓库的 Release 是
 `release.yml` 用 `GITHUB_TOKEN` 创建的——这种 release 不会触发新的工作流，那个 job 从来没有、
-也永远不会运行。装机验证（`release-smoke.yml`）当初踩的是同一个坑，解法也照搬：`openwrt.yml`
+也永远不会运行。当时的装机验证工作流踩的是同一个坑，解法照搬：`openwrt.yml`
 增加 `workflow_call`（输入 `version`），`release.yml` 在 Release 建好后作为 `packages` job 调用它。
 `release: published` 触发器保留，供网页上手工建 release 的场景。
 

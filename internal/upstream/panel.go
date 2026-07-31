@@ -161,7 +161,7 @@ func parsePanelDigest(content, asset string) (string, error) {
 
 // extractPanelBinary 从发布包里取出可执行文件。
 //
-// 包内布局由 build-release.sh 保证：kdae-panel_linux_<arch>/kdae-panel。
+// 包内布局由上游仓库的发布脚本保证：kdae-panel_linux_<arch>/kdae-panel。
 // 这里只认基名，不认目录名——目录名含架构，写死等于每加一个架构就要改代码。
 //
 // 逐项校验条目类型与路径：tar 里的符号链接、目录穿越（../）都可能把解包

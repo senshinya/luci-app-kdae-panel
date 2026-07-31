@@ -1,7 +1,7 @@
 name: Release
 
-# 只认规范的版本 tag。v* 会把随手打的实验 tag 也发成正式 release——
-# 而 releases/latest 直链正是一键部署的数据源，实验版会被所有新装机装上。
+# 只认规范的版本 tag。v* 会把随手打的实验 tag 也发成正式 release，
+# 而 releases/latest 是用户找包的入口，实验版不该出现在那里。
 on:
   push:
     tags:
@@ -10,10 +10,10 @@ on:
 
 permissions:
   contents: write
-  id-token: write
-  attestations: write
 
 jobs:
+  # 本仓库只发 OpenWrt 软件包，Release 的资产全部由 packages job 附上去。
+  # 这个 job 只做两件事：发布前把源码验一遍，然后建一个空的 Release 容器。
   release:
     runs-on: ubuntu-latest
     steps:
@@ -43,37 +43,18 @@ jobs:
           go vet ./...
           go test -race ./...
           go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-      - run: bash scripts/build-release.sh "${GITHUB_REF_NAME}"
-
-      - name: 生成发布来源证明
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          subject-path: 'dist/*.tar.gz'
 
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           generate_release_notes: true
-          # 带连字符的 tag（v1.0.0-rc.1）标为预发布：它不会成为 releases/latest，
-          # 一键部署的用户不会装到它，而发布链路本身仍被完整演练一遍。
+          # 带连字符的 tag（v1.0.0-rc1）标为预发布：它不会成为 releases/latest，
+          # 而发布链路本身仍被完整演练一遍。软件包的版本号也会跟着降级
+          # （ipk 的 1.0.0~rc1、apk 的 1.0.0_rc1，都排在正式版之前）。
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
 
-  # 发布完成后立即真装一遍。
-  #
-  # 必须在这里显式调用，不能指望装机验证自己的 release: published 触发器：
-  # 用 GITHUB_TOKEN 创建的 release 不会触发新的工作流，那个触发器对本流水线
-  # 发出的版本永远不响（v0.3.0 实测如此）。
-  smoke:
-    needs: release
-    uses: ./.github/workflows/release-smoke.yml
-    with:
-      version: ${{ github.ref_name }}
-
-  # 同一个坑的另一半：OpenWrt 的 ipk/apk 也必须在这里显式调用。
-  # openwrt.yml 自己挂着 release: published，但那个触发器对本流水线用 GITHUB_TOKEN
-  # 发出的 release 永远不响，六个架构的包会一个都附不上去。
+  # 软件包必须在这里显式调用，不能指望 openwrt.yml 自己的 release: published 触发器：
+  # 用 GITHUB_TOKEN 创建的 release 不会触发新的工作流，那个触发器对本流水线发出的
+  # 版本永远不响，六个架构的包会一个都附不上去。
   packages:
     needs: release
     uses: ./.github/workflows/openwrt.yml
@@ -82,9 +63,9 @@ jobs:
     permissions:
       contents: write
 
-  # 正式版的全部装机验证通过后，RC 已完成使命；同时删除 Release 与 tag，
+  # 正式版的包全部附上去之后，RC 已完成使命；同时删除 Release 与 tag，
   # 避免版本列表持续堆积。预发布自身不会触发这一步。
   cleanup-prereleases:
-    needs: smoke
+    needs: packages
     if: ${{ !contains(github.ref_name, '-') }}
     uses: ./.github/workflows/cleanup-prereleases.yml

@@ -246,7 +246,7 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 原子改名后的目录同步或重启请求失败则可能已经留下新二进制，任务会明确报错并要求人工确认或重启。
 
 **没有自动回滚**：被替换、被重启的是当前进程自己，systemd 停掉它之后无从补救。
-上一版副本保留在 `KDAE_PANEL_BACKUP_FILE`，还原步骤见 [deployment.md](deployment.md)。
+上一版副本保留在 `KDAE_PANEL_BACKUP_FILE`，需要还原时把它拷回可执行文件路径再重启服务。
 
 ## 网络探测
 

@@ -25,8 +25,7 @@
 - 订阅离线缓存开关（dae 的 `-file` 持久化）、立即刷新与按间隔自动刷新；
 - 在官方 dae 发布与 kdae 分支 CI 构建之间安装、切换、回滚或卸载，安装前校验并在失败时自动恢复；下载过的二进制会保存在本地版本库，后续切换无需联网，并可逐个清理；机器上没有 dae 时可完成首次安装，卸载时可分别选择保留或删除配置与 geo 数据（默认保留，版本管理默认开启）；GitHub 元数据带短时缓存与并发合并，设置页可安全填写只读 Token 以避开匿名接口低额度；
 - 独立的 Geo 数据管理页：一键更新、文件状态与路径、每天到每 30 天的定时更新；内置 Loyalsoldier 与 v2fly，也可保存多组自定义公网 HTTPS 直链；两个文件逐一校验 SHA-256、就地替换 dae 实际读取的那一份，运行中按服务后端记录的 PID reload，未运行则在下次启动时生效，失败自动还原，来源沿用上次且绝不静默切换规则集；
-- 面板自身的新版本提醒：读取本仓库最新发布并长时缓存，设置页支持立即检查，可用 `KDAE_PANEL_DISABLE_UPDATE_CHECK` 整体关闭；
-- 面板一键自升级：默认开启，可在设置页直接开关；校验 sha256、用新二进制自证可运行后再替换并重启自身，保留上一版供人工还原；
+- 面板自身的新版本提醒：读取本仓库最新发布并长时缓存，设置页支持立即检查；
 - 面板主机侧的节点 TCP 直连延迟探测；
 - 原始配置编辑、独立校验、并发冲突检测和事务保存；
 - 保存前备份、原子替换及重载失败后的磁盘回滚；
@@ -35,72 +34,86 @@
 - SQLite 管理员账户、Argon2id 密码摘要和服务端会话；
 - SameSite/HttpOnly Cookie、CSRF 校验、同源检查和登录限速；
 - Vue 3 响应式管理界面，前端资源嵌入单个 Go 二进制；
-- Linux `amd64`、`arm64` 和 `riscv64` 发布构建。
+- OpenWrt 24.10（ipk）与 25.12（apk）两条版本线，`x86_64`、`aarch64_generic`、`i386_pentium4` 三种架构。
 
-## 一键部署
+## 安装
 
-在有 systemd 的 Linux（amd64 / arm64 / riscv64）上，以 root 执行：
+本仓库只发 OpenWrt / ImmortalWrt 的软件包，装完 LuCI 里会多出「服务 → kdae 面板」的入口。
+Release 附带的产物覆盖两条版本线、三种架构：
 
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuoro/kdae-panel/main/scripts/get.sh)"
-```
-
-脚本会下载最新发布包、比对 `SHA256SUMS`、安装并启动服务。固定安装某个版本：
-
-```bash
-KDAE_PANEL_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuoro/kdae-panel/main/scripts/get.sh)"
-```
-
-这条命令等于信任本仓库与 GitHub：校验和与发布包同处一个 Release，防传输损坏，防不住发布者本身。不接受这个前提、或网络无法直连 GitHub 时，请手动到 [Releases](https://github.com/tuoro/kdae-panel/releases) 下载对应架构的 `kdae-panel_linux_<arch>.tar.gz` 与 `SHA256SUMS`，用 `sha256sum -c --ignore-missing SHA256SUMS` 核对（清单含全部架构，勿直接整份 `-c`）后运行包内的 `install.sh`——或直接用下面的源码方式。发布包另附构建来源证明，验证方式见 [docs/deployment.md](docs/deployment.md)。
-
-若这台机器上还没有 dae，装好面板后可直接在版本管理页完成 dae 的首次安装。安装完成后的访问方式见下方「首次访问」。
-
-## OpenWrt / ImmortalWrt
-
-以软件包部署，附带 LuCI 入口与配置页。Release 附带的产物覆盖两条版本线、三种架构：
-
-| OpenWrt | 格式 | 架构 |
+| OpenWrt | 包格式 | 架构 |
 |---|---|---|
-| 24.10 | ipk（opkg） | `x86_64`、`aarch64_generic`、`i386_pentium4` |
-| 25.12 | apk | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+| 24.10 | `.ipk`（opkg） | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+| 25.12 | `.apk`（apk） | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+
+不确定自己是哪个架构，在设备上问包管理器：24.10 用 `opkg print-architecture`，25.12 用
+`apk --print-arch`。x86 软路由基本都是 `x86_64`，ARM64 设备是 `aarch64_generic`。
+
+下载对应的面板包与 LuCI 包之后：
+
+```sh
+# 24.10
+opkg install ./kdae-panel_*_x86_64-openwrt-24.10.ipk \
+             ./luci-app-kdae-panel_*_all-openwrt-24.10.ipk
+
+# 25.12
+apk add --allow-untrusted ./kdae-panel-*-x86_64-openwrt-25.12.apk \
+                          ./luci-app-kdae-panel-*-openwrt-25.12.apk
+```
 
 包用官方 OpenWrt SDK 构建，同版本同架构的 ImmortalWrt 装的是同一批文件。dae 的可执行文件、
-配置与 geo 全部由面板管理，不经 opkg/apk——这样升级软件包不会把你自己的分支构建盖回
-官方版本。详见 [docs/openwrt.md](docs/openwrt.md)。
+配置与 geo 全部由面板管理，不经 opkg/apk，这样升级软件包不会把你自己的分支构建盖回官方版本；
+也因此本包与官方 `dae` 包互斥，装过官方包的机器要先 `opkg remove dae dae-geoip dae-geosite`。
 
-## 从源码安装
-
-依赖 Go 1.25.12+、Node.js 22+，运行环境需要 systemd：
-
-```bash
-git clone https://github.com/tuoro/kdae-panel.git
-cd kdae-panel
-npm ci --prefix web
-make build
-sudo ./scripts/install.sh
-```
+机器上还没有 dae 也可以先装面板，再在版本管理页完成 dae 的首次安装。更多细节、UCI 配置项、
+故障排查与真机验证清单见 [docs/openwrt.md](docs/openwrt.md)。
 
 ## 首次访问
 
-新安装默认监听 `0.0.0.0:2023`，因此本机和同一局域网内的设备都能访问：
+面板默认监听 `0.0.0.0:2026`，同一局域网内的设备都能访问：
 
 ```text
-http://<面板机器的内网 IP>:2023
+http://<路由器 IP>:2026
 ```
 
-首次安装完成后，脚本会枚举本机内网 IPv4，并在终端的「首次访问地址」下直接打印完整的一次性初始化链接；多网卡机器可能出现多条，选择当前设备能访问的一条即可。页面会自动完成授权，注册表单只需填写用户名和密码。创建管理员后初始化接口会永久关闭，一次性链接的临时文件也会立即删除。
+第一次进去要创建管理员。一次性初始化链接直接显示在 LuCI 的面板页上，点一下就跳过去；也可以在
+shell 里读：
 
-已有安装不会在升级时覆盖 `/etc/kdae-panel/kdae-panel.env`；若原来仍是 `127.0.0.1:2023`，请将 `KDAE_PANEL_LISTEN` 改为 `0.0.0.0:2023` 并重启面板。局域网直连使用明文 HTTP，只适合可信内网；跨不可信网络访问请使用 HTTPS 反向代理或 SSH 隧道。
+```sh
+cat /var/run/kdae-panel/setup-url
+logread -e kdae-panel
+```
 
-## 卸载
+多网卡机器可能有好几条，挑当前设备能访问的那条。页面会自动完成授权，注册表单只需填写用户名和
+密码。创建管理员后初始化接口永久关闭，交接文件也立即删除。
 
-以下命令须在 root shell 中执行：
+局域网直连使用明文 HTTP，只适合可信内网；跨不可信网络访问请使用 HTTPS 反向代理或 SSH 隧道。
+
+## 升级与卸载
+
+升级就是安装新版本的软件包，`/etc/config/kdae-panel` 里改过的设置不会被覆盖。卸载：
+
+```sh
+opkg remove kdae-panel luci-app-kdae-panel   # 24.10
+apk del kdae-panel luci-app-kdae-panel       # 25.12
+```
+
+`/etc/kdae-panel`（面板数据）与 `/etc/dae`（dae 配置和 geo 数据）不会被删除，要清干净得手工
+`rm -rf`。dae 本身也不受影响。
+
+## 从源码构建
+
+依赖 Go 1.25.12+、Node.js 22+：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuoro/kdae-panel/main/scripts/uninstall.sh)"
+git clone https://github.com/senshinya/luci-app-kdae-panel.git
+cd luci-app-kdae-panel
+npm ci --prefix web
+make build
 ```
 
-默认移除程序、服务单元及其 systemd override，配置、账户数据库与配置备份全部保留；清理 override 是为了避免重装后意外恢复 `/usr/bin` 等高权限写路径。要连数据一并清除，在命令前加 `KDAE_PANEL_PURGE=true`。两种模式都不触碰 dae——它的服务、二进制、配置与 geo 数据原样保留。安装时会在本地落一份等效脚本，离线也可卸载：`sudo bash /usr/share/kdae-panel/uninstall.sh`；一键自升级只替换二进制，这份离线脚本仍属于最近一次完整安装的版本，联网时优先使用上面的最新脚本。
+产物是 `bin/kdae-panel`，前端资源已经嵌进去。软件包由 CI 用官方 OpenWrt SDK 打，本地不需要
+装 SDK 也能改代码、跑测试。
 
 ## 开发
 
@@ -162,7 +175,6 @@ dae sysdump
 ## 文档
 
 - [架构与兼容策略](docs/architecture.md)
-- [安装部署与升级](docs/deployment.md)
 - [OpenWrt / ImmortalWrt 部署](docs/openwrt.md)
 - [HTTP API](docs/api.md)
 - [安全策略](SECURITY.md)

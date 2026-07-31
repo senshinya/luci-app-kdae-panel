@@ -22,9 +22,8 @@ Release 附带的产物覆盖两条版本线、三种架构：
 `apk --print-arch`。绝大多数 x86 软路由是 `x86_64`，ARM64 设备（armsr、rockchip、树莓派 4 等）
 是 `aarch64_generic`。装错架构的包会被包管理器直接拒绝，不会装出一个跑不起来的面板。
 
-与 [docs/deployment.md](deployment.md) 描述的 systemd 一键部署是两条独立的路径：systemd 版靠
-`scripts/get.sh`/`scripts/install.sh` 装到 `/usr/bin`、`/etc/systemd/system`；OpenWrt 版靠 opkg/apk
-装到 `/usr/bin`、`/etc/init.d`、`/etc/config`，服务由 procd 管理，不涉及 systemd 也不涉及一键部署脚本。
+本仓库只发这一条部署路径：包装到 `/usr/bin`、`/etc/init.d`、`/etc/config`，服务由 procd 管理。
+面板的代码本身也支持 systemd 后端（自动探测），但那条路径没有发布产物，要用得自己从源码构建。
 
 ## 与官方 dae 包的关系
 
@@ -164,9 +163,8 @@ logread -e kdae-panel
   必然发生的故障，因此 procd 后端下面板启动时压根不构造这项能力，也不做版本检查。设置页的
   「允许一键升级」开关在本部署里恒为置灰，「面板更新」卡片不会给出可用版本。**这是预期行为，
   不是故障。升级面板请安装新的软件包。**
-- 上述两项在 systemd 部署（[docs/deployment.md](deployment.md)）里以
-  `KDAE_PANEL_ENABLE_SELF_UPDATE` 和 `KDAE_PANEL_DISABLE_UPDATE_CHECK` 两个环境变量存在；
-  OpenWrt 的 `/etc/config/kdae-panel` 里没有对应选项，不要照搬那份文档去找它们。
+- 上述两项在 systemd 后端下由 `KDAE_PANEL_ENABLE_SELF_UPDATE` 与 `KDAE_PANEL_DISABLE_UPDATE_CHECK`
+  两个环境变量控制；OpenWrt 的 `/etc/config/kdae-panel` 里没有对应选项，不要照着别处的说明来找。
 
 ## 升级与卸载
 

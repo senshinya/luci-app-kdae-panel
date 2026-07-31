@@ -9,8 +9,7 @@ on:
   #
   # 不能只靠下面的 release: published——用 GITHUB_TOKEN 创建的 release 不会触发新的
   # 工作流（GitHub 为防递归的明文限制），而本仓库的 release 正是 release.yml 用该 token
-  # 发的。装机验证（release-smoke.yml）当初就是踩了这个坑才改成 workflow_call，软件包
-  # 这条链路是同一个坑：不显式调用，Release 上就只有 systemd 的 tar.gz，没有 ipk/apk。
+  # 发的。不显式调用，Release 上就一个资产都没有。
   workflow_call:
     inputs:
       version:

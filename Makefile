@@ -1,4 +1,4 @@
-.PHONY: dev build build-go test vuln fmt web-install web-build clean release
+.PHONY: dev build build-go test vuln fmt web-install web-build clean
 
 BINARY := bin/kdae-panel
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -34,6 +34,3 @@ web-build:
 clean:
 	go clean
 	rm -rf bin web/dist internal/webui/dist/assets
-
-release: web-build
-	bash scripts/build-release.sh $(VERSION)
