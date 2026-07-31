@@ -109,7 +109,18 @@ function setupURL() {
 // 改的那个状态。最初试过在同一列里用一条竖线把两组按钮隔开，实测两头不讨好：
 // 1280px 下 1px 淡灰线在描边按钮旁边根本看不见，375px 下按钮一换行，它又被甩到
 // 第一行末尾，卡在两个启停按钮中间。表格的列边界本来就是现成的分隔，不用另画。
-var CELL_ROW_STYLE = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+//
+// 单元格里也不套 flex 容器：横向对齐由主题决定——argon 给 .td/.th 设了
+// text-align:center，官方 bootstrap 是 left——而 flex 容器会把 text-align 整个
+// 无视掉，于是带按钮的那两列的内容会相对表头偏到一边。直接放 inline-block 元素、
+// 用外边距拉开间距，对齐就自动跟着单元格走，挤不下时照样换行。
+var CELL_ITEM_STYLE = 'display:inline-block;vertical-align:middle;margin:2px 3px';
+
+// 两个主题的 .cbi-section 都不带横向内边距：argon 明写 padding:0，靠 h3 自己的
+// padding(1.25rem) 撑出卡片留白，官方 bootstrap 则两边都没有。所以直接塞进去的
+// 自由块（按钮行、提示条、地址行）会紧贴卡片边缘，得自己带上和 argon 标题一致的
+// 横向留白。表格不用，它本来就该横贯整张卡片。
+var BLOCK_INSET = '1.25rem';
 
 return view.extend({
 	load: function () {
@@ -148,7 +159,8 @@ return view.extend({
 			// 用 warning 而不是 notice：主题里 .alert-message.notice 是一层近乎无色的
 			// 灰渐变，实测看着像个禁用的输入框，完全不像在提醒什么。琥珀色也和
 			// 「已停止」徽标同色，整页的色彩语言统一为"琥珀＝需要你处理"。
-			var daeHint = E('div', { 'class': 'alert-message warning', 'style': 'margin:14px 0 0' },
+			var daeHint = E('div', { 'class': 'alert-message warning',
+				'style': 'margin:14px ' + BLOCK_INSET + ' 0' },
 				_('dae 尚未设为开机自启，路由器重启后不会自动接管流量。确认配置无误后，点上面的「设为自启」。'));
 
 			function buildRow(service) {
@@ -156,12 +168,14 @@ return view.extend({
 				var enabled = service.enabled;
 				var busy = false;
 
+				// 行内样式写在 style 上而不是 class 上：paint() 会整体改写 className，
+				// 写进 class 的话每刷新一次就掉一次。
 				var runBadge = badge();
-				var bootText = E('span', {}, '');
-				var startButton = E('button', { 'class': 'cbi-button' }, _('启动'));
-				var restartButton = E('button', { 'class': 'cbi-button' }, _('重启'));
-				var stopButton = E('button', { 'class': 'cbi-button' }, _('停止'));
-				var bootButton = E('button', { 'class': 'cbi-button' }, '');
+				var bootText = E('span', { 'style': CELL_ITEM_STYLE }, '');
+				var startButton = E('button', { 'class': 'cbi-button', 'style': CELL_ITEM_STYLE }, _('启动'));
+				var restartButton = E('button', { 'class': 'cbi-button', 'style': CELL_ITEM_STYLE }, _('重启'));
+				var stopButton = E('button', { 'class': 'cbi-button', 'style': CELL_ITEM_STYLE }, _('停止'));
+				var bootButton = E('button', { 'class': 'cbi-button', 'style': CELL_ITEM_STYLE }, '');
 
 				// 不适用的按钮置灰而不是藏起来：列宽保持稳定，而且旁边的徽标已经
 				// 把原因写在脸上了。强调色只给"此刻该点的那个"——改版前整行最扎眼
@@ -239,13 +253,8 @@ return view.extend({
 				return E('div', { 'class': 'tr' }, [
 					E('div', { 'class': 'td', 'data-title': _('服务') }, E('strong', {}, service.label)),
 					E('div', { 'class': 'td', 'data-title': _('运行状态') }, runBadge),
-					// flex 容器套在 td 里面，不是设在 td 上：.table .td 靠 display:table-cell
-					// 参与表格布局，直接把它改成 flex 就退出了表格的格式化上下文，
-					// 列宽会由浏览器另生成匿名单元格接管。
-					E('div', { 'class': 'td', 'data-title': _('开机自启') },
-						E('div', { 'style': CELL_ROW_STYLE }, [ bootText, bootButton ])),
-					E('div', { 'class': 'td', 'data-title': _('操作') },
-						E('div', { 'style': CELL_ROW_STYLE }, [ startButton, restartButton, stopButton ]))
+					E('div', { 'class': 'td', 'data-title': _('开机自启') }, [ bootText, bootButton ]),
+					E('div', { 'class': 'td', 'data-title': _('操作') }, [ startButton, restartButton, stopButton ])
 				]);
 			}
 
@@ -263,23 +272,25 @@ return view.extend({
 			// 面板拒绝被 iframe 嵌入（CSP frame-ancestors 'none'），因此新标签打开。
 			// 地址写成真链接而不是一句斜体说明：这样能右键复制，反代改过端口时也能
 			// 一眼核对面板到底在哪儿。
-			var address = E('div', { 'style': 'margin-top:12px' }, [
+			var address = E('div', { 'style': 'margin:12px ' + BLOCK_INSET + ' 0' }, [
 				_('面板地址'), ' ',
 				E('a', { 'href': panelURL, 'target': '_blank', 'rel': 'noopener' }, panelURL), ' ',
 				E('small', { 'style': 'opacity:.7' }, _('（在新标签页打开）'))
 			]);
 
 			var body = [
-				// 「打开面板」是这个页面存在的理由，提到标题右侧当唯一的主操作，
+				// h3 直接当 .cbi-section 的头一个孩子，不套任何容器：argon 把 h3 本身
+				// 当卡片标题栏（自带背景与 1.25rem 内边距），包一层再和按钮排成 flex，
+				// 标题会撑满整行、把按钮挤到下一行的最左边——那正是第一版在真机上的
+				// 样子。让主题按它自己的方式渲染标题，最稳。
+				E('h3', {}, _('服务状态')),
+				// 「打开面板」是这个页面存在的理由，单独占一行当主操作，紧跟标题下面，
 				// 不再和一堆启停按钮挤在同一条流水线上。
-				E('div', { 'style': 'display:flex;align-items:center;justify-content:space-between;' +
-					'gap:12px;flex-wrap:wrap;margin-bottom:10px' }, [
-					E('h3', { 'style': 'margin:0' }, _('服务状态')),
+				E('div', { 'style': 'margin:0 ' + BLOCK_INSET + ' 12px' },
 					E('button', {
 						'class': 'cbi-button cbi-button-action important',
 						'click': function () { window.open(panelURL, '_blank', 'noopener'); }
-					}, _('打开面板'))
-				]),
+					}, _('打开面板'))),
 				// 窄屏下表格会被挤扁，给它一层横向滚动兜底而不是让按钮溢出到卡片外。
 				E('div', { 'style': 'overflow-x:auto' }, table),
 				daeHint,
@@ -289,7 +300,7 @@ return view.extend({
 			if (link) {
 				body.push(E('div', {
 					'class': 'alert-message warning',
-					'style': 'margin-top:14px'
+					'style': 'margin:14px ' + BLOCK_INSET + ' 0'
 				}, [
 					E('p', {}, E('strong', {}, _('尚未创建管理员'))),
 					E('p', {}, _('打开下面的一次性链接完成初始化，创建成功后链接立即失效：')),
