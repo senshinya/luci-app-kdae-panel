@@ -34,7 +34,7 @@ func (m *Manager) Download(ctx context.Context, source upstream.GeoSource) (upst
 // 调用方应在持有全局控制锁时调用它。
 //
 // 事务顺序：暂存新文件 → 把旧文件改名留作回滚点 → 原子替换 → 运行中的
-// dae 使用 systemd MainPID reload → 成功则删掉回滚点，失败则把旧文件放回去
+// dae 用服务后端记录的 PID reload → 成功则删掉回滚点，失败则把旧文件放回去
 // 并再 reload 一次。dae 未运行时不需要 reload，下次启动会直接读取新文件。
 //
 // 之所以必须能回滚：dae validate 察觉不到 geo 的问题，一份语义不兼容或损坏的
@@ -111,8 +111,9 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 	return updated, nil
 }
 
-// reload 只对运行中的 systemd 服务传 MainPID。服务未运行时文件落盘即完成；
-// 服务状态未知时保留无参数调用，以兼容没有 ServiceController 的定制构建。
+// reload 只对运行中的服务传 PID（systemd 用 MainPID，procd 用实例 PID）。
+// 服务未运行时文件落盘即完成；服务状态未知时保留无参数调用，以兼容没有
+// ServiceController 的定制构建。
 func (m *Manager) reload(ctx context.Context, service serviceSnapshot) (bool, error) {
 	switch service.state {
 	case ServiceStateActive:

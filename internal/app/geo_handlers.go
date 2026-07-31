@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/geodata"
+	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -112,13 +113,18 @@ func (u *geoUpdater) run(ctx context.Context, source upstream.GeoSource, acquire
 	return nil
 }
 
-func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSourceService) {
+func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSourceService, backend host.Backend) {
 	if updater == nil {
-		// 生产构造器始终注入 Geo 服务；这个分支只为依赖注入不完整的测试或
-		// 定制构建保留，避免端点落成难以理解的 404。
+		// updater 为 nil 有两种情况：EnableGeoUpdate=false 时的正常生产配置——
+		// OpenWrt 上对应 UCI 的 enable_geo_update=0——或依赖注入不完整的测试/
+		// 定制构建。两种情况都要给出可操作的 503，而不是让端点落成难以理解的 404。
+		message := "Geo 数据管理未启用，请设置 KDAE_PANEL_ENABLE_GEO_UPDATE=true 或加上 --enable-geo-update"
+		if backend == host.BackendProcd {
+			message = "Geo 数据管理未启用，请在 /etc/config/kdae-panel 里把 enable_geo_update 设为 1，" +
+				"再执行 /etc/init.d/kdae-panel restart"
+		}
 		unavailable := func(writer http.ResponseWriter, _ *http.Request) {
-			writeAPIError(writer, http.StatusServiceUnavailable, "geo_update_disabled",
-				"Geo 数据服务未初始化，请检查面板启动日志")
+			writeAPIError(writer, http.StatusServiceUnavailable, "geo_update_disabled", message)
 		}
 		for _, pattern := range []string{
 			"GET /api/v1/dae/geo", "POST /api/v1/dae/geo",

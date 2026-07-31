@@ -161,7 +161,7 @@ geo 数据写进配置文件所在目录。dae 查找它们时，配置目录的
 
 ## geo 数据更新
 
-Geo 管理是侧栏一级入口并始终可用，与 dae 版本管理相互独立：更新 geo 只写一个数据目录，不碰可执行文件也不碰服务单元。旧版 `KDAE_PANEL_ENABLE_GEO_UPDATE` 仅为启动参数兼容保留。
+Geo 管理是侧栏一级入口，由 `EnableGeoUpdate` 控制是否启用（默认开启；OpenWrt 上映射到 UCI 的 `enable_geo_update`），与 dae 版本管理相互独立。关闭时面板不构造 Geo 管理器，`registerGeoRoutes` 把六个 geo 端点全部接成 `503 geo_update_disabled`，侧栏页面据此提示而不是崩溃。启用时更新只写一个数据目录，不碰可执行文件也不碰服务单元。
 
 升级 dae 的事务只替换二进制，从不触碰 geo；首次安装写入的那份也永远不会被自动更新。因此没有这个功能时，geo 会一直停在装上的那一刻。
 
@@ -180,11 +180,11 @@ Geo 管理是侧栏一级入口并始终可用，与 dae 版本管理相互独�
 
 写入位置不是写死的，而是"当前实际生效的那一份"所在目录：按 `DAE_LOCATION_ASSET` → 配置目录 → `/root/.local/share/dae` → `/usr/local/share/dae` → `/usr/share/dae` 的顺序找第一个命中的文件。都不存在时才退回配置目录。写死目录的后果很具体：用 `dae-installer` 维护 `/usr/local/share/dae` 的机器会多出一份优先级更高的副本，此后跑上游更新脚本毫无效果且没有任何提示。被遮蔽的副本会在界面上列出来。
 
-更新是一个可回滚的事务：暂存 → 旧文件改名留作回滚点 → 原子替换 → 运行中的 dae 按 systemd `MainPID` 执行 `dae reload` → 成功删掉回滚点，失败则放回旧文件并再 reload 一次。dae 未运行时跳过 reload，新文件在下次启动时读取。两个文件同进同退——只换掉其中一个会让 dae 拿着两个版本的规则集跑，而这种不一致既不报错也无从察觉。回滚点刻意不长期保留：geo 随时可以重新下载并自校验，不像 kdae 的 CI 产物 90 天就过期。
+更新是一个可回滚的事务：暂存 → 旧文件改名留作回滚点 → 原子替换 → 运行中的 dae 按服务后端记录的 PID（systemd 的 `MainPID`、procd 的实例 PID）执行 `dae reload` → 成功删掉回滚点，失败则放回旧文件并再 reload 一次。dae 未运行时跳过 reload，新文件在下次启动时读取。两个文件同进同退——只换掉其中一个会让 dae 拿着两个版本的规则集跑，而这种不一致既不报错也无从察觉。回滚点刻意不长期保留：geo 随时可以重新下载并自校验，不像 kdae 的 CI 产物 90 天就过期。
 
-运行中的 dae 只需 reload 不需 restart：面板使用 systemd `MainPID`，不依赖可能缺失的默认 PID 文件；reload 会重建控制平面并重新编译路由规则，从而重读 geo。dae 的切换预算约 10 秒，进行中的长连接仍可能被中断，界面据实描述而不宣称"完全无感"。服务未运行时不执行无意义的 reload，也不把“缺少 PID 文件”误判为 Geo 更新失败。
+运行中的 dae 只需 reload 不需 restart：面板使用服务后端记录的 PID（systemd 下是 `MainPID`，procd 下是 ubus 返回的实例 PID），不依赖可能缺失的默认 PID 文件；reload 会重建控制平面并重新编译路由规则，从而重读 geo。dae 的切换预算约 10 秒，进行中的长连接仍可能被中断，界面据实描述而不宣称"完全无感"。服务未运行时不执行无意义的 reload，也不把“缺少 PID 文件”误判为 Geo 更新失败。
 
-`dae validate` 不加载 Geo 数据，因此分类是否存在只能在真正启动或 reload 时发现。Geo 更新会直接检查 reload 输出，服务控制和版本切换失败后还会读取操作开始以来的近期 journald；两条路径都识别 `not found in geoip.dat/geosite.dat`，把分类名、Geo 页面处理入口以及“修改二进制无效”写进错误，版本事务仍照常恢复原二进制。
+`dae validate` 不加载 Geo 数据，因此分类是否存在只能在真正启动或 reload 时发现。Geo 更新会直接检查 reload 输出，服务控制和版本切换失败后还会读取操作开始以来的近期服务日志（systemd 下是 journald，procd 下是 `logread`）；两条路径都识别 `not found in geoip.dat/geosite.dat`，把分类名、Geo 页面处理入口以及“修改二进制无效”写进错误，版本事务仍照常恢复原二进制。
 
 **首次安装完成后不会自动启动 dae。** 它是透明代理，在一台你正通过 SSH 或反向代理访问的机器上，配置不当地启动会切断你自己的连接。种子配置用的是上游的 `empty.dae`（`global {} routing {}`），不声明任何网卡因而不劫持任何流量；写好真正的规则之后，由你在服务控制页显式启动。
 

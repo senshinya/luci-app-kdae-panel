@@ -73,7 +73,7 @@ func run() error {
 	geoSchedulePath := flag.String("geo-schedule-file", envOr("KDAE_PANEL_GEO_SCHEDULE_FILE", cfg.GeoSchedulePath), "geo 数据自动更新设置文件路径")
 	geoSourcesPath := flag.String("geo-sources-file", envOr("KDAE_PANEL_GEO_SOURCES_FILE", cfg.GeoSourcesPath), "自定义 geo 数据来源文件路径")
 	enableDaeInstall := flag.Bool("enable-dae-install", enableDaeInstallDefault, "允许通过面板安装与切换 dae 版本")
-	enableGeoUpdate := flag.Bool("enable-geo-update", enableGeoUpdateDefault, "兼容旧版本；Geo 数据管理现已始终启用")
+	enableGeoUpdate := flag.Bool("enable-geo-update", enableGeoUpdateDefault, "允许通过面板下载与更新 geo 数据")
 	disableUpdateCheck := flag.Bool("disable-update-check", disableUpdateCheckDefault, "关闭面板自身的新版本检查")
 	enableSelfUpdate := flag.Bool("enable-self-update", enableSelfUpdateDefault, "允许面板一键升级自身")
 	panelBackupPath := flag.String("panel-backup-file", envOr("KDAE_PANEL_BACKUP_FILE", cfg.PanelBackupPath), "自升级时保留的上一版面板二进制路径")

@@ -62,7 +62,7 @@ dae 版本管理（`KDAE_PANEL_ENABLE_DAE_INSTALL`，默认开启）会引入一
 
 ## geo 数据更新
 
-该功能在认证后始终可用，**与 dae 版本管理相互独立**。更新只写 dae 的数据目录（通常就是本来就可写的配置目录），既不碰可执行文件也不碰 `/etc/systemd/system`；旧版 `KDAE_PANEL_ENABLE_GEO_UPDATE` 只为启动参数兼容保留。
+该功能默认开启，由 `KDAE_PANEL_ENABLE_GEO_UPDATE`（OpenWrt 上是 UCI 的 `enable_geo_update`）控制，**与 dae 版本管理相互独立**。关闭时面板不构造 Geo 管理器，相关接口一律返回 `503 geo_update_disabled`——从旧版本升级、`kdae-panel.env` 里仍保留着 `KDAE_PANEL_ENABLE_GEO_UPDATE=false` 的 systemd 部署会保持这个关闭状态，侧栏的 Geo 页面会显示这个 503。启用时更新只写 dae 的数据目录（通常就是本来就可写的配置目录），既不碰可执行文件也不碰 `/etc/systemd/system`。
 
 - **内置来源仍为固定枚举**：`loyalsoldier` 与 `v2fly` 的下载地址由面板用写死的仓库名、已过正则的 tag 和自己构造的资产名拼出，不采信接口响应里的 URL。
 - **自定义来源受独立出站策略约束**：每组必须提供两个数据直链和两个 SHA-256 校验直链，只接受公网 HTTPS。保存时拒绝 userinfo、内网字面地址与片段；首跳和每次重定向重新解析 DNS，连接前再用 `Dialer.Control` 检查实际地址，限制跳数并清除 Authorization/Cookie。自定义客户端不携带 GitHub Token；来源文件以 `0600` 保存，因为查询串可能包含管理员配置的临时凭据。

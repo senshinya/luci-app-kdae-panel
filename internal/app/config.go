@@ -53,8 +53,11 @@ type Config struct {
 	// 但"完全不开安装与 geo 功能的部署从不外联"曾是可以宣称的性质，
 	// 这个开关把决定权留给在意这件事的人。
 	DisableUpdateCheck bool
-	// EnableGeoUpdate 是为旧部署保留的兼容字段。Geo 管理现在始终在认证后可用；
-	// 下载仍受公网 HTTPS、体积与 SHA-256 三重约束。
+	// EnableGeoUpdate 控制 Geo 数据管理是否启用（真实开关，非兼容字段）。
+	// 关闭时 dependencies.Geo 为 nil，geo 相关接口一律返回 503
+	// geo_update_disabled。OpenWrt 上由 UCI 的 enable_geo_update 透传
+	// （见 openwrt/kdae-panel/files/kdae-panel.init）；下载仍受公网
+	// HTTPS、体积与 SHA-256 三重约束。
 	EnableGeoUpdate bool
 }
 

@@ -29,7 +29,8 @@ import { formatBytes, formatDateTime } from '../../utils/format'
 import { useJobPolling } from '../../composables/useJobPolling'
 
 // Geo 数据管理与 dae 版本管理相互独立。这张卡片自己加载状态、轮询任务并管理
-// 定时设置；生产构造器始终启用它，禁用态只用于依赖不完整的定制构建。
+// 定时设置；EnableGeoUpdate 关闭是受支持的生产配置（OpenWrt 上对应 UCI 的
+// enable_geo_update=0），此时走下面的 geoDisabled 分支而不是隐藏整张卡片。
 const message = useMessage()
 const dialog = useDialog()
 
@@ -91,7 +92,7 @@ function confirmUpdateGeo() {
   const activation = serviceState === 'inactive'
     ? '当前 dae 未运行，因此不会执行 reload；文件会在 dae 下次启动时读取。面板此时无法检查配置引用的 Geo 分类是否存在，若新数据仍缺少分类，dae 下次启动仍会失败。'
     : serviceState === 'active'
-      ? '随后会使用 systemd MainPID 执行 dae reload 让它立即生效。'
+      ? '随后会用面板拿到的服务进程 PID 执行 dae reload 让它立即生效。'
       : '面板暂时无法确认 dae 是否运行，将尝试使用 dae 默认 PID 文件执行 reload。'
   dialog.warning({
     title: `更新 geo 数据（${chosen?.label || geoSource.value}）`,

@@ -45,8 +45,8 @@ type ServiceController interface {
 	Status(ctx context.Context) (host.Status, error)
 }
 
-// Reloader 让 dae 重新读取 geo 数据。显式 PID 用于 systemd 管理的运行中服务；
-// 无参数形式仅在无法取得服务状态的兼容场景使用。
+// Reloader 让 dae 重新读取 geo 数据。显式 PID 用于运行中且能取得服务状态的
+// 后端（systemd、procd 皆可）；无参数形式仅在服务状态未知时使用。
 type Reloader interface {
 	Reload(ctx context.Context) error
 	ReloadPID(ctx context.Context, pid int) error

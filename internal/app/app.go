@@ -331,7 +331,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)
 	registerScheduleRoutes(router, "/api/v1/schedule/geo", geoScheduleService)
 	registerUpstreamRoutes(router, dependencies.Install, operations, logger, backend)
-	registerGeoRoutes(router, geo, geoSources)
+	registerGeoRoutes(router, geo, geoSources, backend)
 	registerAuthenticationRoutes(router, dependencies.Authentication, cfg.SecureCookie, cfg.BootstrapToken, cfg.SetupURLFile, proxyTrust, logger)
 	apiNotFound := func(writer http.ResponseWriter, _ *http.Request) {
 		writeAPIError(writer, http.StatusNotFound, "api_not_found", "API 路径不存在")
