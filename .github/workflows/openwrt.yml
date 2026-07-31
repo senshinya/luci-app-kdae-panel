@@ -41,6 +41,24 @@ jobs:
           npm ci --prefix web
           npm run build --prefix web
 
+      # ipk 的 control 只有包名和版本这两样能被 opkg 看见。两次 Release 附上同名
+      # 同版本的包，opkg 会打印 "installed in root is up to date"、退出码 0、
+      # 什么都不做，用户以为升级成功却还跑着旧二进制——而 procd 部署刻意没有面板
+      # 自升级，ipk 是唯一通道。因此版本必须随发布走。
+      #
+      # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME
+      # 是分支名或 "123/merge"，不是版本号，退回带 commit 的 0.0.0+…：它按 opkg
+      # 的版本比较规则排在任何正式版本之前，一次手动构建的产物因此不会盖住正式发布。
+      - name: 计算软件包版本
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0+$(git rev-parse --short HEAD)"
+          fi
+          echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "软件包版本 ${version}"
+
       # 纯 Go 依赖（modernc sqlite），CGO_ENABLED=0 出来的静态二进制在 musl 上直接可跑。
       # 不在 SDK 里从源码编译：本项目要求 Go 1.25，24.10 feed 里的 golang 到不了。
       - name: 交叉编译面板
@@ -89,6 +107,7 @@ jobs:
           make package/kdae-panel/compile \
                package/luci-app-kdae-panel/compile \
                KDAE_PANEL_BIN="${KDAE_PANEL_BIN}" \
+               KDAE_PANEL_VERSION="${KDAE_PANEL_VERSION}" \
                -j"$(nproc)" V=s
 
       # 装错依赖的症状是在路由器上 opkg 报缺包，离原因很远；在这里直接断言。
@@ -105,6 +124,10 @@ jobs:
           tar -xzf "$backend" -C "$workdir"
           tar -xzf "$workdir"/control.tar.gz -C "$workdir"
           cat "$workdir/control"
+          # 版本没被注进 control，就是"每次发布都是同名同版本"那个故障本身：
+          # 症状发生在用户的路由器上（opkg 说已是最新却什么都没换），在这里断言。
+          grep -q "^Version: ${KDAE_PANEL_VERSION}-" "$workdir/control" \
+            || { echo "control 的版本不是 ${KDAE_PANEL_VERSION}"; exit 1; }
           grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
             || { echo "control 缺少 Conflicts: dae"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \

@@ -27,12 +27,12 @@ dae 版本、geo 数据、面板自身的新版本查询）验证证书。
 
 ```sh
 opkg update
-opkg install ./kdae-panel_1.0.0-1_x86_64.ipk ./luci-app-kdae-panel_1.0.0-1_all.ipk
-/etc/init.d/kdae-panel start
+opkg install ./kdae-panel_*_x86_64.ipk ./luci-app-kdae-panel_*_all.ipk
 ```
 
-安装脚本已经调用 `/etc/init.d/kdae-panel enable`，重启路由器后面板会自动拉起；执行上面的 `start`
-只是让本次安装立即生效，不必等下次开机。
+文件名里的版本号随发布走（Release 附的包用该 Release 的 tag，去掉前导 `v`），因此这里用通配符而不是
+写死某一版。安装脚本会调用 `/etc/init.d/kdae-panel enable` 与 `start`：面板装完立即可用，重启路由器
+后也会自动拉起，不需要再手工执行 `start`。
 
 如果这台机器上已经装过官方 `dae` 包（例如之前用 `opkg install dae` 手动装的），`CONFLICTS` 会让
 `kdae-panel` 装不上，需要先卸载：
@@ -120,8 +120,23 @@ logread -e kdae-panel
 
 ## 升级与卸载
 
-**升级面板**：安装新版本的 `kdae-panel_*.ipk` 即可覆盖旧的可执行文件与启动脚本；
-`/etc/config/kdae-panel` 声明为 conffile，`opkg install` 不会覆盖你已经改过的配置。
+**升级面板**：
+
+```sh
+opkg install ./kdae-panel_*_x86_64.ipk ./luci-app-kdae-panel_*_all.ipk
+```
+
+安装新版本的 ipk 会覆盖旧的可执行文件与启动脚本；`/etc/config/kdae-panel` 声明为 conffile，
+`opkg install` 不会覆盖你已经改过的配置。
+
+升级过程中面板会短暂停止：opkg 先执行旧包的 `prerm`（`stop` + `disable`），换完文件后再执行新包的
+`postinst`（`enable` + `start`），因此命令返回时面板已经带着新版本重新跑起来了。dae 本身不受影响，
+它是独立的 procd 服务，升级面板不会中断代理。
+
+**opkg 只按包名和版本判断该不该动手**。版本随每次 Release 变化，正常升级不会遇到问题；但如果你
+装的是同一个版本的包（例如从 CI 产物页下载的同一次构建），opkg 会打印
+`Package kdae-panel (…) installed in root is up to date.` 然后退出码 0、什么都不做——这时面板
+**没有**被换掉。想强制覆盖同版本的包，加 `--force-reinstall`。
 
 **卸载**：
 

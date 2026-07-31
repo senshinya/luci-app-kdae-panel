@@ -1,7 +1,13 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=kdae-panel
-PKG_VERSION:=1.0.0
+
+# 版本号必须能被外部覆盖。opkg 只按包名与版本判断该不该动手：装同名同版本的
+# ipk 会打印 "installed in root is up to date"、退出码 0、什么都不做。写死
+# 1.0.0-1 的话，每次 Release 附的都是元数据一致而内容不同的包，用户以为升级
+# 成功、实际还跑着旧二进制——而 procd 部署刻意没有面板自升级，ipk 是唯一通道。
+KDAE_PANEL_VERSION?=
+PKG_VERSION:=$(if $(KDAE_PANEL_VERSION),$(KDAE_PANEL_VERSION),0.0.0)
 PKG_RELEASE:=1
 
 PKG_LICENSE:=AGPL-3.0-only
@@ -64,6 +70,11 @@ define Package/kdae-panel/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 /etc/init.d/kdae-panel enable
+# 必须显式启动。升级同一个包时 opkg 先跑旧包的 prerm（stop + disable）再跑新包的
+# postinst，只 enable 的净效果是每次升级后面板都停着——而 procd 部署刻意没有面板
+# 自升级，ipk 是唯一的升级通道，停在这里的面板没有别的办法自己回来。
+# 重复执行无害：init 脚本内部有 enabled 开关守卫，关掉时 start 不会拉起实例。
+/etc/init.d/kdae-panel start
 exit 0
 endef
 

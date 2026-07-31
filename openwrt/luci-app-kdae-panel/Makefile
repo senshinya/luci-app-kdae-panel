@@ -1,7 +1,11 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-kdae-panel
-PKG_VERSION:=1.0.0
+
+# 与 kdae-panel 包同源同版本：两个包一起发布、一起安装，版本线分叉只会让
+# "装的是哪一版"这个问题多一份要对的账。理由见 kdae-panel/Makefile。
+KDAE_PANEL_VERSION?=
+PKG_VERSION:=$(if $(KDAE_PANEL_VERSION),$(KDAE_PANEL_VERSION),0.0.0)
 PKG_RELEASE:=1
 
 PKG_LICENSE:=AGPL-3.0-only
