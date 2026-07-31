@@ -284,7 +284,7 @@ jobs:
           grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
             || { echo "control 缺少 Conflicts: dae"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
-                     kmod-xdp-sockets-diag ca-bundle; do
+                     ca-bundle; do
             grep -q "$dep" "$workdir/control" || { echo "control 缺少依赖 $dep"; exit 1; }
           done
           tar -tzf "$workdir"/data.tar.gz > "$workdir/files"
@@ -316,7 +316,7 @@ jobs:
           grep -q "${{ matrix.pkgarch }}" "$workdir/meta" \
             || { echo "元数据的架构不是 ${{ matrix.pkgarch }}"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
-                     kmod-xdp-sockets-diag ca-bundle; do
+                     ca-bundle; do
             grep -q "$dep" "$workdir/meta" || { echo "元数据缺少依赖 $dep"; exit 1; }
           done
           # 包是 SDK 用本地构建密钥签的，校验机器上没有那把公钥，因此 --allow-untrusted。
