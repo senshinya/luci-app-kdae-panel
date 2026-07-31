@@ -1229,12 +1229,17 @@ pre,
   overflow-wrap: anywhere;
 }
 
-.orchestrate-dns-modal {
+.n-card.n-modal.orchestrate-dns-modal {
   width: min(1080px, 96vw);
+  height: min(900px, 92vh);
   max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.orchestrate-dns-modal > .n-card__content {
+.n-card.n-modal.orchestrate-dns-modal > .n-card-content {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
 }

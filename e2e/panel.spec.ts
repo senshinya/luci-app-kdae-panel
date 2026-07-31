@@ -194,6 +194,30 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const dnsSimpleTab = dnsModal.locator('.n-tabs-tab', { hasText: '简单模式' })
     const dnsAdvancedTab = dnsModal.locator('.n-tabs-tab', { hasText: '进阶模式' })
     await expect(dnsSimpleTab).toHaveClass(/n-tabs-tab--active/)
+    await expect.poll(async () => (await dnsModal.boundingBox())?.height || 0).toBeGreaterThan(600)
+    const dnsModalLayout = await dnsModal.evaluate((element) => {
+      const content = element.querySelector<HTMLElement>(':scope > .n-card-content')
+      const footer = element.querySelector<HTMLElement>(':scope > .n-card__footer')
+      const modalRect = element.getBoundingClientRect()
+      const contentRect = content?.getBoundingClientRect()
+      const footerRect = footer?.getBoundingClientRect()
+      return {
+        background: getComputedStyle(element).backgroundColor,
+        height: modalRect.height,
+        overflow: getComputedStyle(element).overflow,
+        contentOverflowY: content ? getComputedStyle(content).overflowY : '',
+        contentInside: !!contentRect && contentRect.bottom <= modalRect.bottom + 1,
+        footerInside: !!footerRect && footerRect.bottom <= modalRect.bottom + 1,
+      }
+    })
+    expect(dnsModalLayout).toMatchObject({
+      background: 'rgb(44, 44, 50)',
+      overflow: 'hidden',
+      contentOverflowY: 'auto',
+      contentInside: true,
+      footerInside: true,
+    })
+    expect(dnsModalLayout.height).toBeGreaterThan(600)
     const ipPreferenceSelect = dnsModal.locator('.dns-settings-grid label', { hasText: 'IP 版本偏好' }).locator('.n-base-selection')
     await ipPreferenceSelect.click()
     const dnsSelectMenu = page.locator('.n-base-select-menu:visible')
