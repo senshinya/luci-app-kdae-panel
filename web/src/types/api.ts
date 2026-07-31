@@ -250,3 +250,10 @@ export interface LogEntry {
   unit?: string
   pid?: string
 }
+
+/** GET /api/v1/health。backend 指明面板正跑在哪套 init 系统上。 */
+export interface HealthStatus {
+  status: string
+  version?: string
+  backend?: string
+}

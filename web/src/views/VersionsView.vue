@@ -33,6 +33,7 @@ import type {
   UpstreamVersion,
 } from '../types/api'
 import { formatBytes, formatDateTime } from '../utils/format'
+import { useBackendStore } from '../stores/backend'
 import { useJobPolling } from '../composables/useJobPolling'
 import { SOURCES } from '../components/versions/sources'
 import InstallStatusCard from '../components/versions/InstallStatusCard.vue'
@@ -40,6 +41,9 @@ import GeoCard from '../components/versions/GeoCard.vue'
 
 const message = useMessage()
 const dialog = useDialog()
+// 卸载与首次安装的确认框描述的是不可逆操作，两套 init 系统下面板做的事不同，
+// 措辞必须跟着后端走，否则用户是照着不存在的行为在做决定。
+const backend = useBackendStore()
 const loading = ref(true)
 const listing = ref(false)
 // loading 只在首屏为真，之后再也不会回到 true，因此它挡不住刷新按钮被连点。
@@ -173,7 +177,11 @@ async function confirmInstall(version: UpstreamVersion) {
     dialog.warning({
       title: `安装 ${version.label}`,
       content: `面板会下载并校验该版本，然后安装可执行文件到 ${provision.value?.binaryPath}、`
-        + `写入 geo 数据与服务单元 ${provision.value?.unitPath}。`
+        // procd 下 Plan 返回 inPlace、Commit 是空操作：启动脚本随软件包装好，
+        // 面板从不写它，承诺"写入服务单元"是假的。
+        + (backend.isProcd
+          ? '写入 geo 数据与种子配置（启动脚本由软件包提供，已就位）。'
+          : `写入 geo 数据与服务单元 ${provision.value?.unitPath}。`)
         + '装完不会自动启动 dae——请先在配置管理页写好规则，再手动启动，'
         + '否则透明代理可能切断你当前的连接。',
       positiveText: '下载并安装',
@@ -282,7 +290,11 @@ async function confirmUninstall() {
     content: () => h(NSpace, { vertical: true, size: 12 }, {
       default: () => [
         h(NText, null, {
-          default: () => '这会停止 dae，现有代理连接会立即中断，并删除由面板管理的可执行文件、systemd 服务单元和版本回滚记录。',
+          // procd 下 RemovablePaths 返回空：/etc/init.d/dae 归软件包所有，
+          // 卸载 dae 不删它——删了用户就再也没法从面板重新装回 dae。
+          default: () => backend.isProcd
+            ? '这会停止 dae，现有代理连接会立即中断，并删除由面板管理的可执行文件和版本回滚记录（启动脚本由软件包提供，不会删除）。'
+            : '这会停止 dae，现有代理连接会立即中断，并删除由面板管理的可执行文件、systemd 服务单元和版本回滚记录。',
         }),
         h(NCheckbox, {
           checked: purgeConfig.value,
@@ -293,7 +305,11 @@ async function confirmUninstall() {
           'onUpdate:checked': (value: boolean) => { purgeGeo.value = value },
         }, { default: () => '同时删除面板可见的全部 geo 数据副本' }),
         h(NText, { depth: 3 }, {
-          default: () => '未勾选的数据会保留，之后可在本页重新安装。面板沙箱看不到的 /root/.local/share/dae 不会被删除。',
+          // 那句限定只在面板被沙箱挡住时成立。procd 部署没有 ProtectHome，
+          // /root/.local/share/dae 对面板完全可见，卸载会把它一并删掉。
+          default: () => backend.isProcd
+            ? '未勾选的数据会保留，之后可在本页重新安装。'
+            : '未勾选的数据会保留，之后可在本页重新安装。面板沙箱看不到的 /root/.local/share/dae 不会被删除。',
         }),
       ],
     }),
@@ -419,6 +435,8 @@ const columns = computed<DataTableColumns<UpstreamVersion>>(() => [
 ])
 
 onMounted(async () => {
+  // 不 await：后端只影响文案，让它去挡首屏数据加载得不偿失。
+  void backend.ensure()
   await loadStatus()
   if (unmounted) return
   await loadVersions()

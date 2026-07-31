@@ -27,6 +27,7 @@ import { APIError, getJSON, postJSON } from '../api/client'
 import type { ConfigDocument, DaeReport, ServiceStatus } from '../types/api'
 import { formatBytes, formatDurationNanoseconds } from '../utils/format'
 import { parseGroups, parseRoutingRules, readSection } from '../utils/daeconf'
+import { useBackendStore } from '../stores/backend'
 
 const message = useMessage()
 const loading = ref(true)
@@ -108,7 +109,13 @@ function actionName(action: string): string {
   return ({ start: '启动', stop: '停止', restart: '重启', reload: '重载', suspend: '暂停' } as Record<string, string>)[action] || action
 }
 
-onMounted(() => void refresh())
+// 数据来自 host.Manager，具体是 systemd 还是 procd 取决于部署，副标题跟着说。
+const backend = useBackendStore()
+
+onMounted(() => {
+  void backend.ensure()
+  void refresh()
+})
 </script>
 
 <template>
@@ -116,7 +123,7 @@ onMounted(() => void refresh())
     <div class="page-toolbar">
       <div>
         <h2>运行状态</h2>
-        <NText depth="3">来自 systemd 与当前安装的 dae 二进制</NText>
+        <NText depth="3">{{ backend.isProcd ? '来自服务管理器与当前安装的 dae 二进制' : '来自 systemd 与当前安装的 dae 二进制' }}</NText>
       </div>
       <NButton secondary :loading="refreshing" @click="refresh(true)">
         <template #icon><NIcon><RefreshOutline /></NIcon></template>

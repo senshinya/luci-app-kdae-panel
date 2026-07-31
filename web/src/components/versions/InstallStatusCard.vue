@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { NAlert, NCard, NTag, NText } from 'naive-ui'
 import type { InstallProvision, InstallStatus } from '../../types/api'
 import { formatDateTime } from '../../utils/format'
+import { useBackendStore } from '../../stores/backend'
 import { sourceName } from './sources'
 
 // 纯展示卡片：状态由 VersionsView 加载并轮询，这里只负责如实呈现。
@@ -14,6 +15,9 @@ const props = defineProps<{
 }>()
 
 const firstInstall = computed(() => props.provision?.possible === true)
+// 首次安装的说明必须与后端实际会做的事一致：procd 下启动脚本随软件包装好，
+// 面板从不写它。加载由 VersionsView 触发，这里只读结果。
+const backend = useBackendStore()
 </script>
 
 <template>
@@ -21,8 +25,9 @@ const firstInstall = computed(() => props.provision?.possible === true)
     <template v-if="provision && !status?.ready">
       <NAlert v-if="provision.possible" type="info" :bordered="false" class="card-alert">
         这台机器上还没有 dae。在下面选一个版本即可完成首次安装：面板会安装
-        <code class="mono">{{ provision.binaryPath }}</code>、写入 geo 数据与服务单元
-        <code class="mono">{{ provision.unitPath }}</code>。
+        <code class="mono">{{ provision.binaryPath }}</code>、<template v-if="backend.isProcd">写入 geo
+        数据与种子配置（启动脚本由软件包提供，已就位）。</template><template v-else>写入 geo 数据与服务单元
+        <code class="mono">{{ provision.unitPath }}</code>。</template>
       </NAlert>
       <NAlert v-else type="error" :bordered="false" class="card-alert">
         <div v-for="blocker in provision.blockers || []" :key="blocker">{{ blocker }}</div>

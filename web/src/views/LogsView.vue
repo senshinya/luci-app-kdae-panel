@@ -19,8 +19,12 @@ import { RefreshOutline, SearchOutline } from '@vicons/ionicons5'
 import { getJSON } from '../api/client'
 import type { LogEntry } from '../types/api'
 import { formatDateTime } from '../utils/format'
+import { useBackendStore } from '../stores/backend'
 
 const message = useMessage()
+// procd 部署读的是 logread 的系统日志缓冲区，既没有 journald 也没有 systemd
+// 单元；标题照抄 systemd 那套，用户会去找一个本机不存在的东西。
+const backend = useBackendStore()
 const entries = ref<LogEntry[]>([])
 const loading = ref(true)
 const autoRefresh = ref(true)
@@ -76,6 +80,7 @@ function schedule() {
 }
 
 onMounted(() => {
+  void backend.ensure()
   void load()
   schedule()
 })
@@ -86,8 +91,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
   <div class="page-stack logs-page">
     <div class="page-toolbar">
       <div>
-        <h2>journald 日志</h2>
-        <NText depth="3">读取 dae systemd 单元的近期结构化日志</NText>
+        <h2>{{ backend.isProcd ? '服务日志' : 'journald 日志' }}</h2>
+        <NText depth="3">
+          {{ backend.isProcd ? '读取系统日志缓冲区中 dae 的近期日志' : '读取 dae systemd 单元的近期结构化日志' }}
+        </NText>
       </div>
       <NSpace align="center">
         <NCheckbox v-model:checked="autoRefresh">每 5 秒刷新</NCheckbox>
