@@ -25,7 +25,7 @@ import {
 import { RouterLink } from 'vue-router'
 import { APIError, getJSON, postJSON } from '../api/client'
 import type { ConfigDocument, DaeReport, ServiceStatus } from '../types/api'
-import { formatBytes, formatDurationNanoseconds } from '../utils/format'
+import { formatBytes, formatDurationNanoseconds, formatUptime } from '../utils/format'
 import { parseGroups, parseRoutingRules, readSection } from '../utils/daeconf'
 import { useBackendStore } from '../stores/backend'
 
@@ -159,8 +159,16 @@ onMounted(() => {
           <small>主进程 PID {{ service?.mainPid || '—' }}</small>
         </NCard>
       </NGridItem>
+      <!-- procd 不暴露重启计数器与退出状态，这一格在那边曾经常年是两个破折号。
+           它拿得到的是主进程的存活时长，按后端各显各的，而不是留一格空白。 -->
       <NGridItem>
-        <NCard class="metric-card" size="small">
+        <NCard v-if="backend.isProcd" class="metric-card" size="small">
+          <NText depth="3">运行时长</NText>
+          <NSkeleton v-if="loading" text style="width: 55%" />
+          <strong v-else class="metric-value">{{ formatUptime(service?.uptimeSeconds) }}</strong>
+          <small>{{ service?.unitFileState === 'enabled' ? '已设为开机自启' : '未设为开机自启' }}</small>
+        </NCard>
+        <NCard v-else class="metric-card" size="small">
           <NText depth="3">重启次数</NText>
           <NSkeleton v-if="loading" text style="width: 40%" />
           <strong v-else class="metric-value">{{ service?.restarts ?? '—' }}</strong>

@@ -494,7 +494,7 @@ func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State
 	}
 	// 文件名可以骗人：ExecStart 完全可能指向一个名叫 dae 的启动包装脚本。
 	// 覆盖它会毁掉运维的包装，而 dae 仍带着原参数起来，事务全绿却已经出错。
-	if err := assertExecutable(target); err != nil {
+	if err := i.assertExecutable(target); err != nil {
 		return Status{}, err
 	}
 
@@ -957,8 +957,12 @@ func assertELF(content []byte) error {
 }
 
 // assertExecutable 确认目标是原生可执行文件而不是脚本。
-// 面板只替换 dae 本体；ExecStart 指向包装脚本时应当由运维自己处理。
-func assertExecutable(path string) error {
+// 面板只替换 dae 本体；服务定义指向包装脚本时应当由运维自己处理。
+//
+// 挂在 Installer 上只为拿到 backend：改哪里才能让服务改指别处，两套 init
+// 系统完全不同。procd 上没有 ExecStart 这个东西——照着它去 /etc/init.d/dae
+// 里找，是找不到的；真正该改的是 UCI 里的 dae_binary，启动脚本和面板都读它。
+func (i *Installer) assertExecutable(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -969,8 +973,13 @@ func assertExecutable(path string) error {
 		return fmt.Errorf("读取 %s 的文件头: %w", path, err)
 	}
 	if string(header) != elfMagic {
+		fix := "请把 ExecStart 指向 dae 可执行文件本身"
+		if i.backend == host.BackendProcd {
+			fix = "请把 /etc/config/kdae-panel 里的 dae_binary 指向 dae 可执行文件本身，" +
+				"再执行 /etc/init.d/kdae-panel restart"
+		}
 		return fmt.Errorf("服务启动的 %s 不是 ELF 可执行文件，看起来是启动脚本；"+
-			"面板只替换 dae 本体，请把 ExecStart 指向 dae 可执行文件本身", path)
+			"面板只替换 dae 本体，%s", path, fix)
 	}
 	return nil
 }

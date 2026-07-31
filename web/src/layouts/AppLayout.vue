@@ -31,10 +31,12 @@ import { getJSON } from '../api/client'
 import type { PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
 import PanelUpdateAction from '../components/PanelUpdateAction.vue'
 import { useAuthStore } from '../stores/auth'
+import { useBackendStore } from '../stores/backend'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const backend = useBackendStore()
 const message = useMessage()
 const collapsed = ref(window.innerWidth < 900)
 
@@ -102,6 +104,7 @@ onMounted(() => {
   window.addEventListener('kdae-panel:auth-expired', handleExpired)
   window.addEventListener('kdae-panel:self-update-changed', handleSelfUpdateChanged)
   window.addEventListener('resize', handleResize)
+  void backend.ensure()
   void checkUpdate()
 })
 onBeforeUnmount(() => {
@@ -164,8 +167,13 @@ onBeforeUnmount(() => {
               <template v-if="update.status?.enabled && update.status.updatable">升级会替换面板二进制并重启自身，配置与账号数据都会保留。</template>
               <template v-else-if="update.status && !update.status.enabled">可直接在这里启用一键升级，不需要 SSH。</template>
               <template v-else-if="update.status?.problem">当前无法一键升级：{{ update.status.problem }}</template>
+              <!-- status 缺失 = 后端没注册自升级。procd 走 opkg，说"重新执行一键部署命令"
+                   会把用户引到一条这台机器上不存在的路径上。 -->
+              <template v-else-if="backend.isProcd">
+                本部署由 opkg 升级：<code class="mono">opkg update &amp;&amp; opkg install kdae-panel luci-app-kdae-panel</code>。
+              </template>
               <template v-else>当前部署不支持一键升级，可重新执行一键部署命令。</template>
-              <a href="https://github.com/tuoro/kdae-panel/releases/latest" target="_blank" rel="noopener">查看发布说明</a>
+              <a v-if="update.check.releasesUrl" :href="update.check.releasesUrl" target="_blank" rel="noopener">查看发布说明</a>
             </span>
             <PanelUpdateAction :payload="update" label="立即升级" />
           </div>

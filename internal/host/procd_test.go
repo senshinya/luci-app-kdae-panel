@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,8 +47,23 @@ const ubusRunning = `{"dae":{"instances":{"instance1":{"running":true,"pid":4321
 const ubusStopped = `{"dae":{"instances":{"instance1":{"running":false,"pid":0,` +
 	`"command":["/usr/bin/dae","run","-c","/etc/dae/config.dae"]}}}}`
 
-// fakeProc 造出一个 /proc/<pid> 供 Status 读取内存、CPU 与环境变量。
+// fakeProcStartTicks 是假 /proc 里进程的启动时刻（开机后第 60 秒），
+// fakeProcSystemUptime 是假的开机时长，两者相减即期望的运行时长。
+const (
+	fakeProcStartTicks    = 60 * clockTicksPerSecond
+	fakeProcSystemUptime  = 3660
+	fakeProcUptimeSeconds = fakeProcSystemUptime - 60
+)
+
+// fakeProc 造出一个 /proc/<pid> 供 Status 读取内存、CPU、运行时长与环境变量。
 func fakeProc(t *testing.T, pid int, rssKB uint64, utime, stime uint64, environ string) {
+	t.Helper()
+	fakeProcNamed(t, pid, "(dae)", rssKB, utime, stime, environ)
+}
+
+// fakeProcNamed 额外让调用方指定 comm 字段（含括号），用于覆盖可执行文件名
+// 带空格这种会让整行字段序号平移的情形。
+func fakeProcNamed(t *testing.T, pid int, comm string, rssKB uint64, utime, stime uint64, environ string) {
 	t.Helper()
 	root := t.TempDir()
 	dir := filepath.Join(root, strconv.Itoa(pid))
@@ -56,14 +72,15 @@ func fakeProc(t *testing.T, pid int, rssKB uint64, utime, stime uint64, environ 
 	}
 	status := "Name:\tdae\nVmRSS:\t" + strconv.FormatUint(rssKB, 10) + " kB\n"
 	writeFile(t, filepath.Join(dir, "status"), status)
-	// /proc/<pid>/stat 的 utime 是第 14 个字段、stime 是第 15 个。
+	// /proc/<pid>/stat 的 utime 是第 14 个字段、stime 是第 15 个、starttime 是第 22 个。
 	fields := make([]string, 52)
 	for index := range fields {
 		fields[index] = "0"
 	}
-	fields[1] = "(dae)"
+	fields[1] = comm
 	fields[13] = strconv.FormatUint(utime, 10)
 	fields[14] = strconv.FormatUint(stime, 10)
+	fields[21] = strconv.FormatUint(fakeProcStartTicks, 10)
 	stat := ""
 	for index, field := range fields {
 		if index > 0 {
@@ -73,6 +90,8 @@ func fakeProc(t *testing.T, pid int, rssKB uint64, utime, stime uint64, environ 
 	}
 	writeFile(t, filepath.Join(dir, "stat"), stat)
 	writeFile(t, filepath.Join(dir, "environ"), environ)
+	writeFile(t, filepath.Join(root, "uptime"),
+		strconv.FormatUint(fakeProcSystemUptime, 10)+".42 7200.00\n")
 	previous := procRoot
 	procRoot = root
 	t.Cleanup(func() { procRoot = previous })
@@ -159,6 +178,84 @@ func TestProcdStatusRunning(t *testing.T) {
 	}
 	if status.Environment["DAE_LOCATION_ASSET"] != "/etc/dae" {
 		t.Fatalf("Environment = %v，期望含 DAE_LOCATION_ASSET=/etc/dae", status.Environment)
+	}
+	// procd 不暴露重启计数器，仪表盘那一格靠运行时长填。
+	if status.UptimeSeconds != fakeProcUptimeSeconds {
+		t.Fatalf("UptimeSeconds = %d，期望 %d", status.UptimeSeconds, fakeProcUptimeSeconds)
+	}
+	if status.Restarts != 0 {
+		t.Fatalf("Restarts = %d，procd 拿不到重启计数，必须留空", status.Restarts)
+	}
+}
+
+// 可执行文件名带空格时，/proc/<pid>/stat 的 comm 字段里就含空格。
+// 对整行做 Fields 会让其后每个字段的序号平移，CPU 和运行时长一起取错。
+func TestProcdStatusHandlesCommWithSpaces(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	fakeProcNamed(t, 4321, "(my dae (x))", 2048, 30, 20, "")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		`ubus call service list {"name":"dae"}`: {Stdout: ubusRunning},
+		filepath.Join(dir, "dae") + " enabled":  {},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	status, err := manager.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status 返回错误: %v", err)
+	}
+	if status.CPUUsageNanoseconds != 50*clockTickNanoseconds {
+		t.Fatalf("CPU = %d，期望 %d", status.CPUUsageNanoseconds, 50*clockTickNanoseconds)
+	}
+	if status.UptimeSeconds != fakeProcUptimeSeconds {
+		t.Fatalf("UptimeSeconds = %d，期望 %d", status.UptimeSeconds, fakeProcUptimeSeconds)
+	}
+}
+
+// 读到不一致的快照（进程比系统还"老"）时必须报 0，让界面显示"—"。
+// 直接相减会在 uint64 上下溢成一个天文数字，界面会一本正经地显示它。
+func TestProcdUptimeZeroWhenProcessOlderThanSystem(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "7")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("创建 fake proc 目录: %v", err)
+	}
+	fields := make([]string, 52)
+	for index := range fields {
+		fields[index] = "0"
+	}
+	fields[1] = "(dae)"
+	fields[21] = strconv.FormatUint(9000*clockTicksPerSecond, 10)
+	writeFile(t, filepath.Join(dir, "stat"), strings.Join(fields, " "))
+	writeFile(t, filepath.Join(root, "uptime"), "10.00 5.00\n")
+	previous := procRoot
+	procRoot = root
+	t.Cleanup(func() { procRoot = previous })
+
+	if got := readUptimeSeconds(7); got != 0 {
+		t.Fatalf("UptimeSeconds = %d，期望 0", got)
+	}
+}
+
+// /proc/uptime 读不到时同样报 0，而不是把 starttime 当成运行时长。
+func TestProcdUptimeZeroWithoutSystemUptime(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "7")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("创建 fake proc 目录: %v", err)
+	}
+	fields := make([]string, 52)
+	for index := range fields {
+		fields[index] = "0"
+	}
+	fields[1] = "(dae)"
+	fields[21] = "100"
+	writeFile(t, filepath.Join(dir, "stat"), strings.Join(fields, " "))
+	previous := procRoot
+	procRoot = root
+	t.Cleanup(func() { procRoot = previous })
+
+	if got := readUptimeSeconds(7); got != 0 {
+		t.Fatalf("UptimeSeconds = %d，期望 0", got)
 	}
 }
 

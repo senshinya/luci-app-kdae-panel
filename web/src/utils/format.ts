@@ -22,6 +22,22 @@ export function formatDurationNanoseconds(value?: number): string {
   return `${remaining} 秒`
 }
 
+// formatUptime 把"已运行秒数"渲染成人读的时长。
+//
+// 与 formatDurationNanoseconds 分开：那个渲染的是累计 CPU 时间，几小时就算多；
+// 运行时长动辄以天计，套用同一套单位会出现"8760 小时 0 分"这种没法一眼读的值。
+export function formatUptime(value?: number): string {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return '—'
+  const seconds = Math.floor(value)
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days} 天 ${hours} 小时`
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`
+  if (minutes > 0) return `${minutes} 分`
+  return `${seconds} 秒`
+}
+
 export function formatDateTime(value?: string): string {
   if (!value) return '—'
   const date = new Date(value)

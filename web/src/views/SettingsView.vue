@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -24,9 +24,11 @@ import { deleteJSON, getDownload, getJSON, postJSON, putJSON } from '../api/clie
 import type { GitHubCredentialStatus, PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
 import PanelUpdateAction from '../components/PanelUpdateAction.vue'
 import { useAuthStore } from '../stores/auth'
+import { useBackendStore } from '../stores/backend'
 import { formatDateTime } from '../utils/format'
 
 const auth = useAuthStore()
+const backend = useBackendStore()
 const message = useMessage()
 const dialog = useDialog()
 const form = ref<FormInst | null>(null)
@@ -109,6 +111,10 @@ async function checkPanelUpdate() {
     const check = panelUpdate.value.check
     if (check.error) {
       message.warning(`检查失败：${check.error}`)
+    } else if (!check.checked) {
+      // 没查过就报"已是最新"是撒谎。dev 构建没有可比的版本号，
+      // 检查被关掉的部署则压根没联网。
+      message.info('这个部署不做新版本检查，无法判断是否有更新')
     } else if (check.updateAvailable) {
       message.success(`发现新版本 ${check.latest}`)
     } else {
@@ -141,6 +147,14 @@ async function setSelfUpdate(enabled: boolean) {
 function applyPanelUpdateStatus(status: PanelUpdateStatus) {
   if (panelUpdate.value) panelUpdate.value.status = status
 }
+
+// status 缺失即代表后端根本没注册自升级能力（procd 就是这样）。
+// 之前这里只把开关置灰，不说原因——用户看到的是一个坏掉的开关。
+const selfUpdateSupported = computed(() => panelUpdate.value?.status !== undefined)
+const selfUpdateUnsupported = computed(() => panelUpdate.value !== null && !selfUpdateSupported.value)
+// checked 为假表示这个部署根本不检查；此时"立即检查"点了也不会发生任何事。
+const updateCheckSupported = computed(() => panelUpdate.value?.check.checked !== false)
+const upgradeCommand = 'opkg update && opkg install kdae-panel luci-app-kdae-panel'
 
 async function loadGitHubStatus() {
   try {
@@ -200,6 +214,7 @@ async function clearGitHubToken() {
 }
 
 onMounted(() => {
+  void backend.ensure()
   void loadPanelUpdate()
   void loadGitHubStatus()
 })
@@ -311,7 +326,7 @@ onMounted(() => {
     <NCard title="面板更新" class="panel-card settings-update">
       <NAlert v-if="updateError" type="error" :bordered="false" class="card-alert">{{ updateError }}</NAlert>
       <template v-else>
-        <div class="settings-toggle-row">
+        <div v-if="selfUpdateSupported" class="settings-toggle-row">
           <div>
             <strong>允许一键升级</strong>
             <NText depth="3">有新版本时可直接在当前页面或顶部提示中完成校验、备份、替换和重启。</NText>
@@ -319,26 +334,38 @@ onMounted(() => {
           <NSwitch
             :value="panelUpdate?.status?.enabled || false"
             :loading="updateLoading || updateSaving"
-            :disabled="updateLoading || updateSaving || !panelUpdate?.status"
+            :disabled="updateLoading || updateSaving"
             aria-label="允许面板一键升级"
             @update:value="setSelfUpdate"
           />
         </div>
+        <!-- 一个置灰且不说明原因的开关，读起来像是坏了。不支持就直接说清楚
+             这个部署怎么升级，而不是留一个点不动的控件。 -->
+        <NAlert v-else-if="selfUpdateUnsupported" type="info" :bordered="false" class="card-alert">
+          <template v-if="backend.isProcd">
+            本部署由 opkg 管理升级，面板不会替换自己的二进制。有新版本时装上新的 ipk 即可：
+            <code class="mono">{{ upgradeCommand }}</code>。
+            账号与配置存在数据目录（默认 <code class="mono">/etc/kdae-panel</code>）和
+            <code class="mono">/etc/dae</code>，升级不受影响；dae 是独立服务，升级面板不会中断代理。
+          </template>
+          <template v-else>当前部署不提供面板一键升级，请按原部署方式替换面板二进制。</template>
+        </NAlert>
 
         <div class="settings-update-actions">
           <div class="settings-update-action-copy">
             <strong v-if="updateLoading">正在读取版本信息</strong>
             <strong v-else-if="panelUpdate?.check.updateAvailable">发现新版本 {{ panelUpdate.check.latest }}</strong>
-            <strong v-else-if="panelUpdate?.check.latest">当前已是最新版本</strong>
-            <strong v-else>尚未取得发布版本</strong>
-            <NText depth="3">手动检查不会改变当前版本；升级会先校验并备份，再重启面板自身。</NText>
+            <strong v-else-if="panelUpdate?.check.checked">当前已是最新版本</strong>
+            <strong v-else>本部署不做新版本检查</strong>
+            <NText v-if="selfUpdateSupported" depth="3">手动检查不会改变当前版本；升级会先校验并备份，再重启面板自身。</NText>
+            <NText v-else depth="3">检查只读取发布页的版本号，不会改动这台机器上的任何东西。</NText>
           </div>
           <div class="settings-update-buttons">
             <NButton
               size="small"
               secondary
               :loading="updateChecking"
-              :disabled="updateLoading || updateChecking"
+              :disabled="updateLoading || updateChecking || !updateCheckSupported"
               @click="checkPanelUpdate"
             >
               <template #icon><NIcon><RefreshOutline /></NIcon></template>立即检查
@@ -354,9 +381,26 @@ onMounted(() => {
 
         <dl v-if="panelUpdate" class="details-list settings-update-details">
           <div><dt>当前版本</dt><dd class="mono">{{ panelUpdate.check.current }}</dd></div>
-          <div><dt>最新版本</dt><dd class="mono">{{ panelUpdate.check.latest || '暂未取得' }}</dd></div>
-          <div><dt>运行平台</dt><dd class="mono">{{ panelUpdate.status?.platform || '—' }}</dd></div>
-          <div><dt>上一版副本</dt><dd class="mono">{{ panelUpdate.status?.previousPath || '尚未生成' }}</dd></div>
+          <div>
+            <dt>最新版本</dt>
+            <dd class="mono">
+              {{ panelUpdate.check.latest || (panelUpdate.check.checked ? '暂未取得' : '本部署不检查') }}
+            </dd>
+          </div>
+          <!-- 这两行讲的都是自升级事务的细节（在哪台机器上替换、上一版备份在哪）。
+               不支持自升级时它们只会渲染成两个破折号，占位而不传递任何信息。 -->
+          <template v-if="selfUpdateSupported">
+            <div><dt>运行平台</dt><dd class="mono">{{ panelUpdate.status?.platform || '—' }}</dd></div>
+            <div><dt>上一版副本</dt><dd class="mono">{{ panelUpdate.status?.previousPath || '尚未生成' }}</dd></div>
+          </template>
+          <div v-if="panelUpdate.check.releasesUrl">
+            <dt>发布页</dt>
+            <dd>
+              <a :href="panelUpdate.check.releasesUrl" target="_blank" rel="noopener">
+                {{ panelUpdate.check.releasesUrl }}
+              </a>
+            </dd>
+          </div>
         </dl>
         <NAlert
           v-if="panelUpdate?.status?.enabled && !panelUpdate.status.updatable && panelUpdate.status.problem"

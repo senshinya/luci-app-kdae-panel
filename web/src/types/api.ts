@@ -56,7 +56,10 @@ export interface ServiceStatus {
   memoryBytes?: number
   cpuUsageNanoseconds?: number
   tasks?: number
+  /** systemd 的 NRestarts；procd 拿不到重启计数，恒为空。 */
   restarts?: number
+  /** 主进程已运行的秒数；只有 procd 后端填，与 restarts 正好互补。 */
+  uptimeSeconds?: number
   unitPath?: string
 }
 
@@ -215,9 +218,17 @@ export interface GeoStatus {
 export interface PanelUpdateCheck {
   current: string
   latest?: string
+  /**
+   * 是否真的发起过一次检查。
+   * 为假时 latest 与 error 都为空——那不是"已是最新"，而是"没查过"，
+   * 两者必须分开说，否则会对一个从未联网的部署报"当前已是最新版本"。
+   */
+  checked: boolean
   updateAvailable: boolean
   checkedAt: string
   error?: string
+  /** 本次检查所针对仓库的发布页；由后端给出，前端不再写死仓库地址。 */
+  releasesUrl?: string
 }
 
 /** 自升级开关与可行性；正式部署始终返回，关闭时仍可从界面重新启用。 */

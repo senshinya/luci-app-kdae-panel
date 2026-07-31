@@ -193,10 +193,15 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	// 不是"默认关"而是"不存在"：PanelFetcher 指向的是上游 tuoro/kdae-panel，
 	// 那里的发布二进制不含 procd 后端。开启后升级一次，面板就会以 root 把自己
 	// 替换成一个只会调 systemctl 的程序，重启即不可用。一个开了就砖的开关，
-	// 靠默认值和文案是拦不住的。新版本检查同理：上游的 tag 与本软件包的版本线
-	// 不是一回事，提示只会误导。
+	// 靠默认值和文案是拦不住的。
+	//
+	// 检查保留，只是换一个仓库问：能不能自己升级，与该不该知道有新版本，
+	// 是两件事。指向 PackageRepo（两个 ipk 的发布仓库）之后，"最新版本"说的
+	// 正是用户 opkg 装得上的那一版；沿用上游坐标才是误导。
 	if resolvedBackend == host.BackendProcd {
-		cfg.DisableUpdateCheck = true
+		if !cfg.DisableUpdateCheck {
+			dependencies.PanelRelease = upstream.NewPackageReleaseChecker(githubCredentials)
+		}
 	} else {
 		panelFetcher := upstream.NewPanelFetcherWithGitHubToken(githubCredentials)
 		updater, err := panelupdate.New(panelupdate.Options{
@@ -306,13 +311,21 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 			"backend": string(backend),
 		})
 	})
+	// 检查哪个仓库由后端决定：procd 装的是 ipk，上游 tag 与它的版本线不是
+	// 一回事。这个兜底分支是 NewWithDependencies 被直接调用时的唯一入口，
+	// 不跟着分后端的话，New 里刚立的规矩在这里就破了。
+	releaseOwner, releaseRepo := upstream.PanelRepoOwner, upstream.PanelRepoName
+	if backend == host.BackendProcd {
+		releaseOwner, releaseRepo = upstream.PackageRepoOwner, upstream.PackageRepoName
+	}
 	panelRelease := dependencies.PanelRelease
 	if panelRelease == nil && !cfg.DisableUpdateCheck {
 		panelRelease = func(ctx context.Context) (string, error) {
-			return upstream.LatestPanelRelease(ctx, upstream.PanelRepoOwner, upstream.PanelRepoName)
+			return upstream.LatestPanelRelease(ctx, releaseOwner, releaseRepo)
 		}
 	}
-	registerPanelUpdateRoutes(router, cfg.Version, panelRelease, dependencies.PanelUpdate, operations, logger)
+	registerPanelUpdateRoutes(router, cfg.Version, panelRelease, dependencies.PanelUpdate,
+		upstream.ReleasesURL(releaseOwner, releaseRepo), operations, logger)
 	registerGitHubCredentialRoutes(router, dependencies.GitHub)
 	router.HandleFunc("GET /api/v1/dae/capabilities", func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusOK, dependencies.Dae.Inspect(request.Context()))

@@ -1368,6 +1368,44 @@ func TestPanelUpdateCheckSkipsDevBuild(t *testing.T) {
 	}
 }
 
+// checked 把"查过了，没有更新"与"根本没查"分开。
+//
+// 少了它，界面只能看 latest 与 error 都为空来猜，而这正是 dev 构建、关掉检查、
+// 以及检查能力压根没注册这三种情形的共同外观——procd 上就猜错过，对一个从未
+// 联网的部署报了绿色的"当前已是最新版本"。
+func TestPanelUpdateCheckedDistinguishesNoCheckFromUpToDate(t *testing.T) {
+	upToDate := fetchPanelUpdate(t, newUpdateCheckApp(t, "v1.0.0",
+		func(context.Context) (string, error) { return "v1.0.0", nil }))
+	if upToDate["checked"] != true || upToDate["updateAvailable"] != false {
+		t.Fatalf("查过且已是最新时 checked 应为 true，实际 %v", upToDate)
+	}
+
+	// 检查被显式关掉：DisableUpdateCheck 为真时 NewWithDependencies 不会补上
+	// 默认检查器，handler 拿到的 checker 就是 nil——与 procd 上"检查器没注册"
+	// 走的是同一条分支。
+	disabled, err := NewWithDependencies(
+		Config{Version: "v1.0.0", DisableUpdateCheck: true},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Dependencies{Dae: stubDaeService{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, application := range map[string]*App{
+		"检查已关闭": disabled,
+		"dev 构建": newUpdateCheckApp(t, "dev",
+			func(context.Context) (string, error) { return "v9.9.9", nil }),
+	} {
+		payload := fetchPanelUpdate(t, application)
+		if payload["checked"] != false {
+			t.Fatalf("%s：checked 应为 false，实际 %v", name, payload)
+		}
+		if _, present := payload["latest"]; present {
+			t.Fatalf("%s：没查过就不该有 latest，实际 %v", name, payload)
+		}
+	}
+}
+
 // 检查失败要如实带出错误并短缓存，而不是假装没有新版本还长期缓存失败。
 func TestPanelUpdateCheckReportsError(t *testing.T) {
 	application := newUpdateCheckApp(t, "v0.1.2", func(context.Context) (string, error) {
@@ -2293,6 +2331,68 @@ func TestProcdBackendDoesNotRegisterSelfUpdate(t *testing.T) {
 
 	if panelUpdateStatusPresent(t, application, session) {
 		t.Fatal("procd 后端下不应注册面板自升级能力")
+	}
+}
+
+// panelUpdateCheck 取出响应里的 check 部分（需要会话的 New() 应用专用）。
+func panelUpdateCheck(t *testing.T, application *App, session *http.Cookie) map[string]any {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/panel/update", nil)
+	request.AddCookie(session)
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 %d", recorder.Code, http.StatusOK)
+	}
+	var payload struct {
+		Check map[string]any `json:"check"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	return payload.Check
+}
+
+// 升级不给，检查要给：procd 装的是 ipk，"有没有新版本"仍然值得知道。
+// 但必须问对仓库——上游 tuoro/kdae-panel 发的是 systemd 用的裸二进制，
+// 拿它的 tag 报出来的新版本既装不上也不该装。
+func TestProcdBackendChecksPackageRepository(t *testing.T) {
+	cfg := newBackendTestConfig(t, host.BackendProcd)
+	// 非 semver 版本号让检查短路，测试不联网。releasesUrl 在检查之前就填好，
+	// 断言的正是"面板认为该去哪个仓库问"这件事本身。
+	cfg.Version = "dev"
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("初始化应用: %v", err)
+	}
+	defer func() { _ = application.Close() }()
+	session := adminSessionCookie(t, application, cfg.BootstrapToken)
+
+	check := panelUpdateCheck(t, application, session)
+	want := upstream.ReleasesURL(upstream.PackageRepoOwner, upstream.PackageRepoName)
+	if got, _ := check["releasesUrl"].(string); got != want {
+		t.Fatalf("releasesUrl = %q，期望 %q", got, want)
+	}
+	if panelUpdateStatusPresent(t, application, session) {
+		t.Fatal("检查放开不等于自升级放开：procd 下仍不该注册自升级能力")
+	}
+}
+
+// 对照组：systemd 仍然问上游仓库。
+func TestSystemdBackendChecksUpstreamRepository(t *testing.T) {
+	cfg := newBackendTestConfig(t, host.BackendSystemd)
+	cfg.Version = "dev"
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("初始化应用: %v", err)
+	}
+	defer func() { _ = application.Close() }()
+	session := adminSessionCookie(t, application, cfg.BootstrapToken)
+
+	check := panelUpdateCheck(t, application, session)
+	want := upstream.ReleasesURL(upstream.PanelRepoOwner, upstream.PanelRepoName)
+	if got, _ := check["releasesUrl"].(string); got != want {
+		t.Fatalf("releasesUrl = %q，期望 %q", got, want)
 	}
 }
 

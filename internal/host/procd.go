@@ -20,10 +20,13 @@ var initDirectory = "/etc/init.d"
 // procRoot 是 /proc 的挂载点，测试指向临时目录。
 var procRoot = "/proc"
 
-// clockTickNanoseconds 是 /proc/<pid>/stat 里 utime/stime 的单位。
-// Linux 上 USER_HZ 恒为 100，即每一跳 10ms；写死比为一个展示用的数字
-// 去引 cgo 调 sysconf 划算。
-const clockTickNanoseconds = 10_000_000
+// clockTicksPerSecond 是 /proc/<pid>/stat 里 utime/stime/starttime 的单位
+// USER_HZ。Linux 上恒为 100，即每一跳 10ms；写死比为几个展示用的数字去引
+// cgo 调 sysconf 划算。
+const (
+	clockTicksPerSecond  = 100
+	clockTickNanoseconds = 1_000_000_000 / clockTicksPerSecond
+)
 
 // procdManager 通过 procd 的 init 脚本与 ubus 管理服务，适用于 OpenWrt/ImmortalWrt。
 type procdManager struct {
@@ -109,6 +112,7 @@ func (m *procdManager) Status(ctx context.Context) (Status, error) {
 		status.MemoryBytes = readMemoryBytes(status.MainPID)
 		status.Tasks = readThreadCount(status.MainPID)
 		status.CPUUsageNanoseconds = readCPUNanoseconds(status.MainPID)
+		status.UptimeSeconds = readUptimeSeconds(status.MainPID)
 		status.Environment = readProcessEnvironment(status.MainPID)
 	}
 	return status, nil
@@ -187,24 +191,87 @@ func procStatusField(pid int, prefix string) string {
 	return ""
 }
 
-func readCPUNanoseconds(pid int) uint64 {
+// procStatFields 返回 /proc/<pid>/stat 从第 3 个字段（state）起的全部字段。
+//
+// 必须从最后一个 ')' 之后切，不能对整行做 Fields：第 2 个字段是 comm，内核
+// 原样放进圆括号里，可执行文件名带空格时（"my dae"）整行的字段序号会平移，
+// 之后每一个按下标取的值都取错。从 ')' 之后切开则与 comm 的内容无关。
+//
+// 返回切片的下标 = stat 手册里的字段号 - 3。
+func procStatFields(pid int) []string {
 	content, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
+		return nil
+	}
+	end := strings.LastIndex(string(content), ")")
+	if end < 0 {
+		return nil
+	}
+	return strings.Fields(string(content)[end+1:])
+}
+
+func readCPUNanoseconds(pid int) uint64 {
+	fields := procStatFields(pid)
+	// utime 是第 14 个字段，stime 是第 15 个。
+	if len(fields) < 13 {
 		return 0
 	}
-	fields := strings.Fields(string(content))
-	if len(fields) < 15 {
-		return 0
-	}
-	utime, err := strconv.ParseUint(fields[13], 10, 64)
+	utime, err := strconv.ParseUint(fields[11], 10, 64)
 	if err != nil {
 		return 0
 	}
-	stime, err := strconv.ParseUint(fields[14], 10, 64)
+	stime, err := strconv.ParseUint(fields[12], 10, 64)
 	if err != nil {
 		return 0
 	}
 	return (utime + stime) * clockTickNanoseconds
+}
+
+// readUptimeSeconds 算出主进程已经跑了多久。
+//
+// 用"系统已开机秒数 − 进程启动时刻"，而不是"墙上时钟 − 进程启动时刻"：
+// stat 里的 starttime 以开机为原点，换算成绝对时刻还要再引一次 /proc/stat
+// 的 btime，而路由器开机后常会被 NTP 校时一次，btime 与那次校时之间的关系
+// 并不稳定，算出来的运行时长可能是负的或凭空多出几年。两个量同以开机为原点，
+// 相减就与时钟怎么跳完全无关。
+func readUptimeSeconds(pid int) uint64 {
+	fields := procStatFields(pid)
+	// starttime 是第 22 个字段。
+	if len(fields) < 20 {
+		return 0
+	}
+	startTicks, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0
+	}
+	systemUptime, ok := readSystemUptimeSeconds()
+	if !ok {
+		return 0
+	}
+	startedAt := startTicks / clockTicksPerSecond
+	// 进程比系统还"老"只可能是读到了不一致的快照，此时报 0（界面显示"—"）
+	// 比报一个下溢成天文数字的 uint64 强。
+	if startedAt > systemUptime {
+		return 0
+	}
+	return systemUptime - startedAt
+}
+
+// readSystemUptimeSeconds 读 /proc/uptime 的第一个字段（开机至今的秒数）。
+func readSystemUptimeSeconds() (uint64, bool) {
+	content, err := os.ReadFile(filepath.Join(procRoot, "uptime"))
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(content))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return uint64(seconds), true
 }
 
 // readProcessEnvironment 读 dae 进程实际生效的环境变量。

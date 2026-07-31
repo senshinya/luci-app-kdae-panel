@@ -42,7 +42,18 @@ type Status struct {
 	CPUUsageNanoseconds uint64 `json:"cpuUsageNanoseconds,omitempty"`
 	Tasks               uint64 `json:"tasks,omitempty"`
 	Restarts            uint64 `json:"restarts,omitempty"`
-	UnitPath            string `json:"unitPath,omitempty"`
+	// UptimeSeconds 是主进程已经跑了多久，只有 procd 后端填。
+	//
+	// 与 Restarts 正好互补：procd 不暴露重启计数器，systemd 暴露。仪表盘那一格
+	// 因此在 procd 上常年空着——不是显示不出来，而是这台机器上真的没有这个数。
+	// 主进程的存活时长在 /proc 里是现成的，两个后端各自填自己拿得到的那一个，
+	// 比让一格恒为"—"诚实，也比编一个 0 出来安全。
+	//
+	// 不复用 ActiveSince/StartedAt：那两个是 systemd 原样透传的时间戳字符串
+	// （"Wed 2026-07-31 10:00:00 UTC"），往里塞另一种格式，等于让读 API 的人
+	// 去猜这个字段今天是哪一套格式。
+	UptimeSeconds uint64 `json:"uptimeSeconds,omitempty"`
+	UnitPath      string `json:"unitPath,omitempty"`
 	// ExecStartPath 是单元实际启动的可执行文件。安装新版本时必须替换这个路径，
 	// 否则会出现"替换成功但服务仍在跑旧二进制"的静默失败。
 	ExecStartPath string `json:"execStartPath,omitempty"`

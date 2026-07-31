@@ -188,7 +188,7 @@ func (i *Installer) uninstallTarget(ctx context.Context) (host.Status, string, e
 	if err := regularFile(target, "dae 可执行文件"); err != nil {
 		return host.Status{}, "", err
 	}
-	if err := assertExecutable(target); err != nil {
+	if err := i.assertExecutable(target); err != nil {
 		return host.Status{}, "", err
 	}
 

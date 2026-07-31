@@ -203,17 +203,17 @@ dae 只在重载时重新拉取 `subscription` 链接，因此"订阅定时刷�
 
 ## 面板自身更新
 
-procd 部署没有这项能力：`internal/app/app.go` 探测到 procd 后端时既不构造自升级管理器，
-也不发起面板自身的新版本检查——不是默认关闭，而是根本不存在。理由：上游发布的面板二进制不含
-procd 后端，升级一次就会把自己换成一个只会调用 systemctl 的程序，重启即不可用；面板的版本线
-也和上游 tag 不是一回事，检查只会给出误导性的提示。procd 部署走 `opkg upgrade` 升级。
+procd 部署**只检查、不自升级**：`internal/app/app.go` 探测到 procd 后端时不构造自升级管理器——
+不是默认关闭，而是根本不存在。理由：上游发布的面板二进制不含 procd 后端，升级一次就会把自己
+换成一个只会调用 systemctl 的程序，重启即不可用。procd 部署走 `opkg install` 升级。
+
+检查则保留，只是换一个仓库问：procd 下 `checker` 指向 `senshinya/luci-app-kdae-panel`
+（`upstream.PackageRepoOwner` / `PackageRepoName`），也就是两个 ipk 的发布仓库；systemd 下仍指向
+上游 `tuoro/kdae-panel`。能不能自己升级，与该不该知道有新版本，是两件事。
 
 procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /panel/update/check` 只返回
-`check`（`current`、`checkedAt`；不发起联网检查，`latest` 缺失，`updateAvailable` 恒为
-`false`），不含 `status`、不含 `job`；`PUT /panel/update/preference`、`POST /panel/update`
+`check`，不含 `status`、不含 `job`；`PUT /panel/update/preference`、`POST /panel/update`
 恒返回 `503 panel_self_update_unavailable`（"当前部署不支持面板自升级"）。
-
-以下响应结构与升级机制的说明仅适用于 systemd 后端：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -222,12 +222,21 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 | `PUT` | `/panel/update/preference` | 在 UI 中持久化一键升级开关 |
 | `POST` | `/panel/update` | 触发一键自升级 |
 
-`GET` 响应里的 `check` 含 `current`、`latest`、`updateAvailable`、`checkedAt`，检查失败时带 `error`；
+`check` 结构两个后端通用：`current`、`latest`、`checked`、`updateAvailable`、`checkedAt`、
+`releasesUrl`，检查失败时带 `error`。
+
+- `checked` 说明这次到底有没有发起过检查。为假时 `latest` 与 `error` 都为空，含义是"没查过"
+  而不是"已是最新"——dev 构建、`KDAE_PANEL_DISABLE_UPDATE_CHECK=true` 都走这条路。少了这个
+  字段，界面只能靠 `latest` 为空去猜，而那正是三种情形的共同外观。
+- `releasesUrl` 是本次检查所针对仓库的发布页，随后端而变（见上）。由后端给出是因为"检查的是哪个
+  仓库"只有后端知道，前端写死早晚会指错地方。
+
 结果按 TTL 缓存（成功 6 小时、失败 15 分钟），dev 构建不发起检查，
 `KDAE_PANEL_DISABLE_UPDATE_CHECK=true` 时不再联网、恒不提示。
-手动检查接口返回同样的 `check`、`status` 与 `job` 结构，会绕过成功缓存；同一面板在 1 分钟冷却期内重复调用直接返回上次结果。
+手动检查接口返回同样的结构，会绕过成功缓存；同一面板在 1 分钟冷却期内重复调用直接返回上次结果。
+以上对两个后端都成立。
 
-正式部署的响应始终带 `status`（`enabled`、是否可升级、二进制路径、上一版副本位置）
+**以下仅适用于 systemd 后端。** 正式部署的响应始终带 `status`（`enabled`、是否可升级、二进制路径、上一版副本位置）
 与 `job`（任务进度）。`PUT /panel/update/preference` 接受 `{"enabled":true|false}`，
 原子保存到面板数据目录并返回新状态；关闭时 `POST` 返回 `409 panel_self_update_disabled`。
 
@@ -288,6 +297,18 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 | `GET` | `/diagnostics/sysdump` | 执行 dae sysdump，并以 `application/gzip` 下载生成的归档 |
 
 所有动作名和参数都由服务端白名单决定。URL、请求体和查询参数都不能注入额外命令参数。
+
+`GET /service` 里有两个字段各只有一个后端填得出，另一个后端一律留空（`omitempty`，不出现在
+JSON 里），因为那台机器上真的没有这个数：
+
+| 字段 | systemd | procd |
+|---|---|---|
+| `restarts`、`execMainStatus` | `NRestarts` 与上次退出码 | 不填：procd 不维护重启计数器，也不记录退出码 |
+| `uptimeSeconds` | 不填 | 主进程已运行秒数（`/proc/<pid>/stat` 的 starttime 与 `/proc/uptime` 相减） |
+
+刻意不用 0 补齐缺失的那一个：`restarts: 0` 会把"服务反复崩溃"显示成"一次没崩过"，还会让版本
+切换的崩溃循环检测（比较观察窗口前后的 `restarts`）永远判定为稳定。procd 上那道检测改看主进程号
+是否变化，见 `internal/daeinstall/installer.go` 的 `observeAfterRestart`。
 
 ## 错误格式
 

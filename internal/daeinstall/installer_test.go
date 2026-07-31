@@ -258,6 +258,38 @@ func seed(t *testing.T, binaryPath, content string) {
 	}
 }
 
+// ExecStart 是 systemd 的概念。procd 上服务由 /etc/init.d/dae 拉起，命令行来自
+// UCI 的 dae_binary；照着 ExecStart 去找，在这台机器上找不到任何东西。
+func TestAssertExecutableFixHintFollowsBackend(t *testing.T) {
+	for _, testCase := range []struct {
+		backend  host.Backend
+		want     string
+		unwanted string
+	}{
+		{host.BackendSystemd, "ExecStart", "dae_binary"},
+		{host.BackendProcd, "dae_binary", "ExecStart"},
+	} {
+		t.Run(string(testCase.backend), func(t *testing.T) {
+			installer, binaryPath := newTestInstallerWithBackend(
+				t, &fakeFetcher{}, &fakeService{}, testCase.backend)
+			// 名叫 dae 的启动包装脚本：文件名过关，文件头不是 ELF。
+			if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexec /opt/dae \"$@\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err := installer.assertExecutable(binaryPath)
+			if err == nil {
+				t.Fatal("包装脚本应当被拒绝")
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("提示 %q 应包含 %q", err, testCase.want)
+			}
+			if strings.Contains(err.Error(), testCase.unwanted) {
+				t.Fatalf("提示 %q 不该出现 %q", err, testCase.unwanted)
+			}
+		})
+	}
+}
+
 func TestInstallUpgrade(t *testing.T) {
 	fetcher := &fakeFetcher{}
 	service := &fakeService{}

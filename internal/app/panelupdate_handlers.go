@@ -33,11 +33,20 @@ type panelUpdatePreferenceRequest struct {
 }
 
 type panelUpdate struct {
-	Current         string    `json:"current"`
-	Latest          string    `json:"latest,omitempty"`
+	Current string `json:"current"`
+	Latest  string `json:"latest,omitempty"`
+	// Checked 区分"查过了，没有更新"与"根本没查"。
+	//
+	// 少了它，dev 构建与关掉检查的部署都只是 latest 为空、error 为空，
+	// 与"已是最新"在结构上不可分辨，界面只能猜——procd 上就猜错过，
+	// 对一个从未联网的部署报了绿色的"当前已是最新版本"。
+	Checked         bool      `json:"checked"`
 	UpdateAvailable bool      `json:"updateAvailable"`
 	CheckedAt       time.Time `json:"checkedAt"`
 	Error           string    `json:"error,omitempty"`
+	// ReleasesURL 是本次检查所针对的仓库的发布页。
+	// 由后端给出：检查的是哪个仓库只有后端知道，前端写死早晚会指错地方。
+	ReleasesURL string `json:"releasesUrl,omitempty"`
 }
 
 const (
@@ -56,7 +65,7 @@ const (
 // service 只在测试或不完整的嵌入部署中允许为空；正式程序始终创建管理器，
 // 启用状态由它自己持久化，界面因此随时能开关而不需要 SSH。
 func registerPanelUpdateRoutes(router *http.ServeMux, current string, checker PanelReleaseChecker,
-	service PanelUpdateService, operations *sync.Mutex, logger *slog.Logger) {
+	service PanelUpdateService, releasesURL string, operations *sync.Mutex, logger *slog.Logger) {
 	var mu sync.Mutex
 	var cached panelUpdate
 	var expiresAt time.Time
@@ -76,10 +85,11 @@ func registerPanelUpdateRoutes(router *http.ServeMux, current string, checker Pa
 		if force {
 			lastForcedCheck = now
 		}
-		result := panelUpdate{Current: current, CheckedAt: now.UTC()}
+		result := panelUpdate{Current: current, CheckedAt: now.UTC(), ReleasesURL: releasesURL}
 		ttl := panelUpdateCacheOK
 		// dev 构建没有可比的版本号：不联网、不提示，而不是拿 dev 和 tag 硬比
 		if _, ok := parseSemver(current); checker != nil && ok {
+			result.Checked = true
 			latest, err := checker(ctx)
 			if err != nil {
 				result.Error = err.Error()
