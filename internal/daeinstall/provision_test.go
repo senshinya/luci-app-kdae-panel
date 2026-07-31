@@ -54,6 +54,23 @@ func newFreshInstaller(t *testing.T) (*Installer, *fakeService, string) {
 	return installer, service, binaryPath
 }
 
+// newFreshProcdInstaller 与 newFreshInstaller 相同，但走 procd 后端：
+// 还没装过 dae 的机器上，服务不存在，可执行文件与配置也都不存在。
+// procd 没有单元目录这个概念，不需要像 newFreshInstaller 那样另外指定。
+func newFreshProcdInstaller(t *testing.T) (*Installer, *fakeService, string) {
+	t.Helper()
+	service := &fakeService{}
+	installer, binaryPath := newTestInstallerWithBackend(t, &fakeFetcher{}, service, host.BackendProcd)
+	if err := os.Remove(binaryPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Remove(installer.configPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	service.execStart = ""
+	return installer, service, binaryPath
+}
+
 func TestProvisionReportsReadyOnFreshMachine(t *testing.T) {
 	installer, _, _ := newFreshInstaller(t)
 
@@ -145,6 +162,74 @@ func TestProvisionReportsUnwritableDirectories(t *testing.T) {
 	}
 	if len(provision.Blockers) == 0 || !strings.Contains(strings.Join(provision.Blockers, " "), "ReadWritePaths") {
 		t.Fatalf("应指明需要加入 ReadWritePaths: %v", provision.Blockers)
+	}
+}
+
+// 对照组：确认收紧 procd 分支文案没有把 systemd 分支一并清空——
+// 这条 blocker 仍要指向真实存在的单元与机制，而不是两边都变得含糊其辞。
+func TestProvisionUnwritableBlockerKeepsSystemdGuidanceOnSystemd(t *testing.T) {
+	installer, _, _ := newFreshInstaller(t)
+	blocker := filepath.Join(testDir(t), "a-file")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installer.binaryPath = filepath.Join(blocker, "dae")
+
+	provision := installer.Provision(context.Background())
+	if provision.Possible {
+		t.Fatal("目录不可写时不应报告可以安装")
+	}
+	joined := strings.Join(provision.Blockers, " ")
+	if !strings.Contains(joined, "ReadWritePaths") || !strings.Contains(joined, "kdae-panel.service") {
+		t.Fatalf("systemd 下应保留原有指引（单元名 + ReadWritePaths）: %v", provision.Blockers)
+	}
+}
+
+// procd 部署既没有 systemd 单元也没有 ReadWritePaths 这套沙箱机制，照着一个
+// 不存在的东西去排查只会让用户白费一轮时间。用真实的 0o000 权限位模拟目录
+// 不可写——对照 geodata 包 TestMissingWarningHedgesWhenHomeHidden 的写法，
+// 而不是像上面的对照组那样借用"祖先是文件"的技巧，两者都要能触发同一条检查。
+func TestProvisionUnwritableBlockerAvoidsSystemdVocabularyOnProcd(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 能写任何目录，无法模拟权限拒绝")
+	}
+	installer, _, _ := newFreshProcdInstaller(t)
+	unwritable := t.TempDir()
+	if err := os.Chmod(unwritable, 0o000); err != nil {
+		t.Fatalf("设置目录权限: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unwritable, 0o755) })
+	// procdUnits.WritableDirs() 是空的：procd 部署没有单元目录需要预检。
+	// 唯一还会被检查的是二进制与配置目录，因此把二进制目录换成不可写的那个。
+	installer.binaryPath = filepath.Join(unwritable, "dae")
+
+	provision := installer.Provision(context.Background())
+	if provision.Possible {
+		t.Fatal("目录不可写时不应报告可以安装")
+	}
+	joined := strings.Join(provision.Blockers, " ")
+	for _, forbidden := range []string{"systemd", "systemctl", "ReadWritePaths", ".service", "服务单元"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("procd 下的 blocker 不该出现 %q: %v", forbidden, provision.Blockers)
+		}
+	}
+}
+
+// procdManager.Status 约定永不返回错误（见 host/procd.go），但那只是写在注释
+// 里的承诺，没有测试守着。这里用会报错的 fake service 模拟那条承诺被打破的
+// 情形，确认此时的 blocker 引用的是这台机器上真实存在的 init 脚本，
+// 而不是硬编码的 dae.service——procd 部署里根本没有这个文件。
+func TestProvisionStatusUnreadableBlockerReferencesRealPathOnProcd(t *testing.T) {
+	service := &fakeService{statusErr: errors.New("ubus 不可用")}
+	installer, _ := newTestInstallerWithBackend(t, &fakeFetcher{}, service, host.BackendProcd)
+
+	provision := installer.Provision(context.Background())
+	joined := strings.Join(provision.Blockers, " ")
+	if !strings.Contains(joined, filepath.FromSlash("/etc/init.d")) {
+		t.Fatalf("procd 下应引用 init 脚本路径: %v", provision.Blockers)
+	}
+	if strings.Contains(joined, "dae.service") {
+		t.Fatalf("procd 下不该出现 dae.service: %v", provision.Blockers)
 	}
 }
 

@@ -185,7 +185,20 @@ func (s *fakeService) Status(context.Context) (host.Status, error) {
 	}, nil
 }
 
+// newTestInstaller 构造一个 systemd 后端的 Installer。这批测试验证的是
+// systemd 路径的行为；留空会走 host.Backend.Resolve 的自动探测，让测试结果
+// 取决于运行机器上有没有 /sbin/procd。显式钉住后，测试断言（如 unitDir 下
+// dae.service 落盘）在任何机器上都成立。
 func newTestInstaller(t *testing.T, fetcher *fakeFetcher, service *fakeService) (*Installer, string) {
+	t.Helper()
+	return newTestInstallerWithBackend(t, fetcher, service, host.BackendSystemd)
+}
+
+// newTestInstallerWithBackend 与 newTestInstaller 相同，但允许调用方指定服务
+// 后端。procd 分支的文案（如去 systemd 化相关的 blocker）必须真的构造一个
+// procd 后端的 Installer 才测得到——共用只认 systemd 的构造函数，procd 分支
+// 就永远没有测试覆盖。
+func newTestInstallerWithBackend(t *testing.T, fetcher *fakeFetcher, service *fakeService, backend host.Backend) (*Installer, string) {
 	t.Helper()
 	directory := testDir(t)
 	binaryPath := filepath.Join(directory, "bin", "dae")
@@ -207,11 +220,8 @@ func newTestInstaller(t *testing.T, fetcher *fakeFetcher, service *fakeService) 
 			}
 			return fakeProbe{content: string(content)}
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		// 这批测试验证的是 systemd 路径的行为；留空会走 host.Backend.Resolve
-		// 的自动探测，让测试结果取决于运行机器上有没有 /sbin/procd。显式钉住
-		// 后，测试断言（如 unitDir 下 dae.service 落盘）在任何机器上都成立。
-		ServiceBackend: host.BackendSystemd,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ServiceBackend: backend,
 	})
 	if err != nil {
 		t.Fatal(err)

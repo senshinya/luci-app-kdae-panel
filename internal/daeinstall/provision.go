@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
+	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -64,9 +65,14 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	// 会让一次状态查询抽风变成一次无备份的覆盖安装。
 	status, err := i.service.Status(ctx)
 	if err != nil {
+		// 用 i.units.Path() 而不是 i.serviceUnit()：后者硬编码为 dae.service，
+		// procd 下这条消息今天不可达（procdManager.Status 约定永不报错），但那
+		// 只是写在注释里的承诺、没有测试守着。i.units.Path() 在两套后端下都
+		// 指向本机真实存在的文件（systemd 单元或 init 脚本），一旦这条不变量
+		// 哪天被打破，procd 用户看到的也是自己机器上真的有的东西。
 		result.Blockers = append(result.Blockers, fmt.Sprintf(
 			"无法读取 %s 的状态，因而不能确认这台机器上是否已有 dae，已拒绝首次安装：%v",
-			i.serviceUnit(), err))
+			i.units.Path(), err))
 		return result
 	}
 	detection := i.units.Detect(ctx, status)
@@ -85,9 +91,7 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	directories = append(directories, i.units.WritableDirs()...)
 	for _, directory := range directories {
 		if err := atomicfile.Writable(directory); err != nil {
-			result.Blockers = append(result.Blockers, fmt.Sprintf(
-				"面板无法写入 %s：%v（systemd 部署需在服务单元的 ReadWritePaths 中列出该目录）",
-				directory, err))
+			result.Blockers = append(result.Blockers, unwritableProvisionProblem(i.backend, directory, err))
 		}
 	}
 	if _, err := os.Stat(i.configPath); err == nil {
@@ -104,6 +108,22 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	result.Notes = append(result.Notes, "安装完成后不会自动启动 dae：透明代理配置不当会切断你当前的连接")
 	result.Possible = len(result.Blockers) == 0
 	return result
+}
+
+// unwritableProvisionProblem 说明目录为什么写不进去，并按后端给出对得上的修法。
+//
+// 原先无条件让用户去改"服务单元的 ReadWritePaths"。procd 部署里既没有 systemd
+// 单元也没有这个机制——面板由 procd 直接拉起，没有任何沙箱挡在中间，写不进去
+// 就是这个目录本身的权限或挂载有问题。照着一个不存在的概念去排查，procd 用户
+// 只会白费一轮时间。与 geodata.unwritableProblem 保持同一套措辞：同一个问题
+// 分两处各答一次，早晚会在文案上跑偏。
+func unwritableProvisionProblem(backend host.Backend, directory string, err error) string {
+	if backend == host.BackendProcd {
+		return fmt.Sprintf(
+			"面板无法写入 %s：%v；请确认该目录存在、所在分区可写且未被挂载为只读", directory, err)
+	}
+	return fmt.Sprintf(
+		"面板无法写入 %s：%v；请在 kdae-panel.service 的 ReadWritePaths 中加入该目录", directory, err)
 }
 
 func (i *Installer) serviceUnit() string {

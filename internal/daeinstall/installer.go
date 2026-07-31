@@ -121,6 +121,11 @@ type Installer struct {
 	unitDir string
 	// units 抽掉不同 init 系统在"服务定义"上的差异。
 	units unitProvisioner
+	// backend 只影响"目录不可写"该怎么建议用户去修——两套 init 系统下这件事
+	// 的成因完全不同。做法与 geodata.Manager.backend 一致：New 里选完
+	// provisioner 的那个局部变量不能就地丢掉，否则后续没有任何地方能再问出
+	// "这是哪个后端"，界面只能对着所有部署给同一套（通常是 systemd 那套）指引。
+	backend host.Backend
 	// geoSearchDirs 只供卸载测试把搜索范围收进临时目录；生产环境留空，
 	// 始终使用 dae 的真实 geo 搜索顺序。
 	geoSearchDirs []string
@@ -194,6 +199,7 @@ func New(options Options) (*Installer, error) {
 	if err != nil {
 		return nil, err
 	}
+	installer.backend = backend
 	if backend == host.BackendProcd {
 		installer.units = &procdUnits{installer: installer}
 	} else {
