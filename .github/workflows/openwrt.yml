@@ -51,9 +51,15 @@ jobs:
       # 自升级，ipk 是唯一通道。因此版本必须随发布走。
       #
       # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME
-      # 是分支名或 "123/merge"，不是版本号，退回 0.0.0+…：它按 opkg 的版本比较规则
+      # 是分支名或 "123/merge"，不是版本号，退回 0.0.1+…：它按 opkg 的版本比较规则
       # 排在任何正式版本之前（比到第二段就是 0 < 8），手动构建的产物因此不会盖住
       # 正式发布。
+      #
+      # 用 0.0.1 而不是 0.0.0，是为了盖过历史上那批 0.0.0+<纯短哈希> 的产物。数字
+      # 打头的字符串首个非数字块是空的，而空排在任何字母之前，所以 0.0.0+124.abcdefg
+      # 反倒小于 0.0.0+fe515cb——不抬这一位的话，装第一个新方案的包仍会被判成降级，
+      # 而 LuCI 的软件包页面没有任何入口能传 --force-downgrade（它只认 --autoremove
+      # 和 --force-overwrite），用户就只能先卸载再上传。
       #
       # 后缀里必须先放 commit 数，不能只放短哈希。opkg 用的是 dpkg 那套比较规则，
       # 字母排在数字之前：fe515cb 和 f961b58 比到第二位是 e vs 9，字母优先，于是
@@ -66,7 +72,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="0.0.0+$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
+            version="0.0.1+$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
           fi
           echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "软件包版本 ${version}"
