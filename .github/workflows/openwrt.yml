@@ -207,15 +207,24 @@ jobs:
           wget -q "${SDK_URL}" -O sdk.tar.zst
           tar --zstd -xf sdk.tar.zst -C "${GITHUB_WORKSPACE}/sdk" --strip-components=1
 
+      # 把仓库里的 openwrt/ 挂成一个本地 feed，而不是拷进 package/。
+      #
+      # 拷进 package/ 的包不经过 feeds，它的依赖也就没人替它装：官方 SDK 的 package/
+      # 里没有 ca-bundle，DEPENDS 里的 +ca-bundle 指向一个不存在的包，元数据扫描会把
+      # 整个 Kconfig 条目丢掉，症状是 defconfig 之后 CONFIG_PACKAGE_kdae-panel 消失，
+      # 而日志里只有一条不起眼的 "has a dependency on 'ca-bundle', which does not exist"。
+      # feeds install 会顺着 DEPENDS 递归把依赖从 base/luci feed 装进 package/feeds/
+      # （scripts/feeds 的 install_src）。immortalwrt 的 SDK 自带 ca-bundle，所以这个差别
+      # 在旧流水线上从没暴露过。
       - name: 准备 feeds 与软件包
         working-directory: ${{ github.workspace }}/sdk
         run: |
-          ./scripts/feeds update base luci packages
-          # 只装 luci-base：包 Makefile 需要 feeds/luci/luci.mk，不需要整套 LuCI 应用。
-          ./scripts/feeds install luci-base
-          # 复制而不是软链：buildroot 扫描软件包用的 find 默认不跟随符号链接，
-          # 软链进去的目录会被整个跳过，症状是 "package/kdae-panel 不存在"。
-          cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
+          echo "src-link kdae ${GITHUB_WORKSPACE}/openwrt" >> feeds.conf.default
+          ./scripts/feeds update base luci packages kdae
+          # -a -p kdae：装本 feed 里的全部包，并连带装它们的依赖。
+          # 不必再单独装 luci-base——luci-app-kdae-panel 依赖它，会被一起带进来；
+          # 包 Makefile include 的 feeds/luci/luci.mk 则在 feeds update 后就已存在。
+          ./scripts/feeds install -a -p kdae
 
       - name: 编译软件包
         working-directory: ${{ github.workspace }}/sdk
@@ -275,7 +284,7 @@ jobs:
           grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
             || { echo "control 缺少 Conflicts: dae"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
-                     kmod-xdp-sockets-diag ca-bundle; do
+                     ca-bundle; do
             grep -q "$dep" "$workdir/control" || { echo "control 缺少依赖 $dep"; exit 1; }
           done
           tar -tzf "$workdir"/data.tar.gz > "$workdir/files"
@@ -307,10 +316,12 @@ jobs:
           grep -q "${{ matrix.pkgarch }}" "$workdir/meta" \
             || { echo "元数据的架构不是 ${{ matrix.pkgarch }}"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
-                     kmod-xdp-sockets-diag ca-bundle; do
+                     ca-bundle; do
             grep -q "$dep" "$workdir/meta" || { echo "元数据缺少依赖 $dep"; exit 1; }
           done
           # 包是 SDK 用本地构建密钥签的，校验机器上没有那把公钥，因此 --allow-untrusted。
+          # --destination 不会自己建目录，不先 mkdir 会报 "Error opening destination"。
+          mkdir -p "$workdir/root"
           "$apk_bin" --allow-untrusted extract --no-chown \
             --destination "$workdir/root" "$backend"
           for path in usr/bin/kdae-panel etc/init.d/kdae-panel etc/init.d/dae \

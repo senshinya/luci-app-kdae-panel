@@ -32,8 +32,13 @@ define Package/kdae-panel
   # （装的是 CI 交叉编译好的静态二进制），闸门只是挡住没出过对应二进制的架构。
   # 闸门不匹配时 make defconfig 会静默丢掉 CONFIG_PACKAGE_kdae-panel，因此 CI 在
   # defconfig 之后立刻断言配置项还在——否则报错会推迟到 compile，离原因很远。
+  # 刻意不依赖 kmod-xdp-sockets-diag：官方 OpenWrt 的 24.10 与 25.12 都不发这个包
+  # （另外四个 kmod 两边都有），依赖它会让本包在官方系统上根本装不上，也会让 SDK 的
+  # defconfig 把整个 Kconfig 条目丢掉。immortalwrt 发这个包、它的 dae 包也依赖它，
+  # 需要的用户在 immortalwrt 上自己 opkg install 即可——它是 AF_XDP 套接字的诊断
+  # 模块，dae 的转发路径不用它。
   DEPENDS:=@(x86_64||aarch64||i386) +kmod-sched-core +kmod-sched-bpf +kmod-veth \
-	+kmod-nft-bridge +kmod-xdp-sockets-diag +ca-bundle
+	+kmod-nft-bridge +ca-bundle
   # dae 的可执行文件、配置与 geo 全部由本面板管理。装了本包就装不上官方
   # dae 包，opkg upgrade 也就不会把分支构建盖回官方版本。
   CONFLICTS:=dae

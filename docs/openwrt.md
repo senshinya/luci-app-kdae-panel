@@ -40,9 +40,14 @@ Release 附带的产物覆盖两条版本线、三种架构：
 冲突而不是包冲突。处理方式一样：先 `apk del dae`。
 
 dae 运行所需的内核模块不受这条冲突声明影响，仍由包管理器正常安装：它们是 `kdae-panel` 的依赖
-（`kmod-sched-core`、`kmod-sched-bpf`、`kmod-veth`、`kmod-nft-bridge`、`kmod-xdp-sockets-diag`），
+（`kmod-sched-core`、`kmod-sched-bpf`、`kmod-veth`、`kmod-nft-bridge`），
 装包时自动拉取，随官方源正常接受安全更新。`ca-bundle` 同样是依赖，供面板发起的 HTTPS 请求（下载
 dae 版本、geo 数据、面板自身的新版本查询）验证证书。
+
+`kmod-xdp-sockets-diag` **刻意不在依赖里**。ImmortalWrt 发这个包、它的 `dae` 包也依赖它，但官方
+OpenWrt 的 24.10 与 25.12 都不发——本包由官方 SDK 构建、也要能装在官方系统上，依赖一个那边根本
+不存在的包只会让安装直接失败。它是 AF_XDP 套接字的诊断模块，dae 的转发路径不用它；在 ImmortalWrt
+上确实需要时自己装一次即可（`opkg install kmod-xdp-sockets-diag`）。
 
 ## 安装
 
