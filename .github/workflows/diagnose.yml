@@ -64,9 +64,10 @@ jobs:
             grep -E 'PACKAGE_kdae-panel' .config || echo "(被丢掉了)"
           }
 
-          try_deps "全套（现状）" \
-            '@(x86_64||aarch64||i386) +kmod-sched-core +kmod-sched-bpf +kmod-veth +kmod-nft-bridge +kmod-xdp-sockets-diag +ca-bundle'
-          try_deps "去掉全部 kmod" '@(x86_64||aarch64||i386) +ca-bundle'
-          try_deps "只留架构闸门" '@(x86_64||aarch64||i386)'
-          try_deps "只留一个 kmod" '+kmod-sched-core'
-          try_deps "什么都不依赖" ''
+          for k in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge kmod-xdp-sockets-diag; do
+            try_deps "单独 +${k}" "+${k}"
+          done
+          # 参考项目 QiuSimons/luci-app-daed 在官方 SDK 上能出包，它的依赖里没有
+          # kmod-nft-bridge。按它那套试一遍。
+          try_deps "daed 那套（无 nft-bridge）" \
+            '@(x86_64||aarch64||i386) +ca-bundle +kmod-sched-core +kmod-sched-bpf +kmod-xdp-sockets-diag +kmod-veth'
