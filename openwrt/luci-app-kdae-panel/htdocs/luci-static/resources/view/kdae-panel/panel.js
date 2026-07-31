@@ -269,13 +269,19 @@ return view.extend({
 				])
 			].concat(services.map(buildRow)));
 
-			// 面板拒绝被 iframe 嵌入（CSP frame-ancestors 'none'），因此新标签打开。
-			// 地址写成真链接而不是一句斜体说明：这样能右键复制，反代改过端口时也能
-			// 一眼核对面板到底在哪儿。
-			var address = E('div', { 'style': 'margin:12px ' + BLOCK_INSET + ' 0' }, [
-				_('面板地址'), ' ',
-				E('a', { 'href': panelURL, 'target': '_blank', 'rel': 'noopener' }, panelURL), ' ',
-				E('small', { 'style': 'opacity:.7' }, _('（在新标签页打开）'))
+			// 按钮和地址说的是同一件事——去面板——所以并成一行，不再一个在表格上头
+			// 一个在下头各说一遍。按钮是动作，地址是参照：能选中复制，反代或改过
+			// listen_port 时也能一眼核对面板到底在哪儿。
+			// 面板拒绝被 iframe 嵌入（CSP frame-ancestors 'none'），只能新标签打开；
+			// 这句话不占版面，挂在按钮的 title 上。
+			var openRow = E('div', { 'style': 'display:flex;align-items:center;gap:12px;' +
+				'flex-wrap:wrap;margin:0 ' + BLOCK_INSET + ' 14px' }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-action important',
+					'title': _('在新标签页打开面板'),
+					'click': function () { window.open(panelURL, '_blank', 'noopener'); }
+				}, _('打开面板')),
+				E('a', { 'href': panelURL, 'target': '_blank', 'rel': 'noopener' }, panelURL)
 			]);
 
 			var body = [
@@ -284,17 +290,12 @@ return view.extend({
 				// 标题会撑满整行、把按钮挤到下一行的最左边——那正是第一版在真机上的
 				// 样子。让主题按它自己的方式渲染标题，最稳。
 				E('h3', {}, _('服务状态')),
-				// 「打开面板」是这个页面存在的理由，单独占一行当主操作，紧跟标题下面，
-				// 不再和一堆启停按钮挤在同一条流水线上。
-				E('div', { 'style': 'margin:0 ' + BLOCK_INSET + ' 12px' },
-					E('button', {
-						'class': 'cbi-button cbi-button-action important',
-						'click': function () { window.open(panelURL, '_blank', 'noopener'); }
-					}, _('打开面板'))),
+				// 「打开面板」是这个页面存在的理由，紧跟标题下面当主操作，
+				// 不和一堆启停按钮挤在同一条流水线上。
+				openRow,
 				// 窄屏下表格会被挤扁，给它一层横向滚动兜底而不是让按钮溢出到卡片外。
 				E('div', { 'style': 'overflow-x:auto' }, table),
-				daeHint,
-				address
+				daeHint
 			];
 
 			if (link) {
@@ -308,9 +309,13 @@ return view.extend({
 				]));
 			}
 
-			// 状态块和下面的「设置」之间要留出间距：主题不保证给 .cbi-section
-			// 加卡片边框，不留白时「面板地址」那行会直接贴着「设置」的标题。
-			return E('div', { 'class': 'cbi-section', 'style': 'margin-bottom:24px' }, body);
+			// padding-bottom 是补 argon 的：它把 .cbi-section 的 padding 设成 0，卡片
+			// 内的留白全靠各个子元素自己带，而最后一个子元素（表格或提示条）都不带
+			// 下边距，于是内容直接压在卡片下边框上。行内样式优先级高于主题那条
+			// padding:0，只覆盖 bottom 这一边。
+			// margin-bottom 则是状态块和下面「设置」卡片之间的间距。
+			return E('div', { 'class': 'cbi-section',
+				'style': 'padding-bottom:1rem;margin-bottom:24px' }, body);
 		})();
 
 		// Map 不带标题：它会把标题渲染在自己那整块表单的最上方，而状态块是拼在
