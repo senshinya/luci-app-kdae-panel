@@ -19,6 +19,23 @@ func newProcdUnitsForTest(t *testing.T, binaryPath, initPath string) *procdUnits
 	}
 }
 
+// init 脚本按服务名落在 /etc/init.d 下，与 host.procdManager 的 initScript()
+// 是同一个约定。写死 dae 的话，改过 UCI service_name 的机器上，同一个配置项
+// 会被两个抽象读出两个答案：面板对着一个不存在的脚本报"软件包被破坏"，
+// 而服务本身好好地跑着。
+func TestProcdUnitsPathFollowsServiceName(t *testing.T) {
+	for _, test := range []struct{ serviceName, want string }{
+		{serviceName: "", want: "/etc/init.d/dae"},
+		{serviceName: "dae", want: "/etc/init.d/dae"},
+		{serviceName: "dae-beta", want: "/etc/init.d/dae-beta"},
+	} {
+		units := &procdUnits{installer: &Installer{serviceName: test.serviceName}}
+		if got := units.Path(); got != filepath.FromSlash(test.want) {
+			t.Fatalf("serviceName=%q 时 Path() = %q，期望 %q", test.serviceName, got, test.want)
+		}
+	}
+}
+
 // init 脚本由 ipk 提供，面板只校验存在性，永远不写。
 func TestProcdUnitsPlanAcceptsExistingScript(t *testing.T) {
 	dir := t.TempDir()
