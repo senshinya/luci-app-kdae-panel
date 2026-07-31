@@ -151,10 +151,22 @@ uci commit kdae-panel
 `postinst`（`enable` + `start`），因此命令返回时面板已经带着新版本重新跑起来了。dae 本身不受影响，
 它是独立的 procd 服务，升级面板不会中断代理。
 
-**opkg 只按包名和版本判断该不该动手**。版本随每次 Release 变化，正常升级不会遇到问题；但如果你
-装的是同一个版本的包（例如从 CI 产物页下载的同一次构建），opkg 会打印
-`Package kdae-panel (…) installed in root is up to date.` 然后退出码 0、什么都不做——这时面板
-**没有**被换掉。想强制覆盖同版本的包，加 `--force-reinstall`。
+**opkg 只按包名和版本判断该不该动手**，两种情况下它会拒绝装：
+
+- **版本相同**（例如从 CI 产物页下载了同一次构建）：打印
+  `Package kdae-panel (…) installed in root is up to date.`，退出码 0、什么都不做——这时面板
+  **没有**被换掉。强制覆盖加 `--force-reinstall`。
+- **版本被判定为更旧**：打印 `Not downgrading package … on root from A to B.`，同样什么都不做。
+  强制覆盖加 `--force-downgrade`。
+
+正式 Release 的版本号单调递增，不会遇到第二种。CI 产物用的是 `0.0.0+<commit 数>.<短哈希>`，
+commit 数保证了后一次 push 的包一定算升级——早期只用短哈希时会翻车，因为 opkg 用的是 dpkg
+那套比较规则，**字母排在数字之前**：`fe515cb` 与 `f961b58` 比到第二位是 `e` vs `9`，字母优先，
+于是先构建的那个反而"更大"，装后一个会被判定为降级。
+
+> **一次性的过渡**：如果你现在跑的还是纯哈希版本（`0.0.0+<短哈希>`），装第一个带 commit 数的
+> 包时仍需 `--force-downgrade`——数字打头的字符串首个非数字块是空的，而空排在任何字母之前，
+> 所以 `0.0.0+124.abcdefg` 按规则确实小于 `0.0.0+fe515cb`。跨过这一次之后就不会再遇到了。
 
 **面板不会自己升级自己**，但会告诉你有没有新版本：面板设置页的「面板更新」卡片会查
 `senshinya/luci-app-kdae-panel` 的最新 release 并与当前版本比对。它刻意只检查不动手——上游

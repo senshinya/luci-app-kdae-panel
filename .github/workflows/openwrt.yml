@@ -22,7 +22,11 @@ jobs:
   ipk:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 不能删：下面的「计算软件包版本」用 git rev-list --count HEAD
+      # 作为单调递增的构建号，浅克隆下它恒等于 1，每次 push 的版本号就都一样了。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       # 与 ci.yml 钉同一个版本：两条流水线用不同 Go 编出来的二进制会有差异，
       # 而 ci.yml 已经用 git diff --exit-code 锁死了嵌入资源，版本漂移只会制造噪声。
@@ -47,14 +51,22 @@ jobs:
       # 自升级，ipk 是唯一通道。因此版本必须随发布走。
       #
       # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME
-      # 是分支名或 "123/merge"，不是版本号，退回带 commit 的 0.0.0+…：它按 opkg
-      # 的版本比较规则排在任何正式版本之前，一次手动构建的产物因此不会盖住正式发布。
+      # 是分支名或 "123/merge"，不是版本号，退回 0.0.0+…：它按 opkg 的版本比较规则
+      # 排在任何正式版本之前（比到第二段就是 0 < 8），手动构建的产物因此不会盖住
+      # 正式发布。
+      #
+      # 后缀里必须先放 commit 数，不能只放短哈希。opkg 用的是 dpkg 那套比较规则，
+      # 字母排在数字之前：fe515cb 和 f961b58 比到第二位是 e vs 9，字母优先，于是
+      # fe515cb 反而"更大"。两次 push 谁算升级完全取决于哈希长什么样，装的时候会
+      # 撞上 "Not downgrading package … " 拒绝安装。commit 数是单调的，数字段又按
+      # 数值比较，这才让「后一次 push 的包一定算升级」成立；短哈希留在后面，仍然
+      # 能一眼对上是哪一版。
       - name: 计算软件包版本
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="0.0.0+$(git rev-parse --short HEAD)"
+            version="0.0.0+$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
           fi
           echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "软件包版本 ${version}"
