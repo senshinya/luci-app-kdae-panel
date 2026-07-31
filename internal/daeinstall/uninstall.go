@@ -90,8 +90,13 @@ func (i *Installer) Uninstall(ctx context.Context, options UninstallOptions) err
 	}
 
 	if err := i.service.Action(ctx, host.ActionDaemonReload); err != nil {
+		// 这里的调用点本身与后端无关：两套 init 系统都会走到这一行。
+		// procdManager 对 ActionDaemonReload 硬编码 return nil，今天这个分支
+		// 在 procd 下走不到，但那只是 procd.go 里的一个实现选择，不是这里能
+		// 保证的不变量；措辞中性化，不必像 provision.go 的写权限提示那样按
+		// 后端分支给不同建议——两套后端的修法本来就是同一句话："重试卸载"。
 		return i.rollbackUninstall(ctx, removed, wasEnabled, wasActive,
-			fmt.Errorf("重新加载 systemd 配置: %w", err))
+			fmt.Errorf("重新加载服务配置: %w", err))
 	}
 
 	for _, file := range removed {
