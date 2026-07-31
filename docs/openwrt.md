@@ -94,7 +94,7 @@ logread -e kdae-panel
 |---|---|---|
 | `enabled` | `1` | 开机自启；关闭后面板不会随系统启动，已在跑的实例不受影响 |
 | `listen_addr` | `0.0.0.0` | 监听地址，默认接受本机与局域网连接 |
-| `listen_port` | `2023` | 监听端口 |
+| `listen_port` | `2026` | 监听端口；上游的 systemd 部署默认 2023，这里避开 daed 占用的同一个端口 |
 | `data_dir` | `/etc/kdae-panel` | 数据库、配置备份与存档、状态文件、GitHub Token、自定义 geo 来源与 dae 本地版本库的位置 |
 | `dae_binary` | `/usr/bin/dae` | dae 可执行文件路径；面板与 `/etc/init.d/dae` 读的是同一个值 |
 | `dae_config` | `/etc/dae/config.dae` | dae 入口配置；geo 数据也放在它所在的目录 |
@@ -137,6 +137,15 @@ opkg install ./kdae-panel_*_x86_64.ipk ./luci-app-kdae-panel_*_all.ipk
 
 安装新版本的 ipk 会覆盖旧的可执行文件与启动脚本；`/etc/config/kdae-panel` 声明为 conffile，
 `opkg install` 不会覆盖你已经改过的配置。
+
+因此默认端口从 2023 改成 2026 之后，**老安装升级上来仍然监听 2023**——conffile 保留的就是这个
+行为。想跟上新默认值，手动改一次：
+
+```sh
+uci set kdae-panel.main.listen_port=2026
+uci commit kdae-panel
+/etc/init.d/kdae-panel restart
+```
 
 升级过程中面板会短暂停止：opkg 先执行旧包的 `prerm`（`stop` + `disable`），换完文件后再执行新包的
 `postinst`（`enable` + `start`），因此命令返回时面板已经带着新版本重新跑起来了。dae 本身不受影响，
@@ -212,7 +221,7 @@ logread -e kdae-panel
 logread -e dae
 ubus call service list '{"name":"dae"}'
 /etc/init.d/dae enabled; echo $?
-curl http://127.0.0.1:2023/api/v1/health   # backend 字段应为 procd
+curl http://127.0.0.1:2026/api/v1/health   # backend 字段应为 procd
 mount | grep bpf                            # dae 需要 bpffs
 ```
 
