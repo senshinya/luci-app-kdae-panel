@@ -1,26 +1,104 @@
-name: OpenWrt ipk
+name: OpenWrt 软件包
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # 主路径：由 release.yml 在建完 Release 之后显式调用。
+  #
+  # 不能只靠下面的 release: published——用 GITHUB_TOKEN 创建的 release 不会触发新的
+  # 工作流（GitHub 为防递归的明文限制），而本仓库的 release 正是 release.yml 用该 token
+  # 发的。装机验证（release-smoke.yml）当初就是踩了这个坑才改成 workflow_call，软件包
+  # 这条链路是同一个坑：不显式调用，Release 上就只有 systemd 的 tar.gz，没有 ipk/apk。
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+  # 手工发布（比如在网页上直接建 release）时仍然有效。
   release:
     types: [published]
   workflow_dispatch:
 
-env:
-  SDK_URL: https://downloads.immortalwrt.org/releases/24.10.4/targets/x86/64/immortalwrt-sdk-24.10.4-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-
 # 默认只读：push/pull_request/workflow_dispatch 都不需要写权限。"附到 Release"
-# 需要 contents: write，单独放进只在 release 事件下才跑的 job 里升级，
+# 需要 contents: write，单独放进只在发布路径上才跑的 job 里升级，
 # 不在这里整体放开——否则每次普通 push 都会拿到不需要的写权限。
 permissions:
   contents: read
 
 jobs:
-  ipk:
+  # 只用官方 OpenWrt SDK，不再另外跑一遍 immortalwrt：同版本同 pkgarch 的包在
+  # immortalwrt 上一样能装（pkgarch 一致、kmod 依赖名一致，依赖在设备上按本机软件源
+  # 解析），维护两套 SDK 只会让 CI 时长和 Release 页的资产数翻倍。
+  package:
+    name: ${{ matrix.pkgarch }}-openwrt-${{ matrix.series }}
     runs-on: ubuntu-latest
+    strategy:
+      # 一个架构编不出来不该让其余五个白跑——尤其 25.12 的 apk 路径和 24.10 的 ipk
+      # 路径是两套打包实现，一边坏了另一边的结论仍然有价值。
+      fail-fast: false
+      matrix:
+        include:
+          # 24.10 用 opkg/ipk，25.12 起换成 apk，SDK 自带的 .config 里就定了，这里不用管。
+          # gcc 版本是 SDK 文件名的一部分，必须跟着 openwrt 版本走。
+          - series: "24.10"
+            openwrt: "24.10.8"
+            target: x86/64
+            sdk: x86-64
+            gcc: "13.3.0"
+            pkgarch: x86_64
+            goarch: amd64
+            format: ipk
+            # LuCI 包是 all/noarch，三个架构的 job 出的是同一份内容。只从每条版本线的
+            # 一个 job 上传，否则 Release 页会有三份同名资产互相覆盖。
+            upload_luci: true
+          - series: "24.10"
+            openwrt: "24.10.8"
+            target: armsr/armv8
+            sdk: armsr-armv8
+            gcc: "13.3.0"
+            pkgarch: aarch64_generic
+            goarch: arm64
+            format: ipk
+            upload_luci: false
+          - series: "24.10"
+            openwrt: "24.10.8"
+            target: x86/generic
+            sdk: x86-generic
+            gcc: "13.3.0"
+            pkgarch: i386_pentium4
+            goarch: "386"
+            format: ipk
+            upload_luci: false
+          - series: "25.12"
+            openwrt: "25.12.5"
+            target: x86/64
+            sdk: x86-64
+            gcc: "14.3.0"
+            pkgarch: x86_64
+            goarch: amd64
+            format: apk
+            upload_luci: true
+          - series: "25.12"
+            openwrt: "25.12.5"
+            target: armsr/armv8
+            sdk: armsr-armv8
+            gcc: "14.3.0"
+            pkgarch: aarch64_generic
+            goarch: arm64
+            format: apk
+            upload_luci: false
+          - series: "25.12"
+            openwrt: "25.12.5"
+            target: x86/generic
+            sdk: x86-generic
+            gcc: "14.3.0"
+            pkgarch: i386_pentium4
+            goarch: "386"
+            format: apk
+            upload_luci: false
+
     steps:
       # fetch-depth: 0 不能删：下面的「计算软件包版本」用 git rev-list --count HEAD
       # 作为单调递增的构建号，浅克隆下它恒等于 1，每次 push 的版本号就都一样了。
@@ -45,32 +123,58 @@ jobs:
           npm ci --prefix web
           npm run build --prefix web
 
-      # ipk 的 control 只有包名和版本这两样能被 opkg 看见。两次 Release 附上同名
-      # 同版本的包，opkg 会打印 "installed in root is up to date"、退出码 0、
-      # 什么都不做，用户以为升级成功却还跑着旧二进制——而 procd 部署刻意没有面板
-      # 自升级，ipk 是唯一通道。因此版本必须随发布走。
+      # 包的 control/元数据里只有包名和版本这两样能被 opkg 与 apk 看见。两次 Release 附上
+      # 同名同版本的包，opkg 会打印 "installed in root is up to date"、退出码 0、什么都不做，
+      # 用户以为升级成功却还跑着旧二进制——而 procd 部署刻意没有面板自升级，软件包是唯一
+      # 通道。因此版本必须随发布走。
       #
-      # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME
-      # 是分支名或 "123/merge"，不是版本号，退回 0.0.1+…：它按 opkg 的版本比较规则
-      # 排在任何正式版本之前（比到第二段就是 0 < 8），手动构建的产物因此不会盖住
-      # 正式发布。
+      # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME 是分支名
+      # 或 "123/merge"，不是版本号，退回 0.0.1 打头的构建版本：它排在任何正式版本之前
+      # （比到第二段就是 0 < 8），手动构建的产物因此不会盖住正式发布。
       #
-      # 用 0.0.1 而不是 0.0.0，是为了盖过历史上那批 0.0.0+<纯短哈希> 的产物。数字
-      # 打头的字符串首个非数字块是空的，而空排在任何字母之前，所以 0.0.0+124.abcdefg
-      # 反倒小于 0.0.0+fe515cb——不抬这一位的话，装第一个新方案的包仍会被判成降级，
-      # 而 LuCI 的软件包页面没有任何入口能传 --force-downgrade（它只认 --autoremove
-      # 和 --force-overwrite），用户就只能先卸载再上传。
+      # 用 0.0.1 而不是 0.0.0，是为了盖过历史上那批 0.0.0+<纯短哈希> 的产物。数字打头的
+      # 字符串首个非数字块是空的，而空排在任何字母之前，所以 0.0.0+124.abcdefg 反倒小于
+      # 0.0.0+fe515cb——不抬这一位的话，装第一个新方案的包仍会被判成降级，而 LuCI 的软件包
+      # 页面没有任何入口能传 --force-downgrade。
       #
-      # 后缀里必须先放 commit 数，不能只放短哈希。opkg 用的是 dpkg 那套比较规则，
-      # 字母排在数字之前：fe515cb 和 f961b58 比到第二位是 e vs 9，字母优先，于是
-      # fe515cb 反而"更大"。两次 push 谁算升级完全取决于哈希长什么样，装的时候会
-      # 撞上 "Not downgrading package … " 拒绝安装。commit 数是单调的，数字段又按
-      # 数值比较，这才让「后一次 push 的包一定算升级」成立；短哈希留在后面，仍然
-      # 能一眼对上是哪一版。
+      # 后缀里必须先放 commit 数，不能只放短哈希。opkg 用的是 dpkg 那套比较规则，字母排在
+      # 数字之前：fe515cb 和 f961b58 比到第二位是 e vs 9，字母优先，于是 fe515cb 反而"更大"。
+      # 两次 push 谁算升级完全取决于哈希长什么样，装的时候会撞上 "Not downgrading package …"。
+      # commit 数是单调的，数字段又按数值比较，这才让「后一次 push 的包一定算升级」成立。
+      #
+      # 两种包格式的版本语法不同，非 release 构建必须分叉：apk 的版本语法是
+      # digit{.digit}...{letter}{_suf{#}}...{~hash}{-r#}（apk-tools src/version.c），"+" 不在
+      # 其中。改用 _git<commit数>~<短哈希>：_git 是后置后缀，0.0.1_git124 排在 0.0.1 之后但
+      # 仍远低于任何 0.8.x；commit 数落在 _suf{#} 的数字段上，按数值比较，单调性照旧成立。
+      # release 事件下两种格式拿到的是同一个纯 tag 版本号，不分叉。
       - name: 计算软件包版本
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            version="${GITHUB_REF_NAME#v}"
+          # 发布路径有两条：release.yml 调用时把 tag 从 inputs.version 传进来；
+          # 手工在网页上建 release 时走 release 事件，tag 在 GITHUB_REF_NAME 里。
+          release_ref="${{ inputs.version }}"
+          if [ -z "${release_ref}" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            release_ref="${GITHUB_REF_NAME}"
+          fi
+          if [ -n "${release_ref}" ]; then
+            version="${release_ref#v}"
+            # 预发布 tag（v1.0.0-rc1）的后缀两种格式都不能原样用：
+            # opkg 按 dpkg 规则比较，1.0.0-rc1 排在 1.0.0 之后，装过 RC 的机器再装正式版
+            # 会被判成降级（而 LuCI 软件包页没有 --force-downgrade 的入口）；dpkg 里表示
+            # "排在前面"的记号是 ~。
+            # apk 的文法里 - 只能引出 -r<数字> 修订号，1.0.0-rc1 是非法版本，mkpkg 会拒绝；
+            # 它认的是 _rc1 这种后缀，同样排在 1.0.0 之前。
+            # 因此预发布 tag 的后缀要写成 apk 认识的形式且不含点：rc1、beta2，不要 rc.1。
+            case "${version}" in
+              *-*)
+                if [ "${{ matrix.format }}" = "apk" ]; then
+                  version="${version%%-*}_${version#*-}"
+                else
+                  version="${version%%-*}~${version#*-}"
+                fi
+                ;;
+            esac
+          elif [ "${{ matrix.format }}" = "apk" ]; then
+            version="0.0.1_git$(git rev-list --count HEAD)~$(git rev-parse --short HEAD)"
           else
             version="0.0.1+$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
           fi
@@ -82,7 +186,7 @@ jobs:
       - name: 交叉编译面板
         run: |
           version="${GITHUB_REF_NAME}"
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build \
             -trimpath \
             -ldflags "-s -w -X main.version=${version}" \
             -o "${GITHUB_WORKSPACE}/kdae-panel" \
@@ -95,7 +199,9 @@ jobs:
           sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk git \
             gettext libssl-dev xsltproc rsync wget unzip python3 zstd
 
-      - name: 拉取 immortalwrt SDK
+      - name: 拉取 OpenWrt SDK
+        env:
+          SDK_URL: https://downloads.openwrt.org/releases/${{ matrix.openwrt }}/targets/${{ matrix.target }}/openwrt-sdk-${{ matrix.openwrt }}-${{ matrix.sdk }}_gcc-${{ matrix.gcc }}_musl.Linux-x86_64.tar.zst
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/sdk"
           wget -q "${SDK_URL}" -O sdk.tar.zst
@@ -111,7 +217,7 @@ jobs:
           # 软链进去的目录会被整个跳过，症状是 "package/kdae-panel 不存在"。
           cp -r "${GITHUB_WORKSPACE}/openwrt" package/kdae
 
-      - name: 编译 ipk
+      - name: 编译软件包
         working-directory: ${{ github.workspace }}/sdk
         run: |
           {
@@ -119,6 +225,13 @@ jobs:
             echo 'CONFIG_PACKAGE_luci-app-kdae-panel=m'
           } >> .config
           make defconfig
+          # 架构闸门（包 Makefile 里的 DEPENDS:=@(x86_64||aarch64||i386)）不匹配时，
+          # defconfig 会静默把这两行丢掉，错误要等到 compile 才以 "No rule to make target"
+          # 的形式冒出来，离真实原因很远。在这里直接断言。
+          for symbol in CONFIG_PACKAGE_kdae-panel CONFIG_PACKAGE_luci-app-kdae-panel; do
+            grep -q "^${symbol}=m" .config \
+              || { echo "defconfig 丢掉了 ${symbol}，检查包 Makefile 的架构闸门是否覆盖 ${{ matrix.pkgarch }}"; exit 1; }
+          done
           # 既导出环境变量又作为 make 变量传入：OpenWrt 的构建会层层调用子 make，
           # 只靠命令行变量在某些子调用里可能丢失。
           export KDAE_PANEL_BIN="${GITHUB_WORKSPACE}/kdae-panel"
@@ -128,14 +241,23 @@ jobs:
                KDAE_PANEL_VERSION="${KDAE_PANEL_VERSION}" \
                -j"$(nproc)" V=s
 
-      # 装错依赖的症状是在路由器上 opkg 报缺包，离原因很远；在这里直接断言。
-      - name: 校验产物
+      - name: 收集产物
         working-directory: ${{ github.workspace }}/sdk
         run: |
-          mkdir -p "${GITHUB_WORKSPACE}/ipk"
-          find bin/packages -name '*kdae*.ipk' -exec cp {} "${GITHUB_WORKSPACE}/ipk/" \;
-          ls -l "${GITHUB_WORKSPACE}/ipk"
-          backend=$(ls "${GITHUB_WORKSPACE}/ipk"/kdae-panel_*.ipk)
+          mkdir -p "${GITHUB_WORKSPACE}/pkg"
+          find bin/packages -name "*kdae*.${{ matrix.format }}" \
+            -exec cp {} "${GITHUB_WORKSPACE}/pkg/" \;
+          ls -l "${GITHUB_WORKSPACE}/pkg"
+          # 两个包都必须在。少了 LuCI 包意味着 luci.mk 那条路径出了问题，而它在
+          # 只有一个包的产物列表里很容易被看漏。
+          ls "${GITHUB_WORKSPACE}/pkg"/kdae-panel[-_]*.${{ matrix.format }}
+          ls "${GITHUB_WORKSPACE}/pkg"/luci-app-kdae-panel[-_]*.${{ matrix.format }}
+
+      # 装错依赖的症状是在路由器上 opkg 报缺包，离原因很远；在这里直接断言。
+      - name: 校验 ipk
+        if: matrix.format == 'ipk'
+        run: |
+          backend=$(ls "${GITHUB_WORKSPACE}"/pkg/kdae-panel_*.ipk)
           # ipk 是 gzip 的 tar，里面装着 control.tar.gz 与 data.tar.gz。
           # 成员名带不带 ./ 前缀各版本不一，因此解到临时目录再看，别猜。
           workdir=$(mktemp -d)
@@ -146,6 +268,10 @@ jobs:
           # 症状发生在用户的路由器上（opkg 说已是最新却什么都没换），在这里断言。
           grep -q "^Version: ${KDAE_PANEL_VERSION}-" "$workdir/control" \
             || { echo "control 的版本不是 ${KDAE_PANEL_VERSION}"; exit 1; }
+          # 架构标错的包在目标设备上会被 opkg 直接拒绝（它只认本机 pkgarch 与 all），
+          # 而错误信息不会告诉用户是构建矩阵串了行。
+          grep -q "^Architecture: ${{ matrix.pkgarch }}$" "$workdir/control" \
+            || { echo "control 的架构不是 ${{ matrix.pkgarch }}"; exit 1; }
           grep -q '^Conflicts:.*\bdae\b' "$workdir/control" \
             || { echo "control 缺少 Conflicts: dae"; exit 1; }
           for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
@@ -157,29 +283,95 @@ jobs:
                       etc/config/kdae-panel; do
             grep -q "$path\$" "$workdir/files" || { echo "包内缺少 $path"; exit 1; }
           done
-          ls "${GITHUB_WORKSPACE}/ipk"/luci-app-kdae-panel_*.ipk
+
+      # apk 是 ADB 二进制格式，tar 打不开，只能用 SDK 自带的 apk 工具读。
+      #
+      # 这里刻意不断言 Conflicts：OpenWrt 的 apk 打包路径（package-pack.mk 里的 apk mkpkg）
+      # 根本不传这个字段，CONFLICTS:=dae 在 25.12 上会被静默丢掉。25.12 上与官方 dae 包的
+      # 互斥退化成文件冲突——两个包都装 /etc/init.d/dae，apk 会拒绝覆盖。见 docs/openwrt.md。
+      - name: 校验 apk
+        if: matrix.format == 'apk'
+        run: |
+          apk_bin="${GITHUB_WORKSPACE}/sdk/staging_dir/host/bin/apk"
+          [ -x "$apk_bin" ] || { echo "SDK 里没有 $apk_bin"; exit 1; }
+          backend=$(ls "${GITHUB_WORKSPACE}"/pkg/kdae-panel-*.apk)
+          workdir=$(mktemp -d)
+          # 元数据断言按子串匹配而不是按 JSON 字段路径：adbdump 的字段布局没有稳定契约，
+          # 猜错路径会让断言以"字段取到 null"的形式假失败。完整 dump 打进日志，需要时人看。
+          # 不用管道接 tee：GitHub 的 bash 没开 pipefail，adbdump 真挂了退出码会被 tee 吞掉，
+          # 故障会伪装成后面某条 grep 失败。
+          "$apk_bin" --allow-untrusted adbdump "$backend" > "$workdir/meta"
+          cat "$workdir/meta"
+          grep -q "${KDAE_PANEL_VERSION}-r" "$workdir/meta" \
+            || { echo "元数据的版本不是 ${KDAE_PANEL_VERSION}"; exit 1; }
+          grep -q "${{ matrix.pkgarch }}" "$workdir/meta" \
+            || { echo "元数据的架构不是 ${{ matrix.pkgarch }}"; exit 1; }
+          for dep in kmod-sched-core kmod-sched-bpf kmod-veth kmod-nft-bridge \
+                     kmod-xdp-sockets-diag ca-bundle; do
+            grep -q "$dep" "$workdir/meta" || { echo "元数据缺少依赖 $dep"; exit 1; }
+          done
+          # 包是 SDK 用本地构建密钥签的，校验机器上没有那把公钥，因此 --allow-untrusted。
+          "$apk_bin" --allow-untrusted extract --no-chown \
+            --destination "$workdir/root" "$backend"
+          for path in usr/bin/kdae-panel etc/init.d/kdae-panel etc/init.d/dae \
+                      etc/config/kdae-panel; do
+            [ -f "$workdir/root/$path" ] || { echo "包内缺少 $path"; exit 1; }
+          done
+
+      # apk 的文件名里没有架构（package-pack.mk 里是 <name>-<version>.apk），三个架构的
+      # kdae-panel-<版本>.apk 会在 Release 页撞名。统一补上后缀：ipk 的名字里已经有架构，
+      # 只补 openwrt 版本；apk 的架构包要连架构一起补；noarch 的 LuCI 包两种格式都只补版本。
+      - name: 重命名产物
+        working-directory: ${{ github.workspace }}/pkg
+        run: |
+          for f in *.${{ matrix.format }}; do
+            stem="${f%.*}"
+            arch_tag=""
+            case "$f" in
+              luci-app-*) ;;
+              *.apk) arch_tag="-${{ matrix.pkgarch }}" ;;
+            esac
+            mv "$f" "${stem}${arch_tag}-openwrt-${{ matrix.series }}.${{ matrix.format }}"
+          done
+          ls -l
+
+      # LuCI 包在三个架构的 job 里内容完全相同，只留一份上传；其余 job 的删掉，
+      # 否则 Release 页会有三份同名资产互相覆盖。上一步已经校验过它确实被构建出来了。
+      - name: 丢弃重复的 LuCI 包
+        if: ${{ !matrix.upload_luci }}
+        working-directory: ${{ github.workspace }}/pkg
+        # ipk 用下划线分隔包名与版本，apk 用连字符，两种都要匹配到。
+        run: rm -f luci-app-kdae-panel[-_]*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: kdae-panel-ipk-x86_64
-          path: ipk/*.ipk
+          name: kdae-panel-pkg-${{ matrix.pkgarch }}-openwrt-${{ matrix.series }}
+          path: pkg/*
 
-  # 独立 job 而不是给 ipk job 整体加 contents: write：那样会让 push/pull_request/
+  # 独立 job 而不是给 package job 整体加 contents: write：那样会让 push/pull_request/
   # workflow_dispatch 触发时也拿到写权限，而它们根本不需要、也不该有。
-  # 只有这个 job 会在 release 事件下运行，写权限的授予范围与实际需要一致。
+  # 只有这个 job 会在发布路径上运行，写权限的授予范围与实际需要一致。
+  #
+  # 两个条件都要留：release.yml 调用时 github.event_name 是调用方的 push，不是 release，
+  # 只判 event_name 会让主路径整个不跑。
   release:
-    needs: ipk
-    if: github.event_name == 'release'
+    needs: package
+    if: ${{ inputs.version != '' || github.event_name == 'release' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: kdae-panel-ipk-x86_64
-          path: ipk
+          pattern: kdae-panel-pkg-*
+          merge-multiple: true
+          path: pkg
 
       - name: 附到 Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          files: ipk/*.ipk
+          # 显式指定 tag：被调用时默认值取的是调用方的 ref，写清楚比依赖它稳。
+          tag_name: ${{ inputs.version || github.ref_name }}
+          files: |
+            pkg/*.ipk
+            pkg/*.apk

@@ -2,43 +2,79 @@
 
 ## 适用范围
 
-本页描述 immortalwrt 24.10.4（x86/64）上的 ipk 部署，由两个软件包组成：
+本页描述 OpenWrt / ImmortalWrt 上的软件包部署，由两个软件包组成：
 
 - `kdae-panel`：面板本体、procd 启动脚本（面板自身与 dae 各一份）、UCI 配置模板；
-- `luci-app-kdae-panel`：LuCI 入口，依赖 `kdae-panel`。
+- `luci-app-kdae-panel`：LuCI 入口，依赖 `kdae-panel`，架构为 `all`/noarch。
+
+Release 附带的产物覆盖两条版本线、三种架构：
+
+| OpenWrt | 包格式 | 包管理器 | 架构 |
+|---|---|---|---|
+| 24.10 | `.ipk` | opkg | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+| 25.12 | `.apk` | apk | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+
+产物名带 `-openwrt-24.10` / `-openwrt-25.12` 后缀，对应上表的版本线。**包用官方 OpenWrt SDK
+构建，ImmortalWrt 装的是同一批文件**：同版本同架构下两者的包架构标识、内核模块依赖名完全一致，
+依赖在设备上按本机软件源解析，因此不另发一套 ImmortalWrt 专用包。
+
+架构选哪个，在设备上直接问包管理器：24.10 用 `opkg print-architecture`，25.12 用
+`apk --print-arch`。绝大多数 x86 软路由是 `x86_64`，ARM64 设备（armsr、rockchip、树莓派 4 等）
+是 `aarch64_generic`。装错架构的包会被包管理器直接拒绝，不会装出一个跑不起来的面板。
 
 与 [docs/deployment.md](deployment.md) 描述的 systemd 一键部署是两条独立的路径：systemd 版靠
-`scripts/get.sh`/`scripts/install.sh` 装到 `/usr/bin`、`/etc/systemd/system`；OpenWrt 版靠 opkg
+`scripts/get.sh`/`scripts/install.sh` 装到 `/usr/bin`、`/etc/systemd/system`；OpenWrt 版靠 opkg/apk
 装到 `/usr/bin`、`/etc/init.d`、`/etc/config`，服务由 procd 管理，不涉及 systemd 也不涉及一键部署脚本。
 
 ## 与官方 dae 包的关系
 
 `kdae-panel` 的 control 文件声明 `CONFLICTS:=dae`：装了本包就装不上 OpenWrt/ImmortalWrt 官方源里的
 `dae` 包，opkg 也会拒绝在两者共存的情况下继续。这是有意为之——本包把 dae 的可执行文件、配置与 geo
-数据全部交给面板的版本管理页管理，不经 opkg 安装或升级；如果同时装着官方 `dae` 包，一次
-`opkg upgrade` 就可能把面板管理的分支构建盖回官方版本，而面板的账本对此一无所知。
+数据全部交给面板的版本管理页管理，不经包管理器安装或升级；如果同时装着官方 `dae` 包，一次
+`opkg upgrade`（25.12 上是 `apk upgrade`）就可能把面板管理的分支构建盖回官方版本，而面板的账本
+对此一无所知。
 
-dae 运行所需的内核模块不受这条冲突声明影响，仍由 opkg 正常安装：它们是 `kdae-panel` 的依赖
+**25.12 上没有这条声明**：OpenWrt 的 apk 打包路径（`include/package-pack.mk` 里的 `apk mkpkg`）
+根本不传冲突字段，`CONFLICTS:=dae` 在 apk 包里会被丢掉。互斥退化成文件冲突——两个包都装
+`/etc/init.d/dae`，apk 拒绝覆盖已属于别的包的文件，装的时候仍然会失败，只是报错说的是文件
+冲突而不是包冲突。处理方式一样：先 `apk del dae`。
+
+dae 运行所需的内核模块不受这条冲突声明影响，仍由包管理器正常安装：它们是 `kdae-panel` 的依赖
 （`kmod-sched-core`、`kmod-sched-bpf`、`kmod-veth`、`kmod-nft-bridge`、`kmod-xdp-sockets-diag`），
 装包时自动拉取，随官方源正常接受安全更新。`ca-bundle` 同样是依赖，供面板发起的 HTTPS 请求（下载
 dae 版本、geo 数据、面板自身的新版本查询）验证证书。
 
 ## 安装
 
+24.10（opkg / ipk），把 `x86_64` 换成你的架构：
+
 ```sh
 opkg update
-opkg install ./kdae-panel_*_x86_64.ipk ./luci-app-kdae-panel_*_all.ipk
+opkg install ./kdae-panel_*_x86_64-openwrt-24.10.ipk \
+             ./luci-app-kdae-panel_*_all-openwrt-24.10.ipk
 ```
+
+25.12（apk）：
+
+```sh
+apk update
+apk add --allow-untrusted ./kdae-panel-*-x86_64-openwrt-25.12.apk \
+                          ./luci-app-kdae-panel-*-openwrt-25.12.apk
+```
+
+`--allow-untrusted` 是必需的：Release 附带的包没有用设备信任的密钥签名，apk 默认拒绝安装
+未签名的本地文件。
 
 文件名里的版本号随发布走（Release 附的包用该 Release 的 tag，去掉前导 `v`），因此这里用通配符而不是
 写死某一版。安装脚本会调用 `/etc/init.d/kdae-panel enable` 与 `start`：面板装完立即可用，重启路由器
 后也会自动拉起，不需要再手工执行 `start`。
 
-如果这台机器上已经装过官方 `dae` 包（例如之前用 `opkg install dae` 手动装的），`CONFLICTS` 会让
-`kdae-panel` 装不上，需要先卸载：
+如果这台机器上已经装过官方 `dae` 包（例如之前手动装的），`kdae-panel` 会装不上（24.10 上是包冲突，
+25.12 上是 `/etc/init.d/dae` 的文件冲突），需要先卸载：
 
 ```sh
-opkg remove dae dae-geoip dae-geosite
+opkg remove dae dae-geoip dae-geosite     # 24.10
+apk del dae dae-geoip dae-geosite         # 25.12
 ```
 
 `/etc/dae` 下的配置与 geo 数据不会被 `opkg remove` 删除，装好 `kdae-panel` 后面板能直接读到它们
@@ -122,7 +158,7 @@ logread -e kdae-panel
   替换成一个只认识 `systemctl` 的程序，重启后彻底无法工作——这不是需要提示用户注意的风险，而是
   必然发生的故障，因此 procd 后端下面板启动时压根不构造这项能力，也不做版本检查。设置页的
   「允许一键升级」开关在本部署里恒为置灰，「面板更新」卡片不会给出可用版本。**这是预期行为，
-  不是故障。升级面板请安装新的 ipk。**
+  不是故障。升级面板请安装新的软件包。**
 - 上述两项在 systemd 部署（[docs/deployment.md](deployment.md)）里以
   `KDAE_PANEL_ENABLE_SELF_UPDATE` 和 `KDAE_PANEL_DISABLE_UPDATE_CHECK` 两个环境变量存在；
   OpenWrt 的 `/etc/config/kdae-panel` 里没有对应选项，不要照搬那份文档去找它们。
@@ -132,11 +168,16 @@ logread -e kdae-panel
 **升级面板**：
 
 ```sh
-opkg install ./kdae-panel_*_x86_64.ipk ./luci-app-kdae-panel_*_all.ipk
+# 24.10
+opkg install ./kdae-panel_*_x86_64-openwrt-24.10.ipk \
+             ./luci-app-kdae-panel_*_all-openwrt-24.10.ipk
+# 25.12
+apk add --allow-untrusted ./kdae-panel-*-x86_64-openwrt-25.12.apk \
+                          ./luci-app-kdae-panel-*-openwrt-25.12.apk
 ```
 
-安装新版本的 ipk 会覆盖旧的可执行文件与启动脚本；`/etc/config/kdae-panel` 声明为 conffile，
-`opkg install` 不会覆盖你已经改过的配置。
+安装新版本会覆盖旧的可执行文件与启动脚本；`/etc/config/kdae-panel` 声明为 conffile，
+两种包管理器都不会覆盖你已经改过的配置。
 
 因此默认端口从 2023 改成 2026 之后，**老安装升级上来仍然监听 2023**——conffile 保留的就是这个
 行为。想跟上新默认值，手动改一次：
@@ -148,10 +189,11 @@ uci commit kdae-panel
 ```
 
 升级过程中面板会短暂停止：opkg 先执行旧包的 `prerm`（`stop` + `disable`），换完文件后再执行新包的
-`postinst`（`enable` + `start`），因此命令返回时面板已经带着新版本重新跑起来了。dae 本身不受影响，
-它是独立的 procd 服务，升级面板不会中断代理。
+`postinst`（`enable` + `start`），因此命令返回时面板已经带着新版本重新跑起来了。apk 走的是自己的
+`post-upgrade` 钩子，内容由同一份 `postinst` 生成，净效果相同。dae 本身不受影响，它是独立的 procd
+服务，升级面板不会中断代理。
 
-**opkg 只按包名和版本判断该不该动手**，两种情况下它会拒绝装：
+**包管理器只按包名和版本判断该不该动手**（下面以 opkg 为例，apk 同理），两种情况下它会拒绝装：
 
 - **版本相同**（例如从 CI 产物页下载了同一次构建）：打印
   `Package kdae-panel (…) installed in root is up to date.`，退出码 0、什么都不做——这时面板
@@ -159,8 +201,12 @@ uci commit kdae-panel
 - **版本被判定为更旧**：打印 `Not downgrading package … on root from A to B.`，同样什么都不做。
   强制覆盖加 `--force-downgrade`。
 
-正式 Release 的版本号单调递增，不会遇到第二种。CI 产物用的是 `0.0.1+<commit 数>.<短哈希>`，
-commit 数保证了后一次 push 的包一定算升级。
+正式 Release 的版本号单调递增，不会遇到第二种。CI 产物（非 Release 构建）用的是
+`0.0.1+<commit 数>.<短哈希>`，commit 数保证了后一次 push 的包一定算升级。
+
+25.12 的 apk 产物版本是 `0.0.1_git<commit 数>~<短哈希>`：apk 的版本语法不接受 `+`，`_git` 是
+它认识的后缀，commit 数落在后缀的数字段上，按数值比较，单调性与 ipk 侧一致。两种格式的 `0.0.1`
+基版本都远低于任何正式发布。
 
 版本号里这两处细节都是踩出来的：
 
@@ -181,12 +227,13 @@ commit 数保证了后一次 push 的包一定算升级。
 `senshinya/luci-app-kdae-panel` 的最新 release 并与当前版本比对。它刻意只检查不动手——上游
 `tuoro/kdae-panel` 发布的二进制不含 procd 后端，让面板自我替换一次就会把它换成一个只会调用
 `systemctl` 的程序，重启即不可用。因此那张卡片上没有「一键升级」开关，只有版本号和上面那条
-`opkg install` 命令。
+安装命令。
 
 **卸载**：
 
 ```sh
-opkg remove kdae-panel luci-app-kdae-panel
+opkg remove kdae-panel luci-app-kdae-panel   # 24.10
+apk del kdae-panel luci-app-kdae-panel       # 25.12
 ```
 
 不会删除 `/etc/kdae-panel`（面板数据）与 `/etc/dae`（dae 配置和 geo 数据）。要连数据一起清掉，
@@ -258,10 +305,10 @@ mount | grep bpf                            # dae 需要 bpffs
 
 ## 真机验证清单
 
-装 ipk 后建议完整走一遍以下步骤，确认服务后端探测、procd 状态查询、崩溃循环检测和日志功能都按
+装好软件包后建议完整走一遍以下步骤，确认服务后端探测、procd 状态查询、崩溃循环检测和日志功能都按
 预期工作：
 
-1. 安装两个 ipk；
+1. 安装两个软件包；
 2. LuCI 菜单「服务 → kdae 面板」应当出现；
 3. 启动面板（`/etc/init.d/kdae-panel start` 或在 LuCI 状态块里点「启动」）；
 4. 打开一次性链接创建管理员；

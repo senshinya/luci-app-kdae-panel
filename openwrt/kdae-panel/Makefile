@@ -27,8 +27,13 @@ define Package/kdae-panel
   SUBMENU:=Web Servers/Proxies
   TITLE:=Web management panel for dae
   URL:=https://github.com/senshinya/luci-app-kdae-panel
-  DEPENDS:=@x86_64 +kmod-sched-core +kmod-sched-bpf +kmod-veth +kmod-nft-bridge \
-	+kmod-xdp-sockets-diag +ca-bundle
+  # 架构闸门列的是 target 的 Target-Arch 符号（target-metadata.pl 里 select $(target->arch)）：
+  # x86/64 是 x86_64，armsr/armv8 是 aarch64，x86/generic 是 i386。包内容本身与架构无关
+  # （装的是 CI 交叉编译好的静态二进制），闸门只是挡住没出过对应二进制的架构。
+  # 闸门不匹配时 make defconfig 会静默丢掉 CONFIG_PACKAGE_kdae-panel，因此 CI 在
+  # defconfig 之后立刻断言配置项还在——否则报错会推迟到 compile，离原因很远。
+  DEPENDS:=@(x86_64||aarch64||i386) +kmod-sched-core +kmod-sched-bpf +kmod-veth \
+	+kmod-nft-bridge +kmod-xdp-sockets-diag +ca-bundle
   # dae 的可执行文件、配置与 geo 全部由本面板管理。装了本包就装不上官方
   # dae 包，opkg upgrade 也就不会把分支构建盖回官方版本。
   CONFLICTS:=dae

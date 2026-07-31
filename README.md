@@ -57,8 +57,15 @@ KDAE_PANEL_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 ## OpenWrt / ImmortalWrt
 
-immortalwrt 24.10.4（x86/64）上以 ipk 部署，附带 LuCI 入口与配置页。dae 的可执行文件、
-配置与 geo 全部由面板管理，不经 opkg——这样 `opkg upgrade` 不会把你自己的分支构建盖回
+以软件包部署，附带 LuCI 入口与配置页。Release 附带的产物覆盖两条版本线、三种架构：
+
+| OpenWrt | 格式 | 架构 |
+|---|---|---|
+| 24.10 | ipk（opkg） | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+| 25.12 | apk | `x86_64`、`aarch64_generic`、`i386_pentium4` |
+
+包用官方 OpenWrt SDK 构建，同版本同架构的 ImmortalWrt 装的是同一批文件。dae 的可执行文件、
+配置与 geo 全部由面板管理，不经 opkg/apk——这样升级软件包不会把你自己的分支构建盖回
 官方版本。详见 [docs/openwrt.md](docs/openwrt.md)。
 
 ## 从源码安装

@@ -94,7 +94,8 @@ dae 版本管理（`KDAE_PANEL_ENABLE_DAE_INSTALL`，默认开启）会引入一
 
 ## OpenWrt 部署的安全差异
 
-`luci-app-kdae-panel` 以 ipk 部署在 OpenWrt/ImmortalWrt 上，procd 没有 systemd 那套沙箱原语。
+`luci-app-kdae-panel` 以软件包（24.10 是 ipk，25.12 是 apk）部署在 OpenWrt/ImmortalWrt 上，
+procd 没有 systemd 那套沙箱原语。
 差异必须说清，而不是让人以为 systemd 单元里的防护到处都在：
 
 - **没有文件系统保护**：不存在 `ProtectSystem=strict` / `ReadWritePaths` 的等价物。面板能写整个

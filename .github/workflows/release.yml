@@ -71,6 +71,17 @@ jobs:
     with:
       version: ${{ github.ref_name }}
 
+  # 同一个坑的另一半：OpenWrt 的 ipk/apk 也必须在这里显式调用。
+  # openwrt.yml 自己挂着 release: published，但那个触发器对本流水线用 GITHUB_TOKEN
+  # 发出的 release 永远不响，六个架构的包会一个都附不上去。
+  packages:
+    needs: release
+    uses: ./.github/workflows/openwrt.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: write
+
   # 正式版的全部装机验证通过后，RC 已完成使命；同时删除 Release 与 tag，
   # 避免版本列表持续堆积。预发布自身不会触发这一步。
   cleanup-prereleases:
