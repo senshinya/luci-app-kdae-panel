@@ -39,7 +39,26 @@ https://downloads.openwrt.org/releases/<openwrt>/targets/<target>/openwrt-sdk-<o
 
 `fail-fast: false`：一个架构编不出来不该让其余五个白跑。
 
-## 二、包 Makefile 的架构闸门
+## 二、换发行版暴露出来的两处依赖问题
+
+改用官方 SDK 后，六个 job 全部在 `make defconfig` 之后丢掉 `CONFIG_PACKAGE_kdae-panel`。
+二分定位（逐条依赖单独试一遍 defconfig）的结论：
+
+- **`+kmod-xdp-sockets-diag` 必须去掉。** 官方 OpenWrt 的 24.10.8 与 25.12.5 在 x86/64、
+  armsr/armv8、x86/generic 的 kmods 目录里都没有这个包，ImmortalWrt 才有（它的 `dae` 包也
+  依赖它），所以旧流水线一直没暴露。这不是 SDK 挑剔——依赖一个官方源里不存在的包，用户在
+  官方 OpenWrt 上 `opkg install` 同样会失败。它是 AF_XDP 套接字的诊断模块，dae 的转发路径
+  不用它。另外四个 kmod 与架构闸门本身都没问题（各自单独试都能选上）。
+- **包要挂成 feed，不能拷进 `package/`。** 拷进去的包不经过 feeds，依赖也就没人替它装：
+  官方 SDK 的 `package/` 里没有 `ca-bundle`，`+ca-bundle` 指向不存在的包。改成
+  `src-link` 一个本地 feed + `feeds install -a -p kdae`，`scripts/feeds` 的 `install_src`
+  会顺着 `DEPENDS` 递归把依赖从 base/luci feed 装进 `package/feeds/`。这也是
+  QiuSimons/luci-app-daed 用的那个 action 的做法。
+
+两处的共同症状都是 defconfig 静默丢包，日志里只有一条不起眼的 `has a dependency on ...,
+which does not exist`。CI 在 defconfig 之后立刻断言配置项还在，就是为了让这类故障停在这里。
+
+## 三、包 Makefile 的架构闸门
 
 `kdae-panel` 现在是 `DEPENDS:=@x86_64 ...`，改成 `@(x86_64||aarch64||i386)`。
 
@@ -51,7 +70,7 @@ armsr/armv8 是 `aarch64`，x86/generic 是 `i386`。闸门不匹配时 `make de
 包内容与架构无关（一个已经交叉编译好的静态二进制被 `$(CP)` 进去），所以不需要为每个架构
 准备不同的打包逻辑，只需要每个架构一份对应 GOARCH 的二进制。
 
-## 三、版本号按包格式分叉
+## 四、版本号按包格式分叉
 
 apk 的版本语法是 `digit{.digit}...{letter}{_suf{#}}...{~hash}{-r#}`（apk-tools `src/version.c`），
 `+` 不在其中，现有的 `0.0.1+<commit数>.<短哈希>` 只能给 ipk 用。
@@ -66,7 +85,7 @@ apk 侧的排序性质与 ipk 侧一致：`_git` 是后置后缀，`0.0.1_git124
 
 Release 事件下两种格式拿到的是同一个纯 tag 版本号，不分叉。
 
-## 四、产物命名
+## 五、产物命名
 
 apk 的文件名里**没有架构**（`package-pack.mk` 里是 `<name>-<version>.apk`），三个架构的
 `kdae-panel-0.8.8-r1.apk` 会在 Release 页撞名。所有产物统一补后缀，与参考项目一致：
@@ -79,7 +98,7 @@ apk 的文件名里**没有架构**（`package-pack.mk` 里是 `<name>-<version>
 LuCI 包是 `all`/noarch，三个架构的 job 出的是同一份内容，只从每条版本线的 `x86_64` job 上传，
 否则 Release 页会有三份同名资产互相覆盖。
 
-## 五、校验
+## 六、校验
 
 ipk 沿用现在的断言（解 tar 看 control 与文件表），新增一条 `Architecture` 必须等于本 job 的 pkgarch。
 
@@ -93,7 +112,7 @@ apk 是 ADB 二进制格式，`tar` 打不开，改用 SDK 自带的 `staging_di
 `dae` 包的互斥退化成文件冲突——两个包都装 `/etc/init.d/dae`，apk 会拒绝覆盖。这一点写进
 `docs/openwrt.md`，不用 `!dae` 塞进 `DEPENDS` 去 hack（会干扰 OpenWrt 的依赖扫描）。
 
-## 六、Release 附加
+## 七、Release 附加
 
 `download-artifact` 改用 `pattern: kdae-panel-pkg-*` + `merge-multiple: true`，把六个 job 的产物
 一起附到 Release。写权限仍只给发布路径上的那个 job。
@@ -110,7 +129,7 @@ apk 是 ADB 二进制格式，`tar` 打不开，改用 SDK 自带的 `staging_di
 分别落成 `1.0.0~rc1`（ipk）与 `1.0.0_rc1`（apk），两者都排在正式版之前。后缀要写成 apk 认识的
 形式且不含点：`rc1`、`beta2`，不要 `rc.1`。
 
-## 七、文档
+## 八、文档
 
 `README.md` 的「OpenWrt / ImmortalWrt」段与 `docs/openwrt.md`：支持矩阵、`opkg install` 与
 `apk add --allow-untrusted` 两套安装命令、immortalwrt 用同一批包的说明、25.12 上冲突声明的差异。

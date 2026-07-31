@@ -320,6 +320,8 @@ jobs:
             grep -q "$dep" "$workdir/meta" || { echo "元数据缺少依赖 $dep"; exit 1; }
           done
           # 包是 SDK 用本地构建密钥签的，校验机器上没有那把公钥，因此 --allow-untrusted。
+          # --destination 不会自己建目录，不先 mkdir 会报 "Error opening destination"。
+          mkdir -p "$workdir/root"
           "$apk_bin" --allow-untrusted extract --no-chown \
             --destination "$workdir/root" "$backend"
           for path in usr/bin/kdae-panel etc/init.d/kdae-panel etc/init.d/dae \
