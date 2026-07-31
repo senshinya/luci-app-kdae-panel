@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/daeinstall"
+	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -112,13 +113,20 @@ func (j *installJobs) finish(err error) {
 	j.job.Error = ""
 }
 
-func registerUpstreamRoutes(router *http.ServeMux, service InstallService, operations *sync.Mutex, logger *slog.Logger) {
+func registerUpstreamRoutes(router *http.ServeMux, service InstallService, operations *sync.Mutex,
+	logger *slog.Logger, backend host.Backend) {
 	if service == nil {
 		// 功能可显式关闭；没有 Install 依赖时让端点明确告诉客户端，
-		// 而不是静默缺路由。
+		// 而不是静默缺路由。开关在两套部署里是两个东西：OpenWrt 上没有
+		// KDAE_PANEL_ENABLE_DAE_INSTALL 这个环境变量，照着它操作一定无效。
+		message := "dae 版本管理未启用，请设置 KDAE_PANEL_ENABLE_DAE_INSTALL=true；" +
+			"自定义安装路径还需加入服务单元的 ReadWritePaths"
+		if backend == host.BackendProcd {
+			message = "dae 版本管理未启用，请在 /etc/config/kdae-panel 里把 enable_dae_install 设为 1，" +
+				"再执行 /etc/init.d/kdae-panel restart"
+		}
 		unavailable := func(writer http.ResponseWriter, _ *http.Request) {
-			writeAPIError(writer, http.StatusServiceUnavailable, "dae_install_disabled",
-				"dae 版本管理未启用，请设置 KDAE_PANEL_ENABLE_DAE_INSTALL=true；自定义安装路径还需加入服务单元的 ReadWritePaths")
+			writeAPIError(writer, http.StatusServiceUnavailable, "dae_install_disabled", message)
 		}
 		for _, pattern := range []string{
 			"GET /api/v1/dae/install", "POST /api/v1/dae/install",

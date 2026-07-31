@@ -152,12 +152,13 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	}
 	if cfg.EnableGeoUpdate {
 		manager, err := geodata.New(geodata.Options{
-			ConfigPath: cfg.DaeConfigPath,
-			StatePath:  cfg.GeoStatePath,
-			Fetcher:    upstream.NewGeoRegistry(),
-			Service:    hostManager,
-			Reloader:   daeClient,
-			Logger:     logger,
+			ConfigPath:     cfg.DaeConfigPath,
+			StatePath:      cfg.GeoStatePath,
+			Fetcher:        upstream.NewGeoRegistry(),
+			Service:        hostManager,
+			Reloader:       daeClient,
+			Logger:         logger,
+			ServiceBackend: cfg.ServiceBackend,
 		})
 		if err != nil {
 			_ = authStore.Close()
@@ -217,6 +218,14 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	if err != nil {
 		return nil, err
 	}
+	// 后端在这里再解析一次：New 里解析好的那个传不进来，而本函数是测试直接
+	// 调用的入口。Resolve 只做一次 os.Stat，解析失败时 New 早已报错退出，
+	// 这里的兜底只为不 panic。健康检查与"功能未启用"的指引都要用它——
+	// 那两处提示在两套部署里指向的是完全不同的开关。
+	backend, err := cfg.ServiceBackend.Resolve()
+	if err != nil {
+		backend = cfg.ServiceBackend
+	}
 	router := http.NewServeMux()
 	operations := &sync.Mutex{}
 	application := &App{operations: operations}
@@ -263,13 +272,6 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 		geoScheduleService = runner
 	}
 	router.HandleFunc("GET /api/v1/health", func(writer http.ResponseWriter, request *http.Request) {
-		// 健康检查在这里注册，拿不到 New 里解析好的后端，因此就地再解析一次。
-		// Resolve 只做一次 os.Stat，健康检查的调用频率下开销可忽略；解析失败时
-		// New 早已报错退出，这里的兜底只为不 panic。
-		backend, err := cfg.ServiceBackend.Resolve()
-		if err != nil {
-			backend = cfg.ServiceBackend
-		}
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"status":  "ok",
 			"version": cfg.Version,
@@ -299,7 +301,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	registerProbeRoutes(router, dependencies.Probe, logger)
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)
 	registerScheduleRoutes(router, "/api/v1/schedule/geo", geoScheduleService)
-	registerUpstreamRoutes(router, dependencies.Install, operations, logger)
+	registerUpstreamRoutes(router, dependencies.Install, operations, logger, backend)
 	registerGeoRoutes(router, geo)
 	registerAuthenticationRoutes(router, dependencies.Authentication, cfg.SecureCookie, cfg.BootstrapToken, cfg.SetupURLFile, proxyTrust, logger)
 	apiNotFound := func(writer http.ResponseWriter, _ *http.Request) {

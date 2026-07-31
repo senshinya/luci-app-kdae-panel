@@ -4,13 +4,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
-// defaultProcdInitPath 是 kdae-panel 软件包安装的 dae 启动脚本。
-const defaultProcdInitPath = "/etc/init.d/dae"
+// procdInitDir 是 procd 读取服务定义的目录。init 脚本按服务名落在这里，
+// 与 host.procdManager 的 initScript() 是同一个约定。
+const procdInitDir = "/etc/init.d"
+
+// defaultProcdServiceName 是没有配置服务名时的取值，与 host 包一致。
+const defaultProcdServiceName = "dae"
 
 // procdUnits 管理 procd 的服务定义。
 //
@@ -23,11 +28,20 @@ type procdUnits struct {
 	path string
 }
 
+// Path 按服务名拼出 init 脚本位置。
+//
+// 不能写死 /etc/init.d/dae：服务名来自 UCI 的 service_name，host.procdManager
+// 用的就是 filepath.Join("/etc/init.d", serviceName)。两处从同一个配置项读出
+// 两个答案时，面板会对着一个不存在的脚本报"软件包被破坏"，而服务本身好好的。
 func (u *procdUnits) Path() string {
 	if u.path != "" {
 		return u.path
 	}
-	return defaultProcdInitPath
+	name := u.installer.serviceName
+	if name == "" {
+		name = defaultProcdServiceName
+	}
+	return filepath.Join(procdInitDir, name)
 }
 
 // WritableDirs 为空：面板从不写 init 脚本所在的目录。

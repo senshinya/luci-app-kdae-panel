@@ -143,9 +143,13 @@ func (i *Installer) uninstallDataPaths(status host.Status, options UninstallOpti
 		search = geodata.SearchPath(i.configPath, status.Environment)
 	}
 	for _, directory := range search {
-		// ProtectHome=true 使这个目录对面板不可见；跳过比把 EACCES 冒充
-		// "不存在"更诚实，确认框也明确限定为面板可见副本。
-		if filepath.Clean(directory) == filepath.Clean(geodata.SandboxHiddenDir) {
+		// 只在这个目录确实被沙箱挡住时才跳过。ProtectHome=true 下读它会拿到
+		// EACCES，跳过比把权限错误冒充"不存在"更诚实，确认框也明确限定为
+		// 面板可见副本；而 procd 部署没有这层遮挡，/root/.local/share/dae 对
+		// 面板完全可见——无条件跳过会让"删除 geo 数据"悄悄漏掉那一份，
+		// 用户看到的承诺与实际行为对不上。判据与 geodata.MissingWarning 统一。
+		if filepath.Clean(directory) == filepath.Clean(geodata.SandboxHiddenDir) &&
+			geodata.SandboxHidesHome() {
 			continue
 		}
 		for _, name := range geodata.Names {

@@ -679,6 +679,34 @@ func TestDaeInstallDisabledByDefault(t *testing.T) {
 	}
 }
 
+// OpenWrt 上没有 KDAE_PANEL_ENABLE_DAE_INSTALL 这个环境变量，开关在
+// /etc/config/kdae-panel 里。指引照抄 systemd 那套，用户一定白忙一场。
+func TestDaeInstallDisabledPointsAtUCIOnProcd(t *testing.T) {
+	application, err := NewWithDependencies(
+		Config{Version: "test-panel", ServiceBackend: host.BackendProcd},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Dependencies{Dae: stubDaeService{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodGet, "/api/v1/dae/install", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("状态码 = %d，期望 503", recorder.Code)
+	}
+	if !strings.Contains(body, "enable_dae_install") || !strings.Contains(body, "/etc/config/kdae-panel") {
+		t.Fatalf("procd 下应指向 UCI 开关: %s", body)
+	}
+	for _, forbidden := range []string{"KDAE_PANEL_ENABLE_DAE_INSTALL", "ReadWritePaths", "systemd"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("procd 下的提示不该出现 %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestDaeVersionsRejectsUnknownSource(t *testing.T) {
 	application := newInstallApp(t, &stubInstallService{})
 	for _, query := range []string{"", "?source=", "?source=../etc", "?source=evil"} {

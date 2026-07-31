@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/tuoro/kdae-panel/internal/geodata"
 	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
@@ -221,6 +223,38 @@ func TestUninstallRejectsNonFileDataBeforeStoppingService(t *testing.T) {
 	}
 	if len(service.actions) != 0 {
 		t.Fatalf("数据预检失败前不应控制服务: %v", service.actions)
+	}
+}
+
+// procd 部署没有 ProtectHome，/root/.local/share/dae 对面板完全可见。
+// 无条件跳过它，"删除 geo 数据"就会悄悄漏掉那一份，而确认框承诺的是
+// 删掉所有面板可见的副本。判据必须与提示文案用的那个一致。
+func TestUninstallDeletesHomeGeoWhenVisible(t *testing.T) {
+	installer, service, _, _ := managedUninstallFixture(t)
+	visible := filepath.Join(testDir(t), "dae")
+	if err := os.MkdirAll(visible, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := geodata.SandboxHiddenDir
+	geodata.SandboxHiddenDir = visible
+	t.Cleanup(func() { geodata.SandboxHiddenDir = previous })
+
+	geoIP := filepath.Join(visible, "geoip.dat")
+	if err := os.WriteFile(geoIP, []byte("geo"), geoMode); err != nil {
+		t.Fatal(err)
+	}
+	installer.geoSearchDirs = []string{visible}
+
+	status, err := service.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := installer.uninstallDataPaths(status, UninstallOptions{PurgeGeo: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, filepath.Clean(geoIP)) {
+		t.Fatalf("面板看得见的那份 geo 应当在删除清单里，实际 %v", paths)
 	}
 }
 

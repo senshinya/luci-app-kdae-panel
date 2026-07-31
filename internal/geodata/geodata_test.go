@@ -126,6 +126,9 @@ func newTestManager(t *testing.T) (*Manager, *fakeFetcher, *fakeReloader, string
 		Service:    &fakeService{},
 		Reloader:   reloader,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// 显式钉住后端：留空会走自动探测，"目录不可写"该建议什么就取决于
+		// 跑测试的机器上有没有 /sbin/procd，断言随之失去意义。
+		ServiceBackend: host.BackendSystemd,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -427,6 +430,23 @@ func TestStatusReportsUnwritableTarget(t *testing.T) {
 	}
 	if !strings.Contains(status.Problem, "ReadWritePaths") {
 		t.Fatalf("应指明需要加入 ReadWritePaths: %s", status.Problem)
+	}
+
+	// procd 上没有 kdae-panel.service，也没有 ReadWritePaths：面板由 procd
+	// 直接拉起，写不进去就是目录本身的权限或挂载有问题。照着一个不存在的
+	// 单元去排查，用户只会白费一轮时间。
+	manager.backend = host.BackendProcd
+	procdStatus := manager.Status(context.Background())
+	if procdStatus.Updatable {
+		t.Fatal("目录不可写时不应报告可更新")
+	}
+	for _, forbidden := range []string{"ReadWritePaths", "systemd", ".service"} {
+		if strings.Contains(procdStatus.Problem, forbidden) {
+			t.Fatalf("procd 下的提示 %q 不该出现 %q", procdStatus.Problem, forbidden)
+		}
+	}
+	if !strings.Contains(procdStatus.Problem, "只读") {
+		t.Fatalf("procd 下应指向目录本身的权限或挂载: %s", procdStatus.Problem)
 	}
 }
 

@@ -90,6 +90,9 @@ type Manager struct {
 	service    ServiceController
 	reloader   Reloader
 	logger     *slog.Logger
+	// backend 只影响"目录不可写"该怎么建议用户去修。两套 init 系统下这件事
+	// 的成因完全不同，给错方向的指引比不给更浪费用户时间。
+	backend host.Backend
 }
 
 type Options struct {
@@ -100,6 +103,8 @@ type Options struct {
 	Service    ServiceController
 	Reloader   Reloader
 	Logger     *slog.Logger
+	// ServiceBackend 留空按 host.Backend.Resolve 的规则自动探测。
+	ServiceBackend host.Backend
 }
 
 func New(options Options) (*Manager, error) {
@@ -119,6 +124,10 @@ func New(options Options) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	backend, err := options.ServiceBackend.Resolve()
+	if err != nil {
+		return nil, err
+	}
 	return &Manager{
 		configPath: options.ConfigPath,
 		statePath:  options.StatePath,
@@ -126,5 +135,6 @@ func New(options Options) (*Manager, error) {
 		service:    options.Service,
 		reloader:   options.Reloader,
 		logger:     logger,
+		backend:    backend,
 	}, nil
 }

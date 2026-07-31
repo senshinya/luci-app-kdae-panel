@@ -38,8 +38,12 @@ start_service() {
 	chmod 0700 "$RUN_DIR"
 
 	procd_open_instance
+	# 显式钉住后端而不是靠 /sbin/procd 探测：这个软件包只在 OpenWrt 上存在，
+	# 后端就没有第二种可能。探测出错的症状是所有服务控制都失败，离原因很远，
+	# 一行参数就能整类消灭这种故障。
 	procd_set_param command "$PANEL_BIN" \
 		--listen "$listen_addr:$listen_port" \
+		--service-backend procd \
 		--dae-binary "$dae_binary" \
 		--dae-config "$dae_config" \
 		--service-name "$service_name" \

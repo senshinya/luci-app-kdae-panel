@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
+	"github.com/tuoro/kdae-panel/internal/host"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
@@ -67,7 +68,7 @@ func MissingWarning(searchPath []string) string {
 		if file.Present {
 			continue
 		}
-		if sandboxHidesHome() {
+		if SandboxHidesHome() {
 			return fmt.Sprintf("在面板可见的目录里未找到 geoip.dat / geosite.dat；"+
 				"%s 受面板沙箱限制读不到，文件若在那里 dae 仍能读到。"+
 				"确实缺失且路由规则用到 geosite/geoip 时，dae 将无法启动", SandboxHiddenDir)
@@ -77,11 +78,14 @@ func MissingWarning(searchPath []string) string {
 	return ""
 }
 
-// sandboxHidesHome 判断 SandboxHiddenDir 是否因为沙箱而对本进程不可见。
+// SandboxHidesHome 判断 SandboxHiddenDir 是否因为沙箱而对本进程不可见。
 //
 // 判据是读它的上级目录得到权限错误——ProtectHome=true 正是这个症状。
 // 目录不存在不算遮挡：那说明 dae 本来就没在那里放东西。
-func sandboxHidesHome() bool {
+//
+// 导出是因为卸载也要用同一个判据：那边要决定这一份 geo 该不该删。同一个问题
+// 在两处各答一次，早晚会出现"提示说看不见、卸载却按看得见处理"这种自相矛盾。
+func SandboxHidesHome() bool {
 	_, err := os.ReadDir(filepath.Dir(SandboxHiddenDir))
 	return errors.Is(err, fs.ErrPermission)
 }
@@ -163,13 +167,27 @@ func (m *Manager) Status(ctx context.Context) Status {
 	}
 
 	if err := atomicfile.Writable(target); err != nil {
-		status.Problem = fmt.Sprintf(
-			"面板无法写入 %s：%v；请在 kdae-panel.service 的 ReadWritePaths 中加入该目录", target, err)
+		status.Problem = unwritableProblem(m.backend, target, err)
 		return status
 	}
 	status.Updatable = true
 	status.Warnings = warnings(files, target, filepath.Dir(m.configPath))
 	return status
+}
+
+// unwritableProblem 说明目录为什么写不进去，并按后端给出对得上的修法。
+//
+// 原先无条件让用户去改 kdae-panel.service 的 ReadWritePaths。那个单元在
+// OpenWrt 上根本不存在——面板由 procd 从 /etc/init.d/kdae-panel 拉起，
+// 没有任何沙箱挡在中间，写不进去就是这个目录本身的权限或挂载有问题。
+// 照着一个不存在的文件去排查，用户只会白费一轮时间。
+func unwritableProblem(backend host.Backend, target string, err error) string {
+	if backend == host.BackendProcd {
+		return fmt.Sprintf(
+			"面板无法写入 %s：%v；请确认该目录存在、所在分区可写且未被挂载为只读", target, err)
+	}
+	return fmt.Sprintf(
+		"面板无法写入 %s：%v；请在 kdae-panel.service 的 ReadWritePaths 中加入该目录", target, err)
 }
 
 // warnings 说明那些"更新会成功、但结果可能出乎意料"的情况。
