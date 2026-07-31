@@ -61,6 +61,7 @@ export interface ServiceStatus {
   /** 主进程已运行的秒数；只有 procd 后端填，与 restarts 正好互补。 */
   uptimeSeconds?: number
   unitPath?: string
+  suspended?: boolean
 }
 
 export interface NetworkInterface {

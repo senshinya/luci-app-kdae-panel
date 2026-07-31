@@ -18,12 +18,14 @@ import (
 )
 
 type fakeFetcher struct {
-	binary     []byte
-	versions   []upstream.Version
-	listErr    error
-	resolveErr error
-	fetchErr   error
-	fetches    int
+	binary        []byte
+	versions      []upstream.Version
+	listErr       error
+	resolveErr    error
+	fetchErr      error
+	fetches       int
+	binaryFetches int
+	bundleFetches int
 }
 
 func (f *fakeFetcher) List(context.Context, upstream.Source, int) ([]upstream.Version, error) {
@@ -34,8 +36,15 @@ func (f *fakeFetcher) Resolve(context.Context, upstream.Source, string, upstream
 	return upstream.Asset{}, f.resolveErr
 }
 
+func (f *fakeFetcher) FetchBinary(context.Context, upstream.Asset) ([]byte, error) {
+	f.fetches++
+	f.binaryFetches++
+	return f.binary, f.fetchErr
+}
+
 func (f *fakeFetcher) FetchBundle(context.Context, upstream.Asset) (upstream.Bundle, error) {
 	f.fetches++
+	f.bundleFetches++
 	return upstream.Bundle{Binary: f.binary}, f.fetchErr
 }
 
@@ -321,6 +330,26 @@ func TestInstallUpgrade(t *testing.T) {
 	}
 	if len(service.actions) != 1 || service.actions[0] != host.ActionRestart {
 		t.Fatalf("应当重启服务（eBPF 需重新挂载），实际 %v", service.actions)
+	}
+}
+
+func TestInstallPreservesInactiveServiceState(t *testing.T) {
+	service := &fakeService{activeState: "inactive"}
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, service)
+	seed(t, binaryPath, "v1")
+
+	status, err := installer.Install(context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2.0.0")
+	if err != nil {
+		t.Fatalf("切换未运行的 dae 失败: %v", err)
+	}
+	if len(service.actions) != 0 {
+		t.Fatalf("切换前服务未运行，不应触发 systemd 动作，实际 %v", service.actions)
+	}
+	if status.ServiceActive {
+		t.Fatal("切换后服务应保持未运行")
+	}
+	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v2")) {
+		t.Fatalf("二进制内容 = %q，应已切换到 v2", content)
 	}
 }
 

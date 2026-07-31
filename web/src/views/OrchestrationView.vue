@@ -164,17 +164,17 @@ onMounted(() => void load())
         <h2>代理编排</h2>
         <NText depth="3">可视化编辑全局设置、DNS、节点、订阅、分组与路由，未涉及的配置和注释保持原样</NText>
       </div>
-      <NSpace>
+      <NSpace class="orchestration-toolbar-actions">
         <NButton secondary :disabled="loading" @click="load">
           <template #icon><NIcon><RefreshOutline /></NIcon></template>重新读取
         </NButton>
         <NButton :loading="validating" :disabled="loading" @click="validate">
           <template #icon><NIcon><CheckmarkCircleOutline /></NIcon></template>校验
         </NButton>
-        <NButton :loading="saving" :disabled="loading || !dirty" @click="save(false)">
+        <NButton class="desktop-only" :loading="saving" :disabled="loading || !dirty" @click="save(false)">
           <template #icon><NIcon><SaveOutline /></NIcon></template>仅保存
         </NButton>
-        <NButton type="primary" :loading="saving" :disabled="loading || !dirty" @click="confirmReload">
+        <NButton class="desktop-only" type="primary" :loading="saving" :disabled="loading || !dirty" @click="confirmReload">
           <template #icon><NIcon><CloudUploadOutline /></NIcon></template>保存并重载
         </NButton>
       </NSpace>
@@ -214,5 +214,14 @@ onMounted(() => void load())
         <RoutingCard v-model="content" />
       </div>
     </NSpin>
+
+    <div class="mobile-save-bar" aria-label="编排保存操作">
+      <NButton :loading="saving" :disabled="loading || !dirty" @click="save(false)">
+        <template #icon><NIcon><SaveOutline /></NIcon></template>仅保存
+      </NButton>
+      <NButton type="primary" :loading="saving" :disabled="loading || !dirty" @click="confirmReload">
+        <template #icon><NIcon><CloudUploadOutline /></NIcon></template>保存并重载
+      </NButton>
+    </div>
   </div>
 </template>

@@ -272,13 +272,17 @@ func TestLoopRunsTaskAndRecordsFailure(t *testing.T) {
 	fireSoon(t, runner)
 
 	deadline := time.Now().Add(5 * time.Second)
-	for calls.Load() < 1 && time.Now().Before(deadline) {
+	var status Status
+	for time.Now().Before(deadline) {
+		status = runner.Status()
+		if status.LastError == taskErr.Error() {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if calls.Load() < 1 {
 		t.Fatal("定时任务未被执行")
 	}
-	status := runner.Status()
 	if status.LastError != taskErr.Error() || status.LastRunAt == nil {
 		t.Fatalf("失败未被记录: %+v", status)
 	}

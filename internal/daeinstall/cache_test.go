@@ -28,6 +28,9 @@ func TestAcquireReusesVerifiedLocalVersion(t *testing.T) {
 	if string(second.Binary) != string(first.Binary) || fetcher.fetches != 1 {
 		t.Fatalf("没有复用首次下载: binary %q, fetches %d", second.Binary, fetcher.fetches)
 	}
+	if fetcher.binaryFetches != 1 || fetcher.bundleFetches != 0 {
+		t.Fatalf("已有 dae 时应只取二进制: binary=%d bundle=%d", fetcher.binaryFetches, fetcher.bundleFetches)
+	}
 }
 
 func TestAcquireFullBundleBypassesBinaryCache(t *testing.T) {
@@ -47,6 +50,9 @@ func TestAcquireFullBundleBypassesBinaryCache(t *testing.T) {
 	}
 	if cached || fetcher.fetches != 2 || string(bundle.Binary) != string(elf("fresh-bundle")) {
 		t.Fatalf("完整包获取错误: cached %t, fetches %d, binary %q", cached, fetcher.fetches, bundle.Binary)
+	}
+	if fetcher.binaryFetches != 1 || fetcher.bundleFetches != 1 {
+		t.Fatalf("首次安装应重新获取完整包: binary=%d bundle=%d", fetcher.binaryFetches, fetcher.bundleFetches)
 	}
 }
 

@@ -4,6 +4,7 @@ import {
   NButton,
   NCard,
   NDataTable,
+  NEmpty,
   NIcon,
   NInput,
   NModal,
@@ -16,6 +17,7 @@ import {
 } from 'naive-ui'
 import { CreateOutline, DownloadOutline, FlashOutline, PricetagOutline, TrashOutline } from '@vicons/ionicons5'
 import { postJSON } from '../../api/client'
+import { useMobileViewport } from '../../composables/useMobileViewport'
 import type { LatencyResult, LatencyTarget } from '../../types/api'
 import { appendToSection, isQuotable, isValidTag, quote, readSection, removeLine, type Entry } from '../../utils/daeconf'
 import { parseNodeLink, type NodeLinkInfo } from '../../utils/nodelink'
@@ -29,6 +31,7 @@ interface NodeRow {
 
 const content = defineModel<string>({ required: true })
 const message = useMessage()
+const mobile = useMobileViewport()
 const { captureEntry, rewriteEntry } = useEntryRewrite(content, message)
 const sourceVisible = ref(false)
 
@@ -152,6 +155,24 @@ function latencyCell(row: NodeRow) {
   return h(NTag, { size: 'small', type, bordered: false }, { default: () => `${value.toFixed(value < 10 ? 1 : 0)} ms` })
 }
 
+function latencyLabel(row: NodeRow): string {
+  if (!row.info || !probeTarget(row.info)) return '—'
+  const result = latency.value.get(latencyKey(row.info))
+  if (!result) return '未测'
+  if (!result.reachable) return '不可达'
+  const value = result.latencyMs || 0
+  return `${value.toFixed(value < 10 ? 1 : 0)} ms`
+}
+
+function latencyType(row: NodeRow): 'success' | 'warning' | 'error' | 'default' {
+  if (!row.info || !probeTarget(row.info)) return 'default'
+  const result = latency.value.get(latencyKey(row.info))
+  if (!result) return 'default'
+  if (!result.reachable) return 'error'
+  const value = result.latencyMs || 0
+  return value < 100 ? 'success' : value < 300 ? 'warning' : 'error'
+}
+
 const nodeColumns: DataTableColumns<NodeRow> = [
   {
     title: '名称',
@@ -227,6 +248,7 @@ const nodeColumns: DataTableColumns<NodeRow> = [
       </NSpace>
     </template>
     <NDataTable
+      v-if="!mobile"
       :columns="nodeColumns"
       :data="nodes"
       :row-key="(row: NodeRow) => row.entry.lineStart"
@@ -240,6 +262,35 @@ const nodeColumns: DataTableColumns<NodeRow> = [
         </div>
       </template>
     </NDataTable>
+    <template v-else>
+      <div v-if="nodes.length" class="mobile-record-list" data-testid="mobile-node-list">
+        <article v-for="row in nodes" :key="row.entry.lineStart" class="mobile-record">
+          <div class="mobile-record-head">
+            <div class="mobile-record-title">
+              <span>{{ row.entry.tag || row.info?.name || '未命名' }}</span>
+              <NTag size="tiny" type="info" :bordered="false">{{ row.info?.protocol || '未知' }}</NTag>
+            </div>
+            <NTag size="small" :type="latencyType(row)" :bordered="false">{{ latencyLabel(row) }}</NTag>
+          </div>
+          <p class="mobile-record-description mono">
+            {{ row.info?.host || '无法解析服务器' }}<template v-if="row.info?.port">:{{ row.info.port }}</template>
+          </p>
+          <div class="mobile-record-meta">
+            <span v-if="row.entry.tag">标签<strong class="mono">{{ row.entry.tag }}</strong></span>
+            <span>配置行<strong>{{ row.entry.lineStart + 1 }}</strong></span>
+          </div>
+          <div class="mobile-action-row">
+            <NButton secondary :disabled="!row.entry.editable" @click="openTagEditor(row.entry)">
+              <template #icon><NIcon><PricetagOutline /></NIcon></template>标签
+            </NButton>
+            <NButton secondary type="error" :disabled="!row.entry.editable" @click="removeNode(row)">
+              <template #icon><NIcon><TrashOutline /></NIcon></template>移除
+            </NButton>
+          </div>
+        </article>
+      </div>
+      <NEmpty v-else description="还没有手工节点。粘贴分享链接导入，或使用订阅。" class="mobile-empty" />
+    </template>
   </NCard>
 
   <NModal v-model:show="importVisible" preset="card" title="导入节点" class="orchestrate-modal">

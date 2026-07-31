@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
   NAlert,
   NAvatar,
   NButton,
+  NDrawer,
+  NDrawerContent,
   NIcon,
   NLayout,
   NLayoutContent,
@@ -24,12 +26,14 @@ import {
   GitNetworkOutline,
   GridOutline,
   LogOutOutline,
+  MenuOutline,
   ReaderOutline,
   SettingsOutline,
 } from '@vicons/ionicons5'
 import { getJSON } from '../api/client'
 import type { PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
 import PanelUpdateAction from '../components/PanelUpdateAction.vue'
+import { useMobileViewport } from '../composables/useMobileViewport'
 import { useAuthStore } from '../stores/auth'
 import { useBackendStore } from '../stores/backend'
 
@@ -38,7 +42,11 @@ const router = useRouter()
 const auth = useAuthStore()
 const backend = useBackendStore()
 const message = useMessage()
-const collapsed = ref(window.innerWidth < 900)
+const mobile = useMobileViewport()
+const drawerVisible = ref(false)
+const viewportWidth = ref(window.innerWidth)
+const drawerWidth = computed(() => Math.min(320, Math.round(viewportWidth.value * 0.86)))
+const collapsed = ref(window.innerWidth < 1100)
 
 function menuLink(label: string, name: string, icon: typeof GridOutline): MenuOption {
   return {
@@ -79,8 +87,11 @@ function handleExpired() {
 }
 
 function handleResize() {
-  if (window.innerWidth < 900) collapsed.value = true
+  viewportWidth.value = window.innerWidth
+  if (!mobile.value && window.innerWidth < 1100) collapsed.value = true
 }
+
+watch(mobile, () => { drawerVisible.value = false })
 
 // 新版本提醒：后端带缓存，这里每次进入布局查一次即可。
 // 检查失败保持沉默——提醒是锦上添花，不该因为 GitHub 不可达而打扰使用。
@@ -115,8 +126,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <NLayout has-sider class="app-shell">
+  <NLayout :has-sider="!mobile" class="app-shell">
     <NLayoutSider
+      v-if="!mobile"
       bordered
       collapse-mode="width"
       :collapsed-width="64"
@@ -136,11 +148,49 @@ onBeforeUnmount(() => {
       <NMenu :value="selectedKey" :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="22" :options="menuOptions" />
     </NLayoutSider>
 
+    <NDrawer v-model:show="drawerVisible" placement="left" :width="drawerWidth">
+      <NDrawerContent class="mobile-nav-drawer" :native-scrollbar="false" body-content-style="padding: 0;">
+        <div class="brand mobile-drawer-brand">
+          <div class="brand-mark">K</div>
+          <div class="brand-copy">
+            <strong>kdae-panel</strong>
+            <span>零侵入管理面板</span>
+          </div>
+        </div>
+        <NMenu :value="selectedKey" :options="menuOptions" @update:value="drawerVisible = false" />
+        <template #footer>
+          <div class="mobile-drawer-account">
+            <NAvatar round size="small">{{ auth.user?.username?.slice(0, 1).toUpperCase() }}</NAvatar>
+            <div class="account-copy">
+              <strong>{{ auth.user?.username }}</strong>
+              <span>管理员</span>
+            </div>
+            <NButton quaternary circle title="退出登录" aria-label="退出登录" @click="logout">
+              <template #icon><NIcon><LogOutOutline /></NIcon></template>
+            </NButton>
+          </div>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
+
     <NLayout>
       <NLayoutHeader bordered class="app-header">
-        <div>
-          <NText depth="3" class="eyebrow">KDAE CONTROL PLANE</NText>
-          <h1>{{ title }}</h1>
+        <div class="app-header-leading">
+          <NButton
+            v-if="mobile"
+            quaternary
+            circle
+            class="mobile-nav-trigger"
+            title="打开导航"
+            aria-label="打开导航"
+            @click="drawerVisible = true"
+          >
+            <template #icon><NIcon><MenuOutline /></NIcon></template>
+          </NButton>
+          <div class="app-title">
+            <NText depth="3" class="eyebrow">KDAE CONTROL PLANE</NText>
+            <h1>{{ title }}</h1>
+          </div>
         </div>
         <div class="account">
           <NAvatar round size="small">{{ auth.user?.username?.slice(0, 1).toUpperCase() }}</NAvatar>
@@ -153,7 +203,7 @@ onBeforeUnmount(() => {
           </NButton>
         </div>
       </NLayoutHeader>
-      <NLayoutContent class="app-content" content-style="padding: 28px;">
+      <NLayoutContent class="app-content" content-style="padding: var(--page-padding);">
         <NAlert
           v-if="update?.check.updateAvailable && !updateDismissed"
           type="info"

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { h, onMounted, ref } from 'vue'
-import { NButton, NCard, NDataTable, NIcon, NInput, NModal, NSpace, NTag, NText, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NCard, NDataTable, NEmpty, NIcon, NInput, NModal, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { CreateOutline, PencilOutline, RefreshOutline, ReturnUpBackOutline, TrashOutline } from '@vicons/ionicons5'
 import { APIError, deleteJSON, getJSON, postJSON, putJSON } from '../api/client'
 import type { ConfigBackup, ConfigDocument, ConfigSaveResult } from '../types/api'
+import { useMobileViewport } from '../composables/useMobileViewport'
 import { formatBytes, formatDateTime, shortHash } from '../utils/format'
 
 const message = useMessage()
 const dialog = useDialog()
+const mobile = useMobileViewport()
 const loading = ref(true)
 const restoring = ref('')
 const deleting = ref('')
@@ -215,6 +217,7 @@ onMounted(() => void load())
     </div>
     <NCard content-style="padding: 0;">
       <NDataTable
+        v-if="!mobile"
         :columns="columns"
         :data="backups"
         :loading="loading"
@@ -222,6 +225,45 @@ onMounted(() => void load())
         :scroll-x="920"
         :bordered="false"
       />
+      <NSpin v-else :show="loading">
+        <div v-if="backups.length" class="mobile-record-list" data-testid="mobile-backup-list">
+          <article v-for="backup in backups" :key="backup.id" class="mobile-record">
+            <div class="mobile-record-head">
+              <div class="mobile-record-title">{{ backup.name || '自动备份' }}</div>
+              <NTag size="small" :bordered="false">{{ shortHash(backup.hash) }}</NTag>
+            </div>
+            <p v-if="backup.note" class="mobile-record-description">{{ backup.note }}</p>
+            <div class="mobile-record-meta">
+              <span>创建<strong>{{ formatDateTime(backup.createdAt) }}</strong></span>
+              <span>大小<strong>{{ formatBytes(backup.size) }}</strong></span>
+            </div>
+            <div class="mobile-action-row">
+              <NButton
+                secondary
+                type="primary"
+                :loading="restoring === backup.id"
+                :disabled="Boolean(restoring || deleting)"
+                @click="confirmRestore(backup)"
+              >
+                <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复
+              </NButton>
+              <NButton secondary :disabled="Boolean(restoring || deleting)" @click="openEditor(backup)">
+                <template #icon><NIcon><PencilOutline /></NIcon></template>编辑
+              </NButton>
+              <NButton
+                secondary
+                type="error"
+                :loading="deleting === backup.id"
+                :disabled="Boolean(restoring || deleting)"
+                @click="confirmDelete(backup)"
+              >
+                <template #icon><NIcon><TrashOutline /></NIcon></template>删除
+              </NButton>
+            </div>
+          </article>
+        </div>
+        <NEmpty v-else description="还没有配置存档" class="mobile-empty" />
+      </NSpin>
     </NCard>
 
     <NModal v-model:show="editorVisible" preset="card" :title="editingID ? '编辑配置存档' : '保存当前配置'" class="backup-editor-modal">

@@ -41,8 +41,9 @@ const daeError = ref('')
 const configError = ref('')
 
 const running = computed(() => service.value?.activeState === 'active')
-const statusType = computed(() => running.value ? 'success' : service.value?.activeState === 'failed' ? 'error' : 'warning')
-const statusLabel = computed(() => running.value ? '运行中' : service.value?.activeState === 'failed' ? '运行失败' : '未运行')
+const suspended = computed(() => service.value?.suspended === true)
+const statusType = computed(() => suspended.value ? 'warning' : running.value ? 'success' : service.value?.activeState === 'failed' ? 'error' : 'warning')
+const statusLabel = computed(() => suspended.value ? '已暂停' : running.value ? '运行中' : service.value?.activeState === 'failed' ? '运行失败' : '未运行')
 const supportedCommands = computed(() => Object.entries(dae.value?.commands || {}).filter(([, enabled]) => enabled).map(([name]) => name))
 
 const orchestration = computed(() => {
@@ -94,8 +95,8 @@ async function refresh(silent = false) {
 async function runAction(action: string) {
   actionLoading.value = action
   try {
-    await postJSON(`/api/v1/service/actions/${action}`)
-    message.success(`${actionName(action)}已执行`)
+    const result = await postJSON<{ message?: string }>(`/api/v1/service/actions/${action}`)
+    message.success(result.message || `${actionName(action)}已执行`)
     await new Promise((resolve) => window.setTimeout(resolve, 500))
     await refresh(true)
   } catch (error) {
@@ -133,6 +134,12 @@ onMounted(() => {
 
     <NAlert v-if="serviceError" type="error" closable @close="serviceError = ''">{{ serviceError }}</NAlert>
     <NAlert v-if="daeError" type="warning" closable @close="daeError = ''">{{ daeError }}</NAlert>
+    <NAlert v-if="suspended" type="warning" :bordered="false" class="service-suspended-alert">
+      <div class="service-suspended-copy">
+        <strong>dae 已暂停</strong>
+        <span>代理流量处理已停止，但 dae 进程仍在运行；点击“无损重载”即可恢复。</span>
+      </div>
+    </NAlert>
 
     <NGrid responsive="screen" cols="1 s:2 l:4" :x-gap="14" :y-gap="14">
       <NGridItem>
@@ -140,7 +147,7 @@ onMounted(() => {
           <NText depth="3">服务状态</NText>
           <NSkeleton v-if="loading" text style="width: 60%" />
           <div v-else class="metric-value"><NTag :type="statusType" round>{{ statusLabel }}</NTag></div>
-          <small>{{ service?.subState || '等待状态数据' }}</small>
+          <small>{{ suspended ? '代理流量处理已暂停' : service?.subState || '等待状态数据' }}</small>
         </NCard>
       </NGridItem>
       <NGridItem>
@@ -198,7 +205,7 @@ onMounted(() => {
             </NPopconfirm>
             <NPopconfirm positive-text="确认暂停" negative-text="取消" @positive-click="runAction('suspend')">
               <template #trigger>
-                <NButton :disabled="actionLoading !== '' || !running" :loading="actionLoading === 'suspend'">
+                <NButton :disabled="actionLoading !== '' || !running || suspended" :loading="actionLoading === 'suspend'">
                   <template #icon><NIcon><PauseOutline /></NIcon></template>暂停
                 </NButton>
               </template>

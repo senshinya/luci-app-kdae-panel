@@ -1,0 +1,1 @@
+import{Tn as e}from"./client-BPPTDbz0.js";function t(){return e()!==null}var n=typeof window<`u`;export{n,t};

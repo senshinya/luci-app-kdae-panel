@@ -349,6 +349,12 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.getByText('运行中', { exact: true })).toBeVisible()
     await expect(page.getByText('dae version v1.0.6')).toBeVisible()
     await expect(page.locator('.metric-card .n-skeleton')).toHaveCount(0)
+    await page.getByRole('button', { name: '暂停' }).click()
+    await page.getByRole('button', { name: '确认暂停' }).click()
+    await expect(page.getByText('dae 已暂停', { exact: true })).toBeVisible()
+    await expect(page.getByText('代理流量处理已停止，但 dae 进程仍在运行；点击“无损重载”即可恢复。')).toBeVisible()
+    await page.getByRole('button', { name: '无损重载' }).click()
+    await expect(page.getByText('dae 已暂停', { exact: true })).toHaveCount(0)
     await capture(page, 'dashboard.png', 1600, 900)
     if (UPDATE_SCREENSHOTS) {
       await page.unroute(capabilityPattern, maskCapabilityPath)
@@ -593,7 +599,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     })
 
     await page.goto('/versions')
-    await expect(page.getByText('正在使用本地版本替换二进制并重启 dae')).toBeVisible()
+    await expect(page.getByText('正在验证配置并替换二进制，随后会重启 dae，期间连接会短暂中断…')).toBeVisible()
     await expect(page.getByText(/发现上一次安装留下的暂存备份/)).toHaveCount(0)
     await expect(page.getByText(/磁盘上的二进制与面板记录不一致/)).toHaveCount(0)
 
@@ -612,12 +618,23 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/dae/cache')
   })
 
-  await test.step('移动端代理编排与弹窗没有横向溢出', async () => {
+  await test.step('移动端导航、核心列表与编辑器使用独立布局', async () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/proxy')
     await expect(page.getByRole('heading', { name: '代理编排', level: 2 })).toBeVisible()
+    await expect(page.locator('.n-layout-sider')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '打开导航' })).toBeVisible()
+    await page.getByRole('button', { name: '打开导航' }).click()
+    const drawer = page.locator('.n-drawer')
+    await expect(drawer.getByText('kdae-panel')).toBeVisible()
+    await drawer.getByText('代理编排', { exact: true }).click()
+    await expect(drawer).not.toBeVisible()
+
     let overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
+    await expect(page.getByTestId('mobile-node-list')).toBeVisible()
+    await expect(page.getByTestId('mobile-subscription-list')).toBeVisible()
+    await expect(page.locator('.mobile-save-bar')).toBeVisible()
 
     await page.getByTestId('global-card').getByRole('button', { name: '编辑设置' }).click()
     const globalModal = page.getByTestId('global-editor-modal')
@@ -625,6 +642,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(globalModalBox).not.toBeNull()
     expect(globalModalBox!.x).toBeGreaterThanOrEqual(0)
     expect(globalModalBox!.x + globalModalBox!.width).toBeLessThanOrEqual(390)
+    await expect(globalModal).toHaveCSS('height', '844px')
     expect(await globalModal.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     await globalModal.getByRole('button', { name: '取消' }).click()
 
@@ -634,6 +652,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(dnsModalBox).not.toBeNull()
     expect(dnsModalBox!.x).toBeGreaterThanOrEqual(0)
     expect(dnsModalBox!.x + dnsModalBox!.width).toBeLessThanOrEqual(390)
+    await expect(dnsModal).toHaveCSS('height', '844px')
     expect(await dnsModal.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     await dnsModal.getByRole('button', { name: '取消' }).click()
 
@@ -643,13 +662,128 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(modalBox).not.toBeNull()
     expect(modalBox!.x).toBeGreaterThanOrEqual(0)
     expect(modalBox!.x + modalBox!.width).toBeLessThanOrEqual(390)
+    await expect(routingModal).toHaveCSS('height', '844px')
     expect(await routingModal.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     await routingModal.getByRole('button', { name: '取消' }).click()
 
-    await page.goto('/')
-    await expect(page.getByRole('heading', { name: '运行状态' })).toBeVisible()
+    await page.route('**/api/v1/dae/install', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue()
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: {
+            binaryPath: '/usr/bin/dae', platform: 'linux-amd64', ready: true, present: true,
+            version: 'dae version v2.0.0',
+            managed: { source: 'official', ref: 'v2.0.0', label: 'v2.0.0', installedAt: '2026-07-30T00:00:00Z', sha256: 'e2e' },
+            rollbackAvailable: false, serviceActive: true,
+          },
+          job: { phase: 'idle' },
+        }),
+      })
+    })
+    await page.route('**/api/v1/dae/versions**', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ versions: [{
+        source: 'official', ref: 'v2.0.0', label: 'v2.0.0', description: '稳定版本',
+        publishedAt: '2026-07-30T00:00:00Z', installable: true, cached: true,
+        cachedBytes: 33554432, cachedAt: '2026-07-30T00:00:00Z',
+      }] }),
+    }))
+    await page.goto('/versions')
+    const mobileVersions = page.getByTestId('mobile-version-list')
+    await expect(mobileVersions).toBeVisible()
+    await expect(mobileVersions.getByText('已下载', { exact: true })).toBeVisible()
     overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/dae/install')
+    await page.unroute('**/api/v1/dae/versions**')
+
+    await page.route('**/api/v1/config/backups', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([{
+        id: 'mobile-e2e', name: '手机端存档', note: '验证长备注在窄屏内正常换行',
+        createdAt: '2026-07-30T00:00:00Z', hash: '0123456789abcdef', size: 4096,
+      }]),
+    }))
+    await page.goto('/backups')
+    const mobileBackups = page.getByTestId('mobile-backup-list')
+    await expect(mobileBackups).toBeVisible()
+    await expect(mobileBackups.getByText('手机端存档')).toBeVisible()
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/config/backups')
+
+    await page.goto('/logs')
+    await expect(page.getByRole('heading', { name: 'journald 日志', level: 2 })).toBeVisible()
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+
+    const longDescription = '用于验证移动端能够完整展示由当前 dae 导出的具体字段说明，即使说明包含连续地址 https://resolver.example.com/dns-query?client=mobile-with-a-very-long-identifier 也不能被裁掉。'
+    await page.route('**/api/v1/dae/outline', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        version: 'mobile-e2e',
+        leaves: ['string', 'map[string]string'],
+        structure: [{
+          name: 'Routing', mapping: 'routing', desc: '路由设置',
+          structure: [{
+            name: 'DomainResolver',
+            mapping: 'routing_domain_resolver_with_a_very_long_mapping_name',
+            type: 'map[string]string',
+            desc: longDescription,
+            defaultValue: 'https://resolver.example.com/dns-query?client=mobile-with-a-very-long-identifier',
+          }],
+        }],
+      }),
+    }))
+    await page.goto('/schema')
+    const schemaDescription = page.locator('.outline-description').filter({ hasText: longDescription })
+    await expect(schemaDescription).toHaveText(longDescription)
+    expect(await schemaDescription.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return element.getBoundingClientRect().height / Number.parseFloat(style.lineHeight)
+    })).toBeGreaterThan(2)
+    expect(await page.locator('.outline-node.root').evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/dae/outline')
+
+    await page.setViewportSize({ width: 430, height: 932 })
+    await page.goto('/config')
+    await expect(page.locator('.mobile-save-bar')).toBeVisible()
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+
+    let mobileSuspended = true
+    await page.route('**/api/v1/service', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        name: 'dae.service', activeState: 'active', subState: 'running', mainPid: 1487,
+        suspended: mobileSuspended,
+      }),
+    }))
+    await page.route('**/api/v1/service/actions/reload', (route) => {
+      mobileSuspended = false
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'ok', action: 'reload', suspended: false }),
+      })
+    })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+    await expect(page.getByRole('heading', { name: '运行状态' })).toBeVisible()
+    const suspendedAlert = page.locator('.service-suspended-alert')
+    await expect(suspendedAlert).toBeVisible()
+    await expect(suspendedAlert.getByText('代理流量处理已停止，但 dae 进程仍在运行；点击“无损重载”即可恢复。')).toBeVisible()
+    expect(await suspendedAlert.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    const mobileServiceCard = page.locator('.panel-card').filter({ hasText: '服务控制' })
+    await expect(mobileServiceCard.getByRole('button', { name: /暂停/ })).toBeDisabled()
+    await page.getByRole('button', { name: '无损重载' }).click()
+    await expect(suspendedAlert).toHaveCount(0)
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/service/actions/reload')
+    await page.unroute('**/api/v1/service')
   })
 
   await test.step('退出后凭密码重新登录', async () => {

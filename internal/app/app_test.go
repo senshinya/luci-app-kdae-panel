@@ -365,6 +365,70 @@ func TestServiceRestartAction(t *testing.T) {
 	}
 }
 
+func TestServiceSuspendStateClearsAfterReload(t *testing.T) {
+	hostService := &stubHostService{status: host.Status{
+		Name:        "dae.service",
+		ActiveState: "active",
+		SubState:    "running",
+		MainPID:     42,
+	}}
+	application, err := NewWithDependencies(
+		Config{Version: "test-panel"},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Dependencies{Dae: stubDaeService{}, Host: hostService},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	suspend := httptest.NewRecorder()
+	application.Handler().ServeHTTP(suspend,
+		httptest.NewRequest(http.MethodPost, "/api/v1/service/actions/suspend", nil))
+	if suspend.Code != http.StatusOK || !strings.Contains(suspend.Body.String(), "dae 已暂停") {
+		t.Fatalf("暂停响应异常: status=%d body=%s", suspend.Code, suspend.Body.String())
+	}
+
+	assertSuspended := func(want bool) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		application.Handler().ServeHTTP(response,
+			httptest.NewRequest(http.MethodGet, "/api/v1/service", nil))
+		var payload struct {
+			Suspended bool `json:"suspended"`
+		}
+		if response.Code != http.StatusOK || json.NewDecoder(response.Body).Decode(&payload) != nil {
+			t.Fatalf("读取服务状态失败: status=%d body=%s", response.Code, response.Body.String())
+		}
+		if payload.Suspended != want {
+			t.Fatalf("suspended = %v，期望 %v", payload.Suspended, want)
+		}
+	}
+	assertSuspended(true)
+
+	// dae 被面板外部停止时，进程内的旧标记不能把未运行服务误报成暂停。
+	hostService.status.ActiveState = "inactive"
+	assertSuspended(false)
+	hostService.status.ActiveState = "active"
+	assertSuspended(false)
+	application.Handler().ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/api/v1/service/actions/suspend", nil))
+	assertSuspended(true)
+
+	reload := httptest.NewRecorder()
+	application.Handler().ServeHTTP(reload,
+		httptest.NewRequest(http.MethodPost, "/api/v1/service/actions/reload", nil))
+	if reload.Code != http.StatusOK {
+		t.Fatalf("重载响应异常: status=%d body=%s", reload.Code, reload.Body.String())
+	}
+	assertSuspended(false)
+
+	// 面板外发生的 systemd 重启不会经过动作端点，PID 变化也必须让旧状态失效。
+	application.Handler().ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/api/v1/service/actions/suspend", nil))
+	hostService.status.MainPID = 43
+	assertSuspended(false)
+}
+
 func TestServiceStartFailureExplainsMissingGeoClassification(t *testing.T) {
 	hostService := &stubHostService{
 		err:  errors.New("执行 systemd start 失败"),

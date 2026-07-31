@@ -5,6 +5,7 @@ import {
   NButton,
   NCard,
   NDataTable,
+  NEmpty,
   NIcon,
   NInput,
   NInputGroup,
@@ -21,6 +22,7 @@ import {
 } from 'naive-ui'
 import { AddOutline, CreateOutline, RefreshOutline, TimerOutline, TrashOutline } from '@vicons/ionicons5'
 import { getJSON, postJSON, putJSON } from '../../api/client'
+import { useMobileViewport } from '../../composables/useMobileViewport'
 import type { ScheduleStatus } from '../../types/api'
 import { appendToSection, isQuotable, isValidTag, quote, readSection, removeLine, type Entry } from '../../utils/daeconf'
 import { parseScheme, supportsPersistence, togglePersistence } from '../../utils/subscription'
@@ -36,6 +38,7 @@ const props = defineProps<{
 }>()
 
 const message = useMessage()
+const mobile = useMobileViewport()
 const dialog = useDialog()
 const { captureEntry, rewriteEntry } = useEntryRewrite(content, message)
 
@@ -282,6 +285,7 @@ onMounted(() => void loadSchedule())
       </NText>
     </div>
     <NDataTable
+      v-if="!mobile"
       data-testid="subscription-list"
       :columns="subscriptionColumns"
       :data="subscriptions"
@@ -296,6 +300,45 @@ onMounted(() => void loadSchedule())
         </div>
       </template>
     </NDataTable>
+    <template v-else>
+      <div v-if="subscriptions.length" class="mobile-record-list" data-testid="mobile-subscription-list">
+        <article v-for="entry in subscriptions" :key="entry.lineStart" class="mobile-record">
+          <div class="mobile-record-head">
+            <div class="mobile-record-title">
+              <span>{{ entry.tag || '未命名订阅' }}</span>
+              <NTag v-if="parseScheme(entry.value)?.persistent" size="tiny" type="info" :bordered="false">离线缓存</NTag>
+            </div>
+          </div>
+          <p class="mobile-record-description mono">{{ entry.value }}</p>
+          <div v-if="supportsPersistence(entry.value)" class="mobile-record-toggle">
+            <div>
+              <strong>离线缓存</strong>
+              <NText depth="3">拉取失败时使用上次成功内容</NText>
+            </div>
+            <NSwitch
+              size="small"
+              :value="parseScheme(entry.value)?.persistent === true"
+              :disabled="!entry.editable"
+              @update:value="(value: boolean) => setPersistence(entry, value)"
+            />
+          </div>
+          <div class="mobile-action-row">
+            <NButton secondary :disabled="!entry.editable" @click="openSubscriptionEditor(entry)">
+              <template #icon><NIcon><CreateOutline /></NIcon></template>编辑
+            </NButton>
+            <NButton
+              secondary
+              type="error"
+              :disabled="!entry.editable"
+              @click="content = removeLine(content, entry.lineStart, entry.lineEnd)"
+            >
+              <template #icon><NIcon><TrashOutline /></NIcon></template>移除
+            </NButton>
+          </div>
+        </article>
+      </div>
+      <NEmpty v-else description="还没有订阅。订阅内容由 dae 在重载时拉取。" class="mobile-empty" />
+    </template>
   </NCard>
 
   <NModal :show="editTarget !== null" preset="card" title="编辑订阅" class="orchestrate-modal" @update:show="editTarget = null">

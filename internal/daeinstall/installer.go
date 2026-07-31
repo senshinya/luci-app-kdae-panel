@@ -3,8 +3,8 @@
 // 安装是一个带回滚的事务，顺序刻意如此：
 //
 //	下载并校验 sha256 → 写入同目录暂存文件 → 用暂存的新二进制跑 --version
-//	→ 用它 validate 现有配置 → 备份当前二进制 → 原子替换 → 重启服务
-//	→ 确认服务已起来；任一步失败都恢复备份并把服务重启回去。
+//	→ 用它 validate 现有配置 → 备份当前二进制 → 原子替换
+//	→ 若服务原本运行则重启并确认稳定；否则保持未运行。
 //
 // 先验证再替换，是为了让"新版本根本跑不起来"或"新版本不认现有配置"这两类
 // 问题在磁盘被改动之前就暴露出来。
@@ -71,6 +71,7 @@ type ServiceController interface {
 type Fetcher interface {
 	List(ctx context.Context, source upstream.Source, limit int) ([]upstream.Version, error)
 	Resolve(ctx context.Context, source upstream.Source, ref string, platform upstream.Platform) (upstream.Asset, error)
+	FetchBinary(ctx context.Context, asset upstream.Asset) ([]byte, error)
 	FetchBundle(ctx context.Context, asset upstream.Asset) (upstream.Bundle, error)
 }
 
@@ -409,7 +410,12 @@ func (i *Installer) Acquire(ctx context.Context, source upstream.Source, ref, la
 	if err != nil {
 		return upstream.Bundle{}, false, err
 	}
-	bundle, err := i.fetcher.FetchBundle(ctx, asset)
+	var bundle upstream.Bundle
+	if requireBundle {
+		bundle, err = i.fetcher.FetchBundle(ctx, asset)
+	} else {
+		bundle.Binary, err = i.fetcher.FetchBinary(ctx, asset)
+	}
 	if err != nil {
 		return upstream.Bundle{}, false, err
 	}
@@ -463,7 +469,7 @@ func (i *Installer) Rollback(ctx context.Context) (Status, error) {
 	return i.applyBinary(ctx, binary, previous)
 }
 
-// applyBinary 是共用的替换事务：验证 → 备份 → 替换 → 重启 → 失败回滚。
+// applyBinary 是共用的替换事务：验证 → 备份 → 替换；服务原本运行时再重启并在失败时回滚。
 func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State) (Status, error) {
 	// 这些字节马上就要以 root 落到 ExecStart 指向的位置并被执行。
 	// 首次安装会做这项检查，升级同样不能少：上游若改了打包方式，
@@ -471,7 +477,7 @@ func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State
 	if err := assertELF(binary); err != nil {
 		return Status{}, err
 	}
-	target, _, err := i.target(ctx)
+	target, wasActive, err := i.target(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -547,30 +553,32 @@ func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State
 	}
 	committed = true
 
-	if err := i.restart(ctx); err != nil {
-		// 换上去起不来，必须退回原样。回滚用独立的 context：安装用的那个
-		// 预算已被下载和这次失败的重启耗掉大半，甚至可能已经取消——
-		// 而回滚恰恰是最不能因为超时或取消而半途而废的一步。
-		restoreCtx, cancelRestore := context.WithTimeout(
-			context.WithoutCancel(ctx), restartTimeout+i.health)
-		outcome := i.restorePrevious(restoreCtx, target)
-		cancelRestore()
+	if wasActive {
+		if err := i.restart(ctx); err != nil {
+			// 换上去起不来，必须退回原样。回滚用独立的 context：安装用的那个
+			// 预算已被下载和这次失败的重启耗掉大半，甚至可能已经取消——
+			// 而回滚恰恰是最不能因为超时或取消而半途而废的一步。
+			restoreCtx, cancelRestore := context.WithTimeout(
+				context.WithoutCancel(ctx), restartTimeout+i.health)
+			outcome := i.restorePrevious(restoreCtx, target)
+			cancelRestore()
 
-		backupSettled = true
-		if outcome.RestoreErr == nil {
-			i.discardBackup() // 磁盘已退回旧版本，原有回滚点仍然有效
-		} else {
-			i.commitBackup(pending) // 磁盘上留着新版本，暂存的旧版本正是它的上一版
-		}
-		failure := outcome.RestoreErr
-		if failure == nil {
-			failure = outcome.RestartErr
-		}
-		return Status{}, &ApplyError{
-			Cause:            err,
-			RolledBack:       outcome.RestoreErr == nil,
-			ServiceRecovered: outcome.RestoreErr == nil && outcome.RestartErr == nil,
-			RestoreErr:       failure,
+			backupSettled = true
+			if outcome.RestoreErr == nil {
+				i.discardBackup() // 磁盘已退回旧版本，原有回滚点仍然有效
+			} else {
+				i.commitBackup(pending) // 磁盘上留着新版本，暂存的旧版本正是它的上一版
+			}
+			failure := outcome.RestoreErr
+			if failure == nil {
+				failure = outcome.RestartErr
+			}
+			return Status{}, &ApplyError{
+				Cause:            err,
+				RolledBack:       outcome.RestoreErr == nil,
+				ServiceRecovered: outcome.RestoreErr == nil && outcome.RestartErr == nil,
+				RestoreErr:       failure,
+			}
 		}
 	}
 	i.commitBackup(pending)
@@ -586,7 +594,7 @@ func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State
 		// 安装本身已经成功，不能因此报错；但账本没写上，后续状态查询会把这次
 		// 安装误报成"在面板之外被替换过"，必须让用户当场看见。
 		status.Warnings = append(status.Warnings, fmt.Sprintf(
-			"新版本已装上并运行，但安装记录写入失败（%v）；面板会把它显示为在面板之外替换过", stateErr))
+			"新版本已装上，但安装记录写入失败（%v）；面板会把它显示为在面板之外替换过", stateErr))
 	}
 	return status, nil
 }
