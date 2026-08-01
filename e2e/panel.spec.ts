@@ -33,6 +33,50 @@ async function capture(page: import('@playwright/test').Page, name: string, widt
   })
 }
 
+async function maskConfigPathForScreenshot(route: import('@playwright/test').Route) {
+  if (route.request().method() !== 'GET') return route.continue()
+  const response = await route.fetch()
+  const body = await response.json()
+  await route.fulfill({
+    response,
+    json: { ...body, path: '/etc/dae/config.dae' },
+  })
+}
+
+async function mockInstalledGeoForScreenshot(route: import('@playwright/test').Route) {
+  if (route.request().method() !== 'GET') return route.continue()
+  const response = await route.fetch()
+  const body = await response.json()
+  const files = body.status.files.map((file: { name: string }) => ({
+    ...file,
+    present: true,
+    path: `/etc/dae/${file.name}`,
+    size: file.name === 'geoip.dat' ? 24_371_200 : 47_923_712,
+    modTime: '2026-08-01T08:00:00Z',
+    shadowed: [],
+  }))
+  await route.fulfill({
+    response,
+    json: {
+      ...body,
+      status: {
+        ...body.status,
+        files,
+        targetDir: '/etc/dae',
+        managed: {
+          source: 'loyalsoldier',
+          repositories: ['Loyalsoldier/geoip', 'Loyalsoldier/v2ray-rules-dat'],
+          tag: '20260801',
+          updatedAt: '2026-08-01T08:00:00Z',
+        },
+        problem: undefined,
+        warnings: [],
+        serviceState: 'active',
+      },
+    },
+  })
+}
+
 async function clickVisibleOption(page: import('@playwright/test').Page, text: string) {
   const option = page.locator('.n-base-select-option:visible', { hasText: text })
   await option.waitFor({ state: 'visible' })
@@ -72,6 +116,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   await test.step('通过一次性链接初始化管理员', async () => {
     await page.goto('/setup#bootstrap=e2e-bootstrap')
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '完成初始化' })).toBeVisible()
+    await capture(page, 'setup.png', 1600, 900)
     await page.getByPlaceholder('至少 12 个字符').fill(PASSWORD)
     await page.locator('.n-form-item', { hasText: '确认密码' }).locator('input').fill(PASSWORD)
     await page.getByRole('button', { name: '完成初始化' }).click()
@@ -80,7 +126,12 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   })
 
   await test.step('概览呈现 systemd 桩给出的健康状态', async () => {
-    await expect(page.locator('.metric-card').first()).toContainText('运行中')
+    const metrics = page.locator('.metric-card')
+    await expect(metrics).toHaveCount(3)
+    await expect(metrics.first()).toContainText('运行中')
+    await expectCardsAligned(metrics)
+    await expect(page.getByText('本次运行时长', { exact: true })).toBeVisible()
+    await expect(page.getByText('随系统启动', { exact: true })).toBeVisible()
     await expect(page.getByText('dae version v1.0.6')).toBeVisible()
     await expectCardsAligned(page.locator('.equal-height-grid .panel-card'))
   })
@@ -111,6 +162,18 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(sourceRow).toContainText('assets.example.com')
     await reopenedManager.locator('.n-base-close').click()
     await expect(reopenedManager).toBeHidden()
+
+    if (UPDATE_SCREENSHOTS) {
+      await page.route('**/api/v1/dae/geo', mockInstalledGeoForScreenshot)
+      await page.reload()
+      await expect(page.getByText('/etc/dae/geoip.dat')).toBeVisible()
+      await expect(page.getByText('Loyalsoldier 规则集', { exact: true })).toBeVisible()
+    }
+    await capture(page, 'geo.png', 1600, 1000)
+    if (UPDATE_SCREENSHOTS) {
+      await page.unroute('**/api/v1/dae/geo', mockInstalledGeoForScreenshot)
+      await page.reload()
+    }
 
     await page.setViewportSize({ width: 390, height: 844 })
     await page.getByRole('button', { name: '来源管理' }).click()
@@ -249,8 +312,13 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await reopenedDNSModal.getByRole('button', { name: '应用到编排' }).click()
     await expect(page.getByText('DNS 设置已应用到编排，保存并重载后生效')).toBeVisible()
 
+    const groups = page.getByTestId('groups-card')
+    await groups.getByPlaceholder('新分组名，如 proxy').fill('proxy')
+    await groups.getByRole('button', { name: '新建' }).click()
+
     await page.getByRole('button', { name: '导入节点' }).click()
     await page.getByPlaceholder(/vmess/).fill(NODE_LINKS)
+    await expect(page.getByTestId('import-node-groups')).toContainText('proxy')
     await page.getByRole('button', { name: '加入编排' }).click()
     await expect(page.getByText('e2e-node.example.com').first()).toBeVisible()
     await page.getByTestId('nodes-card').getByRole('button', { name: '编辑原文' }).click()
@@ -271,9 +339,6 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await subscriptionModal.getByRole('button', { name: '确定' }).click()
     await expect(subscriptionRow).toContainText('e2e-updated')
 
-    const groups = page.getByTestId('groups-card')
-    await groups.getByPlaceholder('新分组名，如 proxy').fill('proxy')
-    await groups.getByRole('button', { name: '新建' }).click()
     const groupItem = groups.locator('.group-item', { hasText: 'proxy' })
     await groupItem.getByRole('button', { name: '编辑' }).click()
     const groupModal = page.getByTestId('group-editor-modal')
@@ -324,6 +389,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     // 面板宣称保存成功，磁盘上必须真的有这一行——这是配置事务的最终断言
     const saved = readFileSync(configPath, 'utf8')
     expect(saved).toContain(NODE_LINK)
+    expect(saved).toContain(`E2E-01: '${NODE_LINK}'`)
     expect(saved).toContain("e2e_sub: 'https://example.com/e2e-updated'")
     expect(saved).toContain('filter: name(E2E-01)')
     expect(saved).toContain('filter: subtag(e2e_sub)')
@@ -361,6 +427,25 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     }
   })
 
+  await test.step('原始配置与动态能力页面展示当前 dae 数据', async () => {
+    if (UPDATE_SCREENSHOTS) {
+      await page.route('**/api/v1/config', maskConfigPathForScreenshot)
+    }
+    await page.goto('/config')
+    await expect(page.getByRole('heading', { name: '入口配置', level: 2 })).toBeVisible()
+    await expect(page.locator('.config-editor textarea')).toHaveValue(/global \{/)
+    await capture(page, 'config.png', 1600, 1120)
+    if (UPDATE_SCREENSHOTS) {
+      await page.unroute('**/api/v1/config', maskConfigPathForScreenshot)
+    }
+
+    await page.goto('/schema')
+    await expect(page.getByRole('heading', { name: '动态配置能力', level: 2 })).toBeVisible()
+    await expect(page.locator('.schema-loading')).toHaveCount(0)
+    await expect(page.locator('.outline-node.root')).toHaveCount(2)
+    await capture(page, 'schema.png', 1600, 1120)
+  })
+
   await test.step('配置存档可以命名、恢复并删除', async () => {
     await page.goto('/backups')
     await expect(page.getByRole('heading', { name: '配置历史', level: 2 })).toBeVisible()
@@ -378,6 +463,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await editModal.getByRole('button', { name: '保存修改' }).click()
     const renamedRow = page.locator('tr', { hasText: 'E2E 已命名配置' })
     await expect(renamedRow).toContainText('E2E 回档测试')
+    await capture(page, 'backups.png', 1600, 900)
 
     await renamedRow.getByRole('button', { name: '恢复' }).click()
     await page.locator('.n-dialog').getByRole('button', { name: '恢复并重载' }).click()
@@ -389,19 +475,19 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   })
 
   await test.step('设置页左右列保持同一底边', async () => {
-    const targetPanelVersion = 'v0.8.1'
+    const targetPanelVersion = 'v0.9.7'
     let upgradeStarted = false
     await page.route('**/api/v1/panel/update/check', (route) => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         check: {
-          current: 'v0.8.0',
+          current: 'v0.9.6',
           latest: targetPanelVersion,
           updateAvailable: true,
           checkedAt: '2026-07-30T00:00:00Z',
         },
         status: {
-          current: 'v0.8.0',
+          current: 'v0.9.6',
           binaryPath: '/usr/bin/kdae-panel',
           platform: 'linux/amd64',
           enabled: true,
@@ -448,6 +534,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
 
     const upgradeButton = page.getByTestId('panel-upgrade')
     await expect(upgradeButton).toHaveText(`升级到 ${targetPanelVersion}`)
+    await capture(page, 'settings.png', 1600, 1250)
 
     await page.setViewportSize({ width: 390, height: 844 })
     await expect.poll(() => page.locator('.app-content').evaluate((content) =>
@@ -544,6 +631,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
           status: {
             binaryPath: '/usr/bin/dae',
             platform: 'x86_64_v3_avx2',
+            architecture: 'x86_64',
+            preferredPlatform: 'x86_64_v3_avx2',
             ready: true,
             present: true,
             version: applying ? 'dae version v1.9.0' : 'dae version v2.0.0',
@@ -551,6 +640,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
               source: 'official',
               ref: 'v2.0.0',
               label: 'v2.0.0',
+              platform: 'x86_64_v2_sse',
               installedAt: '2026-07-30T00:00:00Z',
               sha256: 'e2e',
             },
@@ -605,6 +695,10 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
 
     applying = false
     await page.reload()
+    const installCard = page.locator('.n-card', { hasText: '当前安装' }).first()
+    await expect(installCard.getByText('x86_64', { exact: true })).toBeVisible()
+    await expect(installCard.getByText('x86_64_v3_avx2', { exact: true })).toBeVisible()
+    await expect(installCard.getByText('x86_64_v2_sse', { exact: true })).toBeVisible()
     const row = page.locator('tr', { hasText: 'v1.9.0' })
     await expect(row.getByText('已下载')).toBeVisible()
     await capture(page, 'versions.png', 1600, 1120)
@@ -616,6 +710,28 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/dae/install')
     await page.unroute('**/api/v1/dae/versions**')
     await page.unroute('**/api/v1/dae/cache')
+  })
+
+  await test.step('日志页展示多级近期记录并保持最新在前', async () => {
+    await page.route('**/api/v1/logs?*', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { timestamp: '2026-08-01T08:28:31Z', priority: 6, level: 'info', message: 'level=info msg="Network online."', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:32Z', priority: 6, level: 'info', message: 'level=info msg="Subscriptions fetched" duration=812ms', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:33Z', priority: 7, level: 'debug', message: 'level=debug msg="Group selects dialer" dialer=demo-sg group=proxy network=tcp4', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:34Z', priority: 6, level: 'info', message: 'level=info msg="Control plane built" duration=386ms', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:35Z', priority: 4, level: 'warning', message: 'level=warning msg="[Reload] Serve"', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:36Z', priority: 6, level: 'info', message: 'level=info msg="Bind to LAN" interface=ens2', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:37Z', priority: 6, level: 'info', message: 'level=info msg="Bind to WAN" interface=ens2', pid: '1487' },
+        { timestamp: '2026-08-01T08:28:38Z', priority: 4, level: 'warning', message: 'level=warning msg="[Reload] Finished"', pid: '1487' },
+      ]),
+    }))
+    await page.goto('/logs')
+    await expect(page.getByRole('heading', { name: 'journald 日志', level: 2 })).toBeVisible()
+    await expect(page.locator('.log-row')).toHaveCount(8)
+    await expect(page.locator('.log-row').first()).toContainText('[Reload] Finished')
+    await capture(page, 'logs.png', 1600, 900)
+    await page.unroute('**/api/v1/logs?*')
   })
 
   await test.step('移动端导航、核心列表与编辑器使用独立布局', async () => {
@@ -675,7 +791,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
             binaryPath: '/usr/bin/dae', platform: 'linux-amd64', ready: true, present: true,
             version: 'dae version v2.0.0',
             managed: { source: 'official', ref: 'v2.0.0', label: 'v2.0.0', installedAt: '2026-07-30T00:00:00Z', sha256: 'e2e' },
-            rollbackAvailable: false, serviceActive: true,
+            rollbackAvailable: true, serviceActive: true,
           },
           job: { phase: 'idle' },
         }),
@@ -690,6 +806,21 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
       }] }),
     }))
     await page.goto('/versions')
+    const versionActions = page.locator('.version-toolbar-actions')
+    const refreshAction = versionActions.getByRole('button', { name: '刷新' })
+    const rollbackAction = versionActions.getByRole('button', { name: '回滚上一版' })
+    const uninstallAction = versionActions.getByRole('button', { name: '卸载 dae' })
+    await expect(refreshAction).toBeVisible()
+    await expect(rollbackAction).toBeVisible()
+    await expect(uninstallAction).toBeVisible()
+    const actionBoxes = await Promise.all([
+      refreshAction.boundingBox(),
+      rollbackAction.boundingBox(),
+      uninstallAction.boundingBox(),
+    ])
+    expect(actionBoxes.every((box) => box !== null)).toBe(true)
+    const actionRows = actionBoxes.map((box) => box!.y)
+    expect(Math.max(...actionRows) - Math.min(...actionRows)).toBeLessThanOrEqual(1)
     const mobileVersions = page.getByTestId('mobile-version-list')
     await expect(mobileVersions).toBeVisible()
     await expect(mobileVersions.getByText('已下载', { exact: true })).toBeVisible()
@@ -713,10 +844,30 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(overflow).toBeLessThanOrEqual(1)
     await page.unroute('**/api/v1/config/backups')
 
+    await page.route('**/api/v1/logs?*', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { timestamp: '2026-07-30T10:00:00Z', priority: 3, level: 'error', message: '较早的错误', pid: '101' },
+        { timestamp: '2026-07-30T10:01:00Z', priority: 6, level: 'info', message: '中间的信息', pid: '101' },
+        { timestamp: '2026-07-30T10:02:00Z', priority: 7, level: 'debug', message: '最新的调试', pid: '101' },
+      ]),
+    }))
     await page.goto('/logs')
     await expect(page.getByRole('heading', { name: 'journald 日志', level: 2 })).toBeVisible()
+    const logRows = page.locator('.log-row')
+    await expect(logRows).toHaveCount(3)
+    await expect(logRows.nth(0)).toContainText('最新的调试')
+    await page.locator('.log-select .n-base-selection').click()
+    await clickVisibleOption(page, '调试')
+    await expect(logRows).toHaveCount(1)
+    await expect(logRows.nth(0)).toContainText('最新的调试')
+    await page.goto('/dashboard')
+    await page.goto('/logs')
+    await expect(page.locator('.log-select .n-base-selection')).toContainText('调试')
+    await expect(logRows).toHaveCount(1)
     overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/logs?*')
 
     const longDescription = '用于验证移动端能够完整展示由当前 dae 导出的具体字段说明，即使说明包含连续地址 https://resolver.example.com/dns-query?client=mobile-with-a-very-long-identifier 也不能被裁掉。'
     await page.route('**/api/v1/dae/outline', (route) => route.fulfill({

@@ -166,6 +166,7 @@ func (p *KdaeProvider) Resolve(ctx context.Context, ref string, platform Platfor
 				return Asset{}, fmt.Errorf("构建 %s 的产物 %s：%w", ref, wanted, err)
 			}
 			return Asset{
+				Platform: candidate,
 				// nightly.link 只发重定向，字节仍来自 GitHub；
 				// 校验和已由上面的 API 独立取得，因此它无法篡改内容。
 				URL: fmt.Sprintf("https://nightly.link/%s/%s/actions/runs/%s/%s",

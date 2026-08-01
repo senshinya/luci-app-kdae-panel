@@ -22,7 +22,6 @@ import {
 import { AddOutline, CreateOutline, TrashOutline } from '@vicons/ionicons5'
 import {
   addGroup,
-  isQuotable,
   isValidTag,
   parseGroups,
   readSection,
@@ -34,6 +33,7 @@ import {
 import {
   createGroupFilter,
   describeGroupFilter,
+  knownFixedCandidateCount,
   parseGroupFilter,
   serializeGroupFilter,
   type GroupFilterDraft,
@@ -87,12 +87,15 @@ function createGroup() {
 }
 
 function changePolicy(group: Group, name: string) {
+  if (name === 'fixed' && !validFixedIndex(group, parsePolicy(group.policy?.value).index)) return
   const serialized = name === 'fixed' ? `fixed(${parsePolicy(group.policy?.value).index})` : name
   content.value = setGroupPolicy(content.value, group, serialized)
 }
 
 function changeFixedIndex(group: Group, index: number | null) {
-  content.value = setGroupPolicy(content.value, group, `fixed(${index ?? 0})`)
+  const normalized = index ?? 0
+  if (!validFixedIndex(group, normalized)) return
+  content.value = setGroupPolicy(content.value, group, `fixed(${normalized})`)
 }
 
 const FILTER_KIND_OPTIONS = [
@@ -118,8 +121,8 @@ const nodeOptions = computed<ResourceOption[]>(() => {
   const seen = new Set<string>()
   for (const entry of readSection(content.value, 'node').entries) {
     const info = parseNodeLink(entry.value)
-    const value = (entry.tag || info?.name || '').trim()
-    if (value === '' || !isQuotable(value) || seen.has(value)) continue
+    const value = entry.tag?.trim() || ''
+    if (value === '' || seen.has(value)) continue
     seen.add(value)
     const details = [
       entry.tag && info?.name && info.name !== entry.tag ? info.name : '',
@@ -145,6 +148,13 @@ const groupTarget = ref<{ index: number; snapshot: string } | null>(null)
 const groupPolicy = ref('min_moving_avg')
 const groupFixedIndex = ref(0)
 const groupFilters = ref<GroupFilterDraft[]>([])
+const unknownNodeNames = computed(() => {
+  const explicit = new Set(nodeOptions.value.map((option) => option.value))
+  return [...new Set(groupFilters.value
+    .filter((filter) => filter.kind === 'nodes')
+    .flatMap((filter) => filter.values)
+    .filter((value) => !explicit.has(value)))]
+})
 
 function openGroupEditor(groupIndex: number) {
   const group = groups.value[groupIndex]
@@ -181,6 +191,19 @@ function applyGroupEdit() {
     message.error('过滤条件不能为空；请选择节点或订阅，名称也不能同时含单双引号')
     return
   }
+  if (groupPolicy.value === 'fixed') {
+    if (!Number.isInteger(groupFixedIndex.value) || groupFixedIndex.value < 0) {
+      message.error('fixed(n) 的索引必须是从 0 开始的整数')
+      return
+    }
+    const candidateCount = fixedCandidateCount(groupFilters.value)
+    if (candidateCount !== null && (candidateCount === 0 || groupFixedIndex.value >= candidateCount)) {
+      message.error(candidateCount === 0
+        ? '当前分组没有可供 fixed(0) 选择的节点'
+        : `fixed(${groupFixedIndex.value}) 已越界；当前过滤条件只有 ${candidateCount} 个明确节点`)
+      return
+    }
+  }
 
   let next = content.value
   for (let index = current.filters.length - 1; index >= 0; index -= 1) {
@@ -197,6 +220,31 @@ function applyGroupEdit() {
   content.value = setGroupPolicy(next, latest, policy)
   groupEditVisible.value = false
   groupTarget.value = null
+}
+
+function validFixedIndex(group: Group, index: number): boolean {
+  if (!Number.isInteger(index) || index < 0) {
+    message.error('fixed(n) 的索引必须是从 0 开始的整数')
+    return false
+  }
+  const candidateCount = fixedCandidateCount(group.filters.map((filter) => parseGroupFilter(filter.value)))
+  if (candidateCount === null || (candidateCount > 0 && index < candidateCount)) return true
+  message.error(candidateCount === 0
+    ? '当前分组没有可供 fixed(0) 选择的节点'
+    : `fixed(${index}) 已越界；当前过滤条件只有 ${candidateCount} 个明确节点`)
+  return false
+}
+
+function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
+  const explicit = new Set(nodeOptions.value.map((option) => option.value))
+  if (filters.some((filter) => filter.kind === 'nodes' && filter.values.some((value) => !explicit.has(value)))) {
+    return null
+  }
+  return knownFixedCandidateCount(
+    filters,
+    readSection(content.value, 'node').entries.length,
+    readSection(content.value, 'subscription').entries.length > 0,
+  )
 }
 </script>
 
@@ -253,6 +301,7 @@ function applyGroupEdit() {
           size="small"
           class="group-fixed-index"
           :min="0"
+          :precision="0"
           :value="parsePolicy(group.policy?.value).index"
           @update:value="(value: number | null) => changeFixedIndex(group, value)"
         />
@@ -286,20 +335,25 @@ function applyGroupEdit() {
   </NCard>
 
   <NModal v-model:show="groupEditVisible" preset="card" title="编辑分组" class="orchestrate-group-modal" :mask-closable="false" data-testid="group-editor-modal">
-    <NAlert type="info" :bordered="false">
-      可直接选择本地节点或订阅；多条过滤之间是“或”关系。订阅内部节点由 dae 拉取，面板按订阅整体加入。
-    </NAlert>
+    <NSpace vertical size="small">
+      <NAlert type="info" :bordered="false">
+        可直接选择本地节点或订阅；多条过滤之间是“或”关系。订阅内部节点由 dae 拉取，面板按订阅整体加入。
+      </NAlert>
+      <NAlert v-if="unknownNodeNames.length" type="warning" :bordered="false">
+        {{ unknownNodeNames.join('、') }} 不对应显式本地标签，可能是订阅节点名称或旧配置名称；面板会原样保留，但无法保证它与 dae 实际解析出的名称一致。
+      </NAlert>
+    </NSpace>
     <div class="group-editor-policy">
       <NText depth="3">策略</NText>
       <NSelect v-model:value="groupPolicy" :options="POLICY_OPTIONS" />
-      <NInputNumber v-if="groupPolicy === 'fixed'" v-model:value="groupFixedIndex" :min="0" />
+      <NInputNumber v-if="groupPolicy === 'fixed'" v-model:value="groupFixedIndex" :min="0" :precision="0" />
     </div>
     <div class="group-filter-editor">
       <div class="group-filter-editor-head">
         <div>
           <strong>分组成员</strong>
           <NText depth="3" class="group-resource-hint">
-            没有标签或链接名称的本地节点需先打标签；未打标签的订阅也无法由 subtag 稳定引用。
+            本地节点只使用显式标签，避免分享链接备注与 dae 运行时名称不一致；未打标签的订阅也无法由 subtag 稳定引用。
           </NText>
         </div>
         <NSpace size="small" class="group-filter-actions">
@@ -324,7 +378,6 @@ function applyGroupEdit() {
           :render-label="renderResourceLabel"
           multiple
           filterable
-          tag
           clearable
           max-tag-count="responsive"
           :virtual-scroll="false"

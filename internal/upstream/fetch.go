@@ -34,7 +34,9 @@ const (
 // 文件。它们全都被同一个 sha256 覆盖,因此首次安装不需要引入任何新的下载源
 // 或信任根——这比另外去取 geo 数据安全得多。
 type Bundle struct {
-	Binary []byte
+	// Platform 是解出此二进制的实际资产变体。
+	Platform string
+	Binary   []byte
 	// Unit 是发布包自带的 dae.service,可能不存在。
 	Unit    []byte
 	GeoIP   []byte
@@ -48,7 +50,12 @@ func (r *Registry) FetchBundle(ctx context.Context, asset Asset) (Bundle, error)
 	if err != nil {
 		return Bundle{}, err
 	}
-	return extractArchive(payload, asset.Nested, true)
+	bundle, err := extractArchive(payload, asset.Nested, true)
+	if err != nil {
+		return Bundle{}, err
+	}
+	bundle.Platform = asset.Platform
+	return bundle, nil
 }
 
 // FetchBinary 供已有 dae 的升级与切换使用。发布包仍须完整下载并校验，

@@ -1,4 +1,4 @@
-import { isQuotable, isValidTag, quote, unquote } from './daeconf'
+import { isQuotable, isValidTag, parseGroups, quote, setGroupFilter, unquote } from './daeconf'
 
 export type GroupFilterKind = 'nodes' | 'subscriptions' | 'nameKeyword' | 'nameRegex' | 'raw'
 
@@ -117,4 +117,44 @@ export function describeGroupFilter(value: string): string {
   if (parsed.kind === 'nodes') return `${parsed.exclude ? '排除节点' : '节点'}：${parsed.values.join('、')}`
   if (parsed.kind === 'subscriptions') return `${parsed.exclude ? '排除订阅' : '订阅'}：${parsed.values.join('、')}`
   return value
+}
+
+/** 将新导入的显式节点标签加入指定分组；无过滤分组本来就包含全部节点。 */
+export function includeNodesInGroups(text: string, groupNames: string[], nodeTags: string[]): string {
+  const selected = new Set(groupNames)
+  const tags = uniqueValues(nodeTags).filter(isValidTag)
+  if (selected.size === 0 || tags.length === 0) return text
+
+  let next = text
+  for (const groupName of selected) {
+    const group = parseGroups(next).find((candidate) => candidate.name === groupName)
+    if (!group || group.filters.length === 0 || group.filters.some((filter) => !filter.editable)) continue
+
+    const filterIndex = group.filters.findIndex((filter) => {
+      const parsed = parseGroupFilter(filter.value)
+      return filter.editable && parsed.kind === 'nodes' && !parsed.exclude
+    })
+    if (filterIndex >= 0) {
+      const parsed = parseGroupFilter(group.filters[filterIndex].value)
+      parsed.values = uniqueValues([...parsed.values, ...tags])
+      next = setGroupFilter(next, group, filterIndex, serializeGroupFilter(parsed)!)
+      continue
+    }
+    next = setGroupFilter(next, group, group.filters.length, `name(${tags.join(', ')})`)
+  }
+  return next
+}
+
+/**
+ * 只在候选数量可由当前配置精确得出时返回数字；订阅、关键词和高级表达式均返回 null。
+ * fixed(n) 的 n 是从 0 开始的索引。
+ */
+export function knownFixedCandidateCount(
+  filters: GroupFilterDraft[],
+  unfilteredNodeCount: number,
+  hasSubscriptions: boolean,
+): number | null {
+  if (filters.length === 0) return hasSubscriptions ? null : unfilteredNodeCount
+  if (filters.some((filter) => filter.kind !== 'nodes' || filter.exclude)) return null
+  return new Set(filters.flatMap((filter) => filter.values.map((value) => value.trim()).filter(Boolean))).size
 }

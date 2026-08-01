@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -29,33 +29,44 @@ const entries = ref<LogEntry[]>([])
 const loading = ref(true)
 const autoRefresh = ref(true)
 const search = ref('')
-const level = ref<string | null>(null)
+const levelStorageKey = 'kdae-panel:log-level-filter'
+const levelValues = new Set(['error', 'warning', 'info', 'debug', 'trace'])
+const storedLevel = window.sessionStorage.getItem(levelStorageKey)
+const level = ref<string | null>(storedLevel && levelValues.has(storedLevel) ? storedLevel : null)
 const limit = ref(200)
 const errorMessage = ref('')
 let timer: number | undefined
 
 const levelOptions = [
   { label: '全部级别', value: '' },
-  { label: '错误及更严重', value: 'error' },
+  { label: '错误', value: 'error' },
   { label: '警告', value: 'warning' },
   { label: '信息', value: 'info' },
   { label: '调试', value: 'debug' },
+  { label: '跟踪', value: 'trace' },
 ]
 
 const limitOptions = [100, 200, 300, 500].map((value) => ({ label: `${value} 条`, value }))
 const filteredEntries = computed(() => {
   const query = search.value.trim().toLowerCase()
-  return entries.value.filter((entry) => {
-    const levelMatches = !level.value || (level.value === 'error' ? entry.priority <= 3 : entry.level === level.value)
-    const searchMatches = !query || entry.message.toLowerCase().includes(query) || entry.unit?.toLowerCase().includes(query)
-    return levelMatches && searchMatches
-  })
+  return entries.value
+    .filter((entry) => {
+      const levelMatches = !level.value || entry.level === level.value
+      const searchMatches = !query || entry.message.toLowerCase().includes(query) || entry.unit?.toLowerCase().includes(query)
+      return levelMatches && searchMatches
+    })
+    .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
+})
+
+watch(level, (value) => {
+  if (value) window.sessionStorage.setItem(levelStorageKey, value)
+  else window.sessionStorage.removeItem(levelStorageKey)
 })
 
 function levelType(entry: LogEntry): 'error' | 'warning' | 'info' | 'default' {
-  if (entry.priority <= 3) return 'error'
+  if (entry.priority >= 0 && entry.priority <= 3) return 'error'
   if (entry.priority === 4) return 'warning'
-  if (entry.priority <= 6) return 'info'
+  if (entry.priority >= 5 && entry.priority <= 6) return 'info'
   return 'default'
 }
 
@@ -113,7 +124,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         </NInput>
         <NSelect v-model:value="level" clearable :options="levelOptions" placeholder="全部级别" class="log-select" />
         <NSelect v-model:value="limit" :options="limitOptions" class="log-limit" @update:value="load()" />
-        <NText depth="3">显示 {{ filteredEntries.length }} / {{ entries.length }}</NText>
+        <NText depth="3">最新在前 · 显示 {{ filteredEntries.length }} / {{ entries.length }}</NText>
       </div>
       <NSpin :show="loading">
         <div v-if="filteredEntries.length" class="log-stream">
@@ -129,4 +140,3 @@ onBeforeUnmount(() => window.clearInterval(timer))
     </NCard>
   </div>
 </template>
-

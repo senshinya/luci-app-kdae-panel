@@ -19,7 +19,7 @@ func TestLiveUpstream(t *testing.T) {
 	defer cancel()
 
 	registry := NewDefaultRegistry()
-	platform := Platform{Name: "x86_64"}
+	platform := Platform{Architecture: "x86_64", Name: "x86_64"}
 
 	for _, source := range []Source{SourceOfficial, SourceKdae} {
 		versions, err := registry.List(ctx, source, 5)
@@ -48,7 +48,7 @@ func TestLiveUpstream(t *testing.T) {
 		if len(asset.SHA256) != 64 {
 			t.Fatalf("%s: 资产校验和异常 %q", source, asset.SHA256)
 		}
-		if asset.URL == "" || asset.Filename == "" {
+		if asset.Platform == "" || asset.URL == "" || asset.Filename == "" {
 			t.Fatalf("%s: 资产信息不完整 %+v", source, asset)
 		}
 		t.Logf("%s %s -> %s (%d 字节, sha256 %s…)",
@@ -63,6 +63,9 @@ func TestLiveUpstream(t *testing.T) {
 		if len(bundle.Binary) < 4 || string(bundle.Binary[:4]) != "\x7fELF" {
 			t.Fatalf("%s: 取出的内容不是 ELF 可执行文件（前 4 字节 %q，共 %d 字节）",
 				source, bundle.Binary[:min(4, len(bundle.Binary))], len(bundle.Binary))
+		}
+		if bundle.Platform != asset.Platform {
+			t.Fatalf("%s: 解包后实际构建由 %q 变成 %q", source, asset.Platform, bundle.Platform)
 		}
 		t.Logf("%s %s 解包出 %d 字节的 ELF 可执行文件；unit=%d geoip=%d geosite=%d",
 			source, installable.Label, len(bundle.Binary),

@@ -115,7 +115,8 @@ func TestEveryPlatformCandidateIsRecognizable(t *testing.T) {
 		"amd64", "386", "arm64", "arm", "riscv64", "loong64",
 		"s390x", "ppc64", "ppc64le", "mips", "mipsle", "mips64", "mips64le",
 	} {
-		platform, err := detectPlatform(goarch, flagSet("avx2", "sse4_2", "neon"))
+		flags := append(append([]string{"neon"}, x86V2Flags...), x86V3Flags...)
+		platform, err := detectPlatform(goarch, flagSet(flags...))
 		if err != nil {
 			t.Fatalf("%s: %v", goarch, err)
 		}

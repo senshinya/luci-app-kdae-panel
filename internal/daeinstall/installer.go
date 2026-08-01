@@ -79,12 +79,14 @@ type Fetcher interface {
 // dae --version 对 CI 构建往往无法区分 commit，因此以面板自己的记录为准，
 // 同时保存二进制摘要，用于发现外部手动替换。
 type State struct {
-	Source      upstream.Source `json:"source,omitempty"`
-	Ref         string          `json:"ref,omitempty"`
-	Label       string          `json:"label,omitempty"`
-	Version     string          `json:"version,omitempty"`
-	InstalledAt time.Time       `json:"installedAt,omitempty"`
-	SHA256      string          `json:"sha256,omitempty"`
+	Source upstream.Source `json:"source,omitempty"`
+	Ref    string          `json:"ref,omitempty"`
+	Label  string          `json:"label,omitempty"`
+	// Platform 是安装时实际下载到的资产变体，不是本机首选变体。
+	Platform    string    `json:"platform,omitempty"`
+	Version     string    `json:"version,omitempty"`
+	InstalledAt time.Time `json:"installedAt,omitempty"`
+	SHA256      string    `json:"sha256,omitempty"`
 }
 
 // Status 是对外暴露的安装状态。
@@ -93,7 +95,10 @@ type State struct {
 type Status struct {
 	// BinaryPath 是 systemd 单元实际启动的可执行文件，也是替换的目标。
 	BinaryPath string `json:"binaryPath,omitempty"`
-	Platform   string `json:"platform"`
+	// Platform 保留为首选资产标识，兼容旧客户端。
+	Platform          string `json:"platform"`
+	Architecture      string `json:"architecture"`
+	PreferredPlatform string `json:"preferredPlatform"`
 	// Ready 为假表示还不具备安装条件，Problem 说明原因。
 	Ready bool `json:"ready"`
 	// Present 为假表示目标路径上没有可执行文件。
@@ -303,7 +308,11 @@ func (i *Installer) target(ctx context.Context) (string, bool, error) {
 
 func (i *Installer) Status(ctx context.Context) Status {
 	platform, platformErr := upstream.DetectPlatform()
-	status := Status{Platform: platform.Name}
+	status := Status{
+		Platform:          platform.Name,
+		Architecture:      platform.Architecture,
+		PreferredPlatform: platform.Name,
+	}
 	if platformErr != nil {
 		status.Problem = platformErr.Error()
 		return status
@@ -395,7 +404,7 @@ func (i *Installer) Acquire(ctx context.Context, source upstream.Source, ref, la
 		case err == nil:
 			i.logger.Info("使用已校验的 dae 本地版本", "source", source, "ref", ref,
 				"cached_at", metadata.CachedAt, "bytes", len(content))
-			return upstream.Bundle{Binary: content}, true, nil
+			return upstream.Bundle{Platform: metadata.AssetPlatform, Binary: content}, true, nil
 		case errors.Is(err, ErrCachedVersionNotFound):
 		case errors.Is(err, errInvalidVersionCache):
 			i.logger.Warn("dae 本地版本已损坏，将重新下载", "source", source, "ref", ref, "error", err)
@@ -419,7 +428,8 @@ func (i *Installer) Acquire(ctx context.Context, source upstream.Source, ref, la
 	if err != nil {
 		return upstream.Bundle{}, false, err
 	}
-	if err := i.cache.store(source, ref, label, platform.Name, bundle.Binary); err != nil {
+	bundle.Platform = asset.Platform
+	if err := i.cache.store(source, ref, label, platform.Name, asset.Platform, bundle.Binary); err != nil {
 		return upstream.Bundle{}, false, fmt.Errorf("保存 dae 本地版本: %w", err)
 	}
 	i.logger.Info("已取得并校验 dae 发布包",
@@ -437,11 +447,12 @@ func (i *Installer) DeleteCached(source upstream.Source, ref string) error {
 }
 
 // Install 把已下载的内容装上去。调用方应在持有全局控制锁时调用它。
-func (i *Installer) Install(ctx context.Context, binary []byte, source upstream.Source, ref, label string) (Status, error) {
+func (i *Installer) Install(ctx context.Context, binary []byte, source upstream.Source, ref, label, platform string) (Status, error) {
 	return i.applyBinary(ctx, binary, &State{
 		Source:      source,
 		Ref:         ref,
 		Label:       label,
+		Platform:    platform,
 		InstalledAt: nowUTC(),
 		SHA256:      digestBytes(binary),
 	})
@@ -671,7 +682,7 @@ func (i *Installer) backupCurrent(target string) (*pendingBackup, error) {
 		// 面板外替换的未知二进制，绝不能冒充已知版本。
 		if state.Source != "" && state.Ref != "" && state.SHA256 != "" && state.SHA256 == digestBytes(current) {
 			if platform, err := upstream.DetectPlatform(); err == nil {
-				if err := i.cache.store(state.Source, state.Ref, state.Label, platform.Name, current); err != nil {
+				if err := i.cache.store(state.Source, state.Ref, state.Label, platform.Name, state.Platform, current); err != nil {
 					i.logger.Warn("保留当前 dae 本地版本失败", "source", state.Source, "ref", state.Ref, "error", err)
 				}
 			}

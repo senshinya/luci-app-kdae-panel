@@ -183,11 +183,13 @@ async function restore(backup: ConfigBackup) {
     } catch (error) {
       if (!(error instanceof APIError && error.status === 404)) throw error
     }
-    await postJSON<ConfigSaveResult>(`/api/v1/config/backups/${encodeURIComponent(backup.id)}/restore`, {
+    const result = await postJSON<ConfigSaveResult>(`/api/v1/config/backups/${encodeURIComponent(backup.id)}/restore`, {
       expectedHash,
       apply: true,
     })
-    message.success('配置已恢复并完成无损重载')
+    message.success(result.deferred
+      ? '配置已恢复；dae 当前未运行，下次启动时生效'
+      : '配置已恢复并完成无损重载')
     await load()
   } catch (error) {
     message.error(error instanceof Error ? error.message : '恢复配置失败')

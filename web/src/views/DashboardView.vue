@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -25,7 +25,7 @@ import {
 import { RouterLink } from 'vue-router'
 import { APIError, getJSON, postJSON } from '../api/client'
 import type { ConfigDocument, DaeReport, ServiceStatus } from '../types/api'
-import { formatBytes, formatDurationNanoseconds, formatUptime } from '../utils/format'
+import { formatBytes, formatElapsedSince } from '../utils/format'
 import { parseGroups, parseRoutingRules, readSection } from '../utils/daeconf'
 import { useBackendStore } from '../stores/backend'
 
@@ -39,12 +39,18 @@ const configContent = ref<string | null>(null)
 const serviceError = ref('')
 const daeError = ref('')
 const configError = ref('')
+const now = ref(Date.now())
+let clockTimer: number | undefined
 
 const running = computed(() => service.value?.activeState === 'active')
 const suspended = computed(() => service.value?.suspended === true)
 const statusType = computed(() => suspended.value ? 'warning' : running.value ? 'success' : service.value?.activeState === 'failed' ? 'error' : 'warning')
 const statusLabel = computed(() => suspended.value ? '已暂停' : running.value ? '运行中' : service.value?.activeState === 'failed' ? '运行失败' : '未运行')
 const supportedCommands = computed(() => Object.entries(dae.value?.commands || {}).filter(([, enabled]) => enabled).map(([name]) => name))
+const uptime = computed(() => running.value
+  ? formatElapsedSince(service.value?.startedAt || service.value?.activeSince, now.value)
+  : '—')
+const startsOnBoot = computed(() => service.value?.unitFileState === 'enabled')
 
 const orchestration = computed(() => {
   const text = configContent.value
@@ -116,6 +122,11 @@ const backend = useBackendStore()
 onMounted(() => {
   void backend.ensure()
   void refresh()
+  clockTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
+})
+
+onBeforeUnmount(() => {
+  if (clockTimer !== undefined) window.clearInterval(clockTimer)
 })
 </script>
 
@@ -141,7 +152,7 @@ onMounted(() => {
       </div>
     </NAlert>
 
-    <NGrid responsive="screen" cols="1 s:2 l:4" :x-gap="14" :y-gap="14">
+    <NGrid responsive="screen" cols="1 s:3" :x-gap="14" :y-gap="14">
       <NGridItem>
         <NCard class="metric-card" size="small">
           <NText depth="3">服务状态</NText>
@@ -154,32 +165,16 @@ onMounted(() => {
         <NCard class="metric-card" size="small">
           <NText depth="3">内存占用</NText>
           <NSkeleton v-if="loading" text style="width: 65%" />
-          <strong v-else class="metric-value">{{ formatBytes(service?.memoryBytes) }}</strong>
+          <strong v-else class="metric-value">{{ formatBytes(service?.memoryBytes, 1) }}</strong>
           <small>{{ service?.tasks ?? '—' }} 个任务</small>
         </NCard>
       </NGridItem>
       <NGridItem>
         <NCard class="metric-card" size="small">
-          <NText depth="3">累计 CPU</NText>
+          <NText depth="3">本次运行时长</NText>
           <NSkeleton v-if="loading" text style="width: 65%" />
-          <strong v-else class="metric-value">{{ formatDurationNanoseconds(service?.cpuUsageNanoseconds) }}</strong>
+          <strong v-else class="metric-value">{{ uptime }}</strong>
           <small>主进程 PID {{ service?.mainPid || '—' }}</small>
-        </NCard>
-      </NGridItem>
-      <!-- procd 不暴露重启计数器与退出状态，这一格在那边曾经常年是两个破折号。
-           它拿得到的是主进程的存活时长，按后端各显各的，而不是留一格空白。 -->
-      <NGridItem>
-        <NCard v-if="backend.isProcd" class="metric-card" size="small">
-          <NText depth="3">运行时长</NText>
-          <NSkeleton v-if="loading" text style="width: 55%" />
-          <strong v-else class="metric-value">{{ formatUptime(service?.uptimeSeconds) }}</strong>
-          <small>{{ service?.unitFileState === 'enabled' ? '已设为开机自启' : '未设为开机自启' }}</small>
-        </NCard>
-        <NCard v-else class="metric-card" size="small">
-          <NText depth="3">重启次数</NText>
-          <NSkeleton v-if="loading" text style="width: 40%" />
-          <strong v-else class="metric-value">{{ service?.restarts ?? '—' }}</strong>
-          <small>退出状态 {{ service?.execMainStatus ?? '—' }}</small>
         </NCard>
       </NGridItem>
     </NGrid>
@@ -187,7 +182,14 @@ onMounted(() => {
     <NGrid class="equal-height-grid" responsive="screen" cols="1 l:2 xl:3" :x-gap="16" :y-gap="16">
       <NGridItem>
         <NCard title="服务控制" class="panel-card">
-          <template #header-extra><NTag size="small" :type="statusType">{{ service?.name || 'dae' }}</NTag></template>
+          <template #header-extra>
+            <NSpace size="small" align="center">
+              <NTag size="small" :type="startsOnBoot ? 'success' : 'default'">
+                {{ startsOnBoot ? '随系统启动' : '不随系统启动' }}
+              </NTag>
+              <NTag size="small" :type="statusType">{{ service?.name || 'dae' }}</NTag>
+            </NSpace>
+          </template>
           <NSpace wrap>
             <NButton type="success" :disabled="actionLoading !== '' || running" :loading="actionLoading === 'start'" @click="runAction('start')">
               <template #icon><NIcon><PlayOutline /></NIcon></template>启动

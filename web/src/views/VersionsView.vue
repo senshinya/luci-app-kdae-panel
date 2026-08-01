@@ -480,7 +480,7 @@ onBeforeUnmount(() => {
         <h2>dae 版本</h2>
         <NText depth="3">在官方发布与 kdae 构建之间切换，安装前校验、失败自动回滚</NText>
       </div>
-      <NSpace>
+      <NSpace class="version-toolbar-actions">
         <NButton
           secondary
           :loading="listing || loading || refreshing"

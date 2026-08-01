@@ -20,7 +20,6 @@ ExecMainStatus=0
 ActiveEnterTimestamp=Fri 2026-07-24 21:18:06 UTC
 ExecMainStartTimestamp=Fri 2026-07-24 21:18:05 UTC
 MemoryCurrent=87345152
-CPUUsageNSec=1954000000000
 TasksCurrent=17
 NRestarts=0
 FragmentPath=/etc/systemd/system/dae.service

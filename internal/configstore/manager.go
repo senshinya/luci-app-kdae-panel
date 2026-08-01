@@ -29,6 +29,9 @@ var (
 	ErrNotFound = errors.New("配置不存在")
 	ErrConflict = errors.New("配置已经被其他操作修改")
 	ErrInvalid  = errors.New("配置存档信息无效")
+	// ErrReloadDeferred 表示配置已安全落盘，但当前没有运行中的 dae 可以重载。
+	// 它不是事务失败：下一次启动会直接读取新配置，因此不能把磁盘内容回滚。
+	ErrReloadDeferred = errors.New("dae 当前未运行，配置将在下次启动时生效")
 )
 
 type Controller interface {
@@ -59,6 +62,7 @@ type SaveResult struct {
 	Hash       string    `json:"hash"`
 	BackupID   string    `json:"backupId,omitempty"`
 	Applied    bool      `json:"applied"`
+	Deferred   bool      `json:"deferred,omitempty"`
 	SavedAt    time.Time `json:"savedAt"`
 	RolledBack bool      `json:"rolledBack"`
 }
@@ -255,6 +259,10 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 		return result, nil
 	}
 	if err := m.control.Reload(ctx); err != nil {
+		if errors.Is(err, ErrReloadDeferred) {
+			result.Deferred = true
+			return result, nil
+		}
 		rollbackErr := m.rollback(oldContent, mode, existed)
 		result.RolledBack = rollbackErr == nil
 		return result, &ApplyError{Cause: err, RolledBack: result.RolledBack, RollbackErr: rollbackErr}

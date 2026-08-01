@@ -122,3 +122,35 @@ export function parseNodeLink(link: string): NodeLinkInfo | null {
   if (protocol === 'trojan' || protocol === 'https') info.port = info.port ?? 443
   return info
 }
+
+/**
+ * 为导入节点生成 dae 配置键。配置键会成为 dae 运行时的节点名称，分组据此精确引用，
+ * 不再依赖不同版本、不同协议解析器对分享链接备注的命名结果。
+ */
+export function allocateNodeTags(links: string[], existing: Iterable<string> = []): string[] {
+  const used = new Set([...existing].map((value) => value.trim()).filter(Boolean))
+  return links.map((link) => {
+    const info = parseNodeLink(link)
+    const displayName = normalizeTag(info?.name || '')
+    const endpoint = normalizeTag([info?.protocol, info?.host].filter(Boolean).join('_'))
+    const base = displayName || endpoint || 'node'
+    let candidate = base
+    for (let suffix = 2; used.has(candidate); suffix += 1) candidate = `${base}_${suffix}`
+    used.add(candidate)
+    return candidate
+  })
+}
+
+function normalizeTag(value: string): string {
+  let normalized = value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9_.-]+/g, '_')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .replace(/_+/g, '_')
+    .slice(0, 64)
+    .replace(/[-._]+$/g, '')
+  if (normalized === '') return ''
+  if (!/^[A-Za-z_]/.test(normalized)) normalized = `node_${normalized}`
+  return normalized
+}

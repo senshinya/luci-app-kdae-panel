@@ -18,6 +18,11 @@ const firstInstall = computed(() => props.provision?.possible === true)
 // 首次安装的说明必须与后端实际会做的事一致：procd 下启动脚本随软件包装好，
 // 面板从不写它。加载由 VersionsView 触发，这里只读结果。
 const backend = useBackendStore()
+
+const installedPlatform = computed(() => {
+  if (props.status?.drifted) return '无法确认（文件已被外部替换）'
+  return props.status?.managed?.platform || '未知（旧记录或外部安装）'
+})
 </script>
 
 <template>
@@ -88,7 +93,15 @@ const backend = useBackendStore()
       </div>
       <div>
         <dt>CPU 架构</dt>
-        <dd class="mono">{{ status?.platform || '—' }}</dd>
+        <dd class="mono">{{ status?.architecture || '—' }}</dd>
+      </div>
+      <div>
+        <dt>首选构建</dt>
+        <dd class="mono">{{ status?.preferredPlatform || status?.platform || '—' }}</dd>
+      </div>
+      <div>
+        <dt>当前构建</dt>
+        <dd class="mono">{{ installedPlatform }}</dd>
       </div>
     </dl>
     <NAlert v-if="!busy && status?.drifted" type="warning" :bordered="false">

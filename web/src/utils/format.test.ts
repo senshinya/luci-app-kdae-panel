@@ -1,19 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { formatUptime } from './format'
+import { formatBytes, formatElapsedSince } from './format'
 
-describe('formatUptime', () => {
-  it('缺失或非法输入显示破折号而不是 0 秒', () => {
-    // procd 读不到 /proc 时报 0，systemd 后端则根本不填这个字段。
-    // 两者都必须显示"不知道"，"0 秒"会被读成"刚刚重启过"。
-    expect(formatUptime(undefined)).toBe('—')
-    expect(formatUptime(Number.NaN)).toBe('—')
-    expect(formatUptime(-1)).toBe('—')
+describe('formatBytes', () => {
+  it('允许运行指标保留固定精度', () => {
+    expect(formatBytes(150.74 * 1024 * 1024)).toBe('151 MiB')
+    expect(formatBytes(150.74 * 1024 * 1024, 1)).toBe('150.7 MiB')
+  })
+})
+
+describe('formatElapsedSince', () => {
+  it('按本次启动时间计算持续时长', () => {
+    const startedAt = '2026-08-01T10:00:00Z'
+    expect(formatElapsedSince(startedAt, Date.parse('2026-08-01T10:00:09Z'))).toBe('9 秒')
+    expect(formatElapsedSince(startedAt, Date.parse('2026-08-01T11:02:03Z'))).toBe('1 小时 2 分')
+    expect(formatElapsedSince(startedAt, Date.parse('2026-08-03T13:00:00Z'))).toBe('2 天 3 小时')
   })
 
-  it('按量级选单位，天数不会被折算成上千小时', () => {
-    expect(formatUptime(42)).toBe('42 秒')
-    expect(formatUptime(90)).toBe('1 分')
-    expect(formatUptime(3600 + 120)).toBe('1 小时 2 分')
-    expect(formatUptime(86400 * 3 + 3600 * 5)).toBe('3 天 5 小时')
+  it('拒绝缺失、非法或未来的启动时间', () => {
+    const now = Date.parse('2026-08-01T10:00:00Z')
+    expect(formatElapsedSince(undefined, now)).toBe('—')
+    expect(formatElapsedSince('不是时间', now)).toBe('—')
+    expect(formatElapsedSince('2026-08-01T10:00:01Z', now)).toBe('—')
   })
 })

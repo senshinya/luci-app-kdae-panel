@@ -1169,6 +1169,16 @@ pre,
   margin-top: 14px;
 }
 
+.node-import-groups {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+}
+
+.node-import-groups .n-select {
+  margin-top: 0;
+}
+
 .routing-rule-form,
 .group-filter-editor,
 .routing-simple-settings {
@@ -1620,6 +1630,18 @@ pre,
   .page-toolbar > .n-space > span,
   .page-toolbar > .n-space > span > .n-button {
     width: 100%;
+  }
+
+  .page-toolbar > .version-toolbar-actions {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 6px !important;
+  }
+
+  .version-toolbar-actions .n-button {
+    min-width: 0;
+    padding-inline: 6px;
+    font-size: 12px;
+    white-space: nowrap;
   }
 
   .page-toolbar .n-button,

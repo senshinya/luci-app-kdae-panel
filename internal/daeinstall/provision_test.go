@@ -28,10 +28,11 @@ WantedBy=multi-user.target
 
 func testBundle() upstream.Bundle {
 	return upstream.Bundle{
-		Binary:  elf("v1"),
-		Unit:    []byte(testUnit),
-		GeoIP:   []byte("geoip-data"),
-		GeoSite: []byte("geosite-data"),
+		Platform: "x86_64_v2_sse",
+		Binary:   elf("v1"),
+		Unit:     []byte(testUnit),
+		GeoIP:    []byte("geoip-data"),
+		GeoSite:  []byte("geosite-data"),
 	}
 }
 
@@ -372,6 +373,10 @@ func TestFirstInstallLandsEveryArtifact(t *testing.T) {
 	// 必须 daemon-reload，否则 systemd 看不到新单元；且不应启动服务
 	if len(service.actions) != 1 || service.actions[0] != host.ActionDaemonReload {
 		t.Fatalf("应当只执行 daemon-reload，实际 %v", service.actions)
+	}
+	state, err := installer.readState()
+	if err != nil || state == nil || state.Platform != "x86_64_v2_sse" {
+		t.Fatalf("首次安装没有记录实际资产变体: state=%+v err=%v", state, err)
 	}
 	_ = status
 }

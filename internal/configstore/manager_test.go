@@ -163,6 +163,26 @@ func TestReloadFailureRollsBackDiskConfig(t *testing.T) {
 	}
 }
 
+func TestInactiveServiceDefersReloadWithoutRollingBack(t *testing.T) {
+	controller := &fakeController{reloadErr: ErrReloadDeferred}
+	manager, entryPath := newTestManager(t, "current", controller)
+	document, err := manager.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Save(context.Background(), "next start", document.Hash, true)
+	if err != nil {
+		t.Fatalf("停止状态保存不应失败: %v", err)
+	}
+	if !result.Applied || !result.Deferred || result.RolledBack {
+		t.Fatalf("延后生效状态异常: %+v", result)
+	}
+	content, err := os.ReadFile(entryPath)
+	if err != nil || string(content) != "next start" {
+		t.Fatalf("延后生效不应回滚磁盘配置: content=%q err=%v", content, err)
+	}
+}
+
 func TestListAndRestoreBackup(t *testing.T) {
 	controller := &fakeController{}
 	manager, _ := newTestManager(t, "version one", controller)

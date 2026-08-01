@@ -11,8 +11,8 @@ import (
 
 func TestOfficialResolveReusesReleaseFromList(t *testing.T) {
 	now := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
-	platform := Platform{Name: "x86_64"}
-	asset := AssetName(platform.Name)
+	platform := Platform{Name: "x86_64_v3_avx2", Fallbacks: []string{"x86_64"}}
+	asset := AssetName("x86_64")
 	apiRequests := 0
 	client := testHTTPClient(roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch {
@@ -40,15 +40,15 @@ func TestOfficialResolveReusesReleaseFromList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Filename != asset || apiRequests != 1 {
+	if resolved.Filename != asset || resolved.Platform != "x86_64" || apiRequests != 1 {
 		t.Fatalf("Resolve = %+v，API 请求数 = %d", resolved, apiRequests)
 	}
 }
 
 func TestKdaeResolveReusesRunVerificationFromList(t *testing.T) {
 	now := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
-	platform := Platform{Name: "x86_64"}
-	asset := AssetName(platform.Name)
+	platform := Platform{Name: "x86_64_v3_avx2", Fallbacks: []string{"x86_64"}}
+	asset := AssetName("x86_64")
 	verifyRequests := 0
 	client := testHTTPClient(roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		path := request.URL.Path
@@ -77,7 +77,7 @@ func TestKdaeResolveReusesRunVerificationFromList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Filename != asset || verifyRequests != 0 {
+	if resolved.Filename != asset || resolved.Platform != "x86_64" || verifyRequests != 0 {
 		t.Fatalf("Resolve = %+v，重复核验请求数 = %d", resolved, verifyRequests)
 	}
 }

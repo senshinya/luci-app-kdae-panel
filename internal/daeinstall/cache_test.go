@@ -11,7 +11,7 @@ import (
 )
 
 func TestAcquireReusesVerifiedLocalVersion(t *testing.T) {
-	fetcher := &fakeFetcher{binary: elf("v2")}
+	fetcher := &fakeFetcher{binary: elf("v2"), assetPlatform: "x86_64"}
 	installer, _ := newTestInstaller(t, fetcher, &fakeService{})
 
 	first, cached, err := installer.Acquire(
@@ -28,8 +28,33 @@ func TestAcquireReusesVerifiedLocalVersion(t *testing.T) {
 	if string(second.Binary) != string(first.Binary) || fetcher.fetches != 1 {
 		t.Fatalf("没有复用首次下载: binary %q, fetches %d", second.Binary, fetcher.fetches)
 	}
+	if first.Platform != "x86_64" || second.Platform != "x86_64" {
+		t.Fatalf("下载与缓存命中都应保留实际资产变体: first=%q second=%q", first.Platform, second.Platform)
+	}
 	if fetcher.binaryFetches != 1 || fetcher.bundleFetches != 0 {
 		t.Fatalf("已有 dae 时应只取二进制: binary=%d bundle=%d", fetcher.binaryFetches, fetcher.bundleFetches)
+	}
+}
+
+func TestAcquireOldCacheKeepsUnknownAssetPlatform(t *testing.T) {
+	installer, _ := newTestInstaller(t, &fakeFetcher{binary: elf("network")}, &fakeService{})
+	platform, err := upstream.DetectPlatform()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 省略 assetPlatform 会生成与旧版本相同的元数据；读取时不能把缓存键使用的
+	// 主机首选平台冒充成当初实际下载的资产变体。
+	if err := installer.cache.store(
+		upstream.SourceOfficial, "v1.0.0", "v1.0.0", platform.Name, "", elf("old")); err != nil {
+		t.Fatal(err)
+	}
+	bundle, cached, err := installer.Acquire(
+		context.Background(), upstream.SourceOfficial, "v1.0.0", "v1.0.0", false)
+	if err != nil || !cached {
+		t.Fatalf("读取旧缓存 = cached %t, err %v", cached, err)
+	}
+	if bundle.Platform != "" {
+		t.Fatalf("旧缓存的实际资产变体应保持未知，得到 %q", bundle.Platform)
 	}
 }
 
@@ -173,12 +198,13 @@ func TestSwitchCachesManagedVersionBeingReplaced(t *testing.T) {
 	installer, binaryPath := newTestInstaller(t, fetcher, service)
 	seed(t, binaryPath, "v1")
 	if err := installer.writeState(&State{
-		Source: upstream.SourceOfficial, Ref: "v1.0.0", Label: "v1.0.0", SHA256: digestBytes(elf("v1")),
+		Source: upstream.SourceOfficial, Ref: "v1.0.0", Label: "v1.0.0",
+		Platform: "x86_64_v2_sse", SHA256: digestBytes(elf("v1")),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := installer.Install(
-		context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2.0.0"); err != nil {
+		context.Background(), elf("v2"), upstream.SourceOfficial, "v2.0.0", "v2.0.0", ""); err != nil {
 		t.Fatal(err)
 	}
 	platform, err := upstream.DetectPlatform()
@@ -188,6 +214,9 @@ func TestSwitchCachesManagedVersionBeingReplaced(t *testing.T) {
 	content, metadata, err := installer.cache.load(upstream.SourceOfficial, "v1.0.0", platform.Name)
 	if err != nil || string(content) != string(elf("v1")) || metadata.Ref != "v1.0.0" {
 		t.Fatalf("被替换版本未进入缓存: metadata %+v, content %q, err %v", metadata, content, err)
+	}
+	if metadata.AssetPlatform != "x86_64_v2_sse" {
+		t.Fatalf("被替换版本的缓存丢失实际资产变体: %+v", metadata)
 	}
 }
 

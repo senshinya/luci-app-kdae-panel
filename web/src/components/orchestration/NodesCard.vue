@@ -8,6 +8,7 @@ import {
   NIcon,
   NInput,
   NModal,
+  NSelect,
   NSpace,
   NTag,
   NText,
@@ -19,8 +20,9 @@ import { CreateOutline, DownloadOutline, FlashOutline, PricetagOutline, TrashOut
 import { postJSON } from '../../api/client'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import type { LatencyResult, LatencyTarget } from '../../types/api'
-import { appendToSection, isQuotable, isValidTag, quote, readSection, removeLine, type Entry } from '../../utils/daeconf'
-import { parseNodeLink, type NodeLinkInfo } from '../../utils/nodelink'
+import { appendToSection, isQuotable, isValidTag, parseGroups, quote, readSection, removeLine, replaceLine, type Entry } from '../../utils/daeconf'
+import { includeNodesInGroups } from '../../utils/group'
+import { allocateNodeTags, parseNodeLink, type NodeLinkInfo } from '../../utils/nodelink'
 import { entryActions, useEntryRewrite, type EntryTarget } from './entry'
 import SectionEditorModal from './SectionEditorModal.vue'
 
@@ -38,10 +40,48 @@ const sourceVisible = ref(false)
 const nodes = computed<NodeRow[]>(() =>
   readSection(content.value, 'node').entries.map((entry) => ({ entry, info: parseNodeLink(entry.value) })),
 )
+const anonymousNodes = computed(() => nodes.value.filter((row) =>
+  !row.entry.tag && row.entry.editable && isQuotable(row.entry.value),
+))
+
+function labelAnonymousNodes() {
+  const targets = anonymousNodes.value
+  if (targets.length === 0) return
+  const targetStarts = new Set(targets.map((row) => row.entry.lineStart))
+  const usedNames = nodes.value.flatMap((row) => {
+    if (row.entry.tag) return [row.entry.tag]
+    if (targetStarts.has(row.entry.lineStart)) return []
+    const runtimeName = row.info?.name.trim()
+    return runtimeName ? [runtimeName] : []
+  })
+  const tags = allocateNodeTags(targets.map((row) => row.entry.value), usedNames)
+  let next = content.value
+  for (let index = targets.length - 1; index >= 0; index -= 1) {
+    const entry = targets[index].entry
+    next = replaceLine(next, entry.lineStart, entry.lineEnd, `${tags[index]}: ${quote(entry.value)}`)
+  }
+  content.value = next
+  message.success(`已为 ${targets.length} 个匿名节点补全标签；请在分组中重新选择这些标签后保存`)
+}
 
 // ---- 导入 ----
 const importVisible = ref(false)
 const importText = ref('')
+const importGroups = ref<string[]>([])
+const importGroupOptions = computed(() => parseGroups(content.value).map((group) => {
+  const locked = group.filters.some((filter) => !filter.editable)
+  return {
+    label: locked ? `${group.name}（含跨行条件，需原文编辑）` : group.name,
+    value: group.name,
+    disabled: locked,
+  }
+}))
+
+function openImporter() {
+  const names = importGroupOptions.value.filter((option) => !option.disabled).map((option) => option.value)
+  importGroups.value = names.includes('proxy') ? ['proxy'] : names.length === 1 ? names : []
+  importVisible.value = true
+}
 
 function importNodes() {
   const links = importText.value.split('\n').map((line) => line.trim()).filter((line) => line !== '')
@@ -59,10 +99,16 @@ function importNodes() {
     message.error('链接同时包含单引号和双引号，dae 配置无法无损表示，请先修正链接')
     return
   }
-  content.value = appendToSection(content.value, 'node', links.map((link) => quote(link)))
+  const existingNames = readSection(content.value, 'node').entries.flatMap((entry) => {
+    const runtimeName = parseNodeLink(entry.value)?.name.trim()
+    return [entry.tag, runtimeName].filter((value): value is string => Boolean(value))
+  })
+  const tags = allocateNodeTags(links, existingNames)
+  const withNodes = appendToSection(content.value, 'node', links.map((link, index) => `${tags[index]}: ${quote(link)}`))
+  content.value = includeNodesInGroups(withNodes, importGroups.value, tags)
   importVisible.value = false
   importText.value = ''
-  message.success(`已加入 ${links.length} 个节点，保存并重载后生效`)
+  message.success(`已加入 ${links.length} 个带稳定标签的节点，保存并重载后生效`)
 }
 
 function removeNode(row: NodeRow) {
@@ -239,7 +285,10 @@ const nodeColumns: DataTableColumns<NodeRow> = [
         <NButton size="small" secondary :loading="probing" :disabled="nodes.length === 0" @click="probeLatency">
           <template #icon><NIcon><FlashOutline /></NIcon></template>测试直连延迟
         </NButton>
-        <NButton size="small" type="primary" @click="importVisible = true">
+        <NButton v-if="anonymousNodes.length" size="small" secondary @click="labelAnonymousNodes">
+          <template #icon><NIcon><PricetagOutline /></NIcon></template>补全标签
+        </NButton>
+        <NButton size="small" type="primary" @click="openImporter">
           <template #icon><NIcon><DownloadOutline /></NIcon></template>导入节点
         </NButton>
         <NButton size="small" quaternary @click="sourceVisible = true">
@@ -296,7 +345,7 @@ const nodeColumns: DataTableColumns<NodeRow> = [
   <NModal v-model:show="importVisible" preset="card" title="导入节点" class="orchestrate-modal">
     <NText depth="3">
       每行一个分享链接，支持 vmess / vless / ss / ssr / trojan / tuic / juicity / hysteria2 / anytls / socks5 / http(s)。
-      节点名称取自链接自身，导入后可单独打标签。
+      面板会生成唯一标签，确保分组使用的名称与 dae 运行时一致。
     </NText>
     <NInput
       v-model:value="importText"
@@ -306,6 +355,18 @@ const nodeColumns: DataTableColumns<NodeRow> = [
       placeholder="vmess://…&#10;vless://…&#10;hysteria2://…"
       spellcheck="false"
     />
+    <label v-if="importGroupOptions.length" class="node-import-groups">
+      <span>同时加入分组</span>
+      <NSelect
+        v-model:value="importGroups"
+        :options="importGroupOptions"
+        multiple
+        clearable
+        placeholder="可选择一个或多个分组"
+        data-testid="import-node-groups"
+      />
+      <NText depth="3">无过滤条件的分组已经包含全部节点，不会重复写入过滤规则。</NText>
+    </label>
     <template #footer>
       <NSpace justify="end">
         <NButton @click="importVisible = false">取消</NButton>

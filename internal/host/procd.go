@@ -20,13 +20,10 @@ var initDirectory = "/etc/init.d"
 // procRoot 是 /proc 的挂载点，测试指向临时目录。
 var procRoot = "/proc"
 
-// clockTicksPerSecond 是 /proc/<pid>/stat 里 utime/stime/starttime 的单位
-// USER_HZ。Linux 上恒为 100，即每一跳 10ms；写死比为几个展示用的数字去引
-// cgo 调 sysconf 划算。
-const (
-	clockTicksPerSecond  = 100
-	clockTickNanoseconds = 1_000_000_000 / clockTicksPerSecond
-)
+// clockTicksPerSecond 是 /proc/<pid>/stat 里 starttime 的单位 USER_HZ。
+// Linux 上恒为 100，即每一跳 10ms；写死比为一个展示用的数字去引 cgo 调
+// sysconf 划算。
+const clockTicksPerSecond = 100
 
 // procdManager 通过 procd 的 init 脚本与 ubus 管理服务，适用于 OpenWrt/ImmortalWrt。
 type procdManager struct {
@@ -121,8 +118,7 @@ func (m *procdManager) Status(ctx context.Context) (Status, error) {
 	if status.MainPID > 0 {
 		status.MemoryBytes = readMemoryBytes(status.MainPID)
 		status.Tasks = readThreadCount(status.MainPID)
-		status.CPUUsageNanoseconds = readCPUNanoseconds(status.MainPID)
-		status.UptimeSeconds = readUptimeSeconds(status.MainPID)
+		status.StartedAt = readStartedAt(status.MainPID)
 		status.Environment = readProcessEnvironment(status.MainPID)
 	}
 	return status, nil
@@ -225,51 +221,45 @@ func procStatFields(pid int) []string {
 	return strings.Fields(string(content)[end+1:])
 }
 
-func readCPUNanoseconds(pid int) uint64 {
-	fields := procStatFields(pid)
-	// utime 是第 14 个字段，stime 是第 15 个。
-	if len(fields) < 13 {
-		return 0
+// readStartedAt 算出主进程是什么时候起来的，输出 RFC 3339——与 systemd 后端
+// 归一后的 StartedAt 同一种格式，前端因此只需要一段解析代码。
+//
+// 先算"已经跑了多久"再从当前时刻往回减，而不是把 stat 里的 starttime 直接换算
+// 成绝对时刻：starttime 以开机为原点，换算还要再引一次 /proc/stat 的 btime，而
+// 路由器开机后常会被 NTP 校时一次，btime 与那次校时之间的关系并不稳定，算出来的
+// 时刻可能落在未来或凭空差出几年。starttime 与 /proc/uptime 同以开机为原点，
+// 相减得到的时长与时钟怎么跳完全无关，再由当前时刻回推才只差一次校时的量。
+func readStartedAt(pid int) string {
+	uptime, ok := readProcessUptimeSeconds(pid)
+	if !ok {
+		return ""
 	}
-	utime, err := strconv.ParseUint(fields[11], 10, 64)
-	if err != nil {
-		return 0
-	}
-	stime, err := strconv.ParseUint(fields[12], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return (utime + stime) * clockTickNanoseconds
+	return timeNow().Add(-time.Duration(uptime) * time.Second).Format(time.RFC3339)
 }
 
-// readUptimeSeconds 算出主进程已经跑了多久。
-//
-// 用"系统已开机秒数 − 进程启动时刻"，而不是"墙上时钟 − 进程启动时刻"：
-// stat 里的 starttime 以开机为原点，换算成绝对时刻还要再引一次 /proc/stat
-// 的 btime，而路由器开机后常会被 NTP 校时一次，btime 与那次校时之间的关系
-// 并不稳定，算出来的运行时长可能是负的或凭空多出几年。两个量同以开机为原点，
-// 相减就与时钟怎么跳完全无关。
-func readUptimeSeconds(pid int) uint64 {
+// readProcessUptimeSeconds 报主进程已经跑了多久；读不到时第二个返回值为 false，
+// 调用方据此让字段留空（界面显示"—"），而不是把 0 当成"刚刚起来"。
+func readProcessUptimeSeconds(pid int) (uint64, bool) {
 	fields := procStatFields(pid)
 	// starttime 是第 22 个字段。
 	if len(fields) < 20 {
-		return 0
+		return 0, false
 	}
 	startTicks, err := strconv.ParseUint(fields[19], 10, 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	systemUptime, ok := readSystemUptimeSeconds()
 	if !ok {
-		return 0
+		return 0, false
 	}
 	startedAt := startTicks / clockTicksPerSecond
-	// 进程比系统还"老"只可能是读到了不一致的快照，此时报 0（界面显示"—"）
-	// 比报一个下溢成天文数字的 uint64 强。
+	// 进程比系统还"老"只可能是读到了不一致的快照，此时报"不知道"比报一个
+	// 下溢成天文数字的 uint64 强。
 	if startedAt > systemUptime {
-		return 0
+		return 0, false
 	}
-	return systemUptime - startedAt
+	return systemUptime - startedAt, true
 }
 
 // readSystemUptimeSeconds 读 /proc/uptime 的第一个字段（开机至今的秒数）。
@@ -317,6 +307,19 @@ const PanelInitScript = "/etc/init.d/kdae-panel"
 func (m *procdManager) Action(ctx context.Context, action Action) error {
 	switch action {
 	case ActionStart, ActionStop, ActionRestart, ActionEnable, ActionDisable:
+	case ActionEnableNow:
+		// rc.common 没有 systemd 那个 --now，enable 只写 /etc/rc.d 的符号链接，
+		// 不动当前进程。两步的先后与 `systemctl enable --now` 对齐：先落开机
+		// 状态再改运行状态，任一步失败都不掩盖，让两个后端的语义保持一致。
+		if err := m.subAction(ctx, ActionEnable); err != nil {
+			return err
+		}
+		return m.subAction(ctx, ActionStart)
+	case ActionDisableNow:
+		if err := m.subAction(ctx, ActionDisable); err != nil {
+			return err
+		}
+		return m.subAction(ctx, ActionStop)
 	case ActionDaemonReload:
 		// procd 每次执行 init 脚本都重新读取服务定义，没有需要"让它重新认识
 		// 单元文件"这一步。静默成功而不是报错：首次安装与卸载事务都会调用它。
@@ -324,6 +327,11 @@ func (m *procdManager) Action(ctx context.Context, action Action) error {
 	default:
 		return fmt.Errorf("不支持的服务动作 %q", action)
 	}
+	return m.subAction(ctx, action)
+}
+
+// subAction 执行一条 init 脚本子命令，动作名原样透传。
+func (m *procdManager) subAction(ctx context.Context, action Action) error {
 	result, err := m.runFor(ctx, actionTimeout, m.initScript(), string(action))
 	if err != nil {
 		return fmt.Errorf("执行 %s %s: %s", m.initScript(), action, command.Describe(err, result))
@@ -397,9 +405,9 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	entry := LogEntry{Unit: serviceName, Level: "info", Priority: 6}
 	prefix := strings.TrimSpace(line[:index])
 	entry.Timestamp = parseLogreadTimestamp(prefix)
-	if level, ok := logreadLevel(prefix); ok {
+	if priority, level, ok := logreadLevel(prefix); ok {
 		entry.Level = level
-		entry.Priority = levelPriority(level)
+		entry.Priority = priority
 	}
 	pid, message, found := strings.Cut(line[index+len(tag):], "]")
 	if !found {
@@ -409,9 +417,9 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	entry.Message = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message), ":"))
 	// dae 自己输出 logfmt。把 level/msg 提到结构化字段上，日志页的级别筛选
 	// 才对 dae 的日志同样有效，而不是只对 procd 的封装层有效。
-	if level, text, ok := parseLogfmt(entry.Message); ok {
+	if priority, level, text, ok := parseLogfmt(entry.Message); ok {
 		entry.Level = level
-		entry.Priority = levelPriority(level)
+		entry.Priority = priority
 		entry.Message = text
 	}
 	return entry, true
@@ -502,23 +510,23 @@ func dateInYear(year int, parsed time.Time) time.Time {
 }
 
 // logreadLevel 从前缀里找 "facility.level" 形式的 token 并取出 level。
-func logreadLevel(prefix string) (string, bool) {
+func logreadLevel(prefix string) (int, string, bool) {
 	fields := strings.Fields(prefix)
 	for index := len(fields) - 1; index >= 0; index-- {
 		_, level, found := strings.Cut(fields[index], ".")
 		if !found {
 			continue
 		}
-		if levelPriority(level) >= 0 {
-			return level, true
+		if priority, canonical, ok := canonicalLevel(level); ok {
+			return priority, canonical, true
 		}
 	}
-	return "", false
+	return 0, "", false
 }
 
-// parseLogfmt 从 dae 的 `level=… msg="…"` 里取出级别与正文。
-// 两者缺一就当作不是 logfmt，保留原始整行。
-func parseLogfmt(message string) (string, string, bool) {
+// parseLogfmt 从 dae 的 `level=… msg="…"` 里取出级别与正文，级别已归一。
+// 两者缺一、或级别名不认识，就当作不是 logfmt，保留原始整行。
+func parseLogfmt(message string) (int, string, string, bool) {
 	var level, text string
 	var foundLevel, foundText bool
 	rest := strings.TrimSpace(message)
@@ -550,37 +558,13 @@ func parseLogfmt(message string) (string, string, bool) {
 		}
 	}
 	if !foundLevel || !foundText {
-		return "", "", false
+		return 0, "", "", false
 	}
-	if levelPriority(level) < 0 {
-		return "", "", false
+	priority, canonical, ok := canonicalLevel(level)
+	if !ok {
+		return 0, "", "", false
 	}
-	return level, text, true
-}
-
-// levelPriority 把日志级别名映射到 syslog 优先级；未知级别返回 -1。
-// 同时收 syslog 的写法（err、crit）与 dae 的写法（error、fatal）。
-func levelPriority(level string) int {
-	switch level {
-	case "emerg":
-		return 0
-	case "alert":
-		return 1
-	case "crit", "critical", "fatal":
-		return 2
-	case "err", "error":
-		return 3
-	case "warning", "warn":
-		return 4
-	case "notice":
-		return 5
-	case "info":
-		return 6
-	case "debug":
-		return 7
-	default:
-		return -1
-	}
+	return priority, canonical, text, true
 }
 
 var _ Manager = (*procdManager)(nil)

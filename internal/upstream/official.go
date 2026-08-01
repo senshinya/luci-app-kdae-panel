@@ -116,6 +116,7 @@ func (p *OfficialProvider) Resolve(ctx context.Context, ref string, platform Pla
 			continue
 		}
 		return Asset{
+			Platform: candidate,
 			URL:      p.downloadURL(ref, wanted),
 			Filename: wanted,
 			SHA256:   digest,

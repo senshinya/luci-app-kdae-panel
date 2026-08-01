@@ -1,4 +1,4 @@
-export function formatBytes(value?: number): string {
+export function formatBytes(value?: number, precision?: number): string {
   if (value === undefined || !Number.isFinite(value)) return '—'
   if (value < 1024) return `${value} B`
   const units = ['KiB', 'MiB', 'GiB', 'TiB']
@@ -8,34 +8,22 @@ export function formatBytes(value?: number): string {
     current /= 1024
     unit = units[index]
   }
-  return `${current >= 100 ? current.toFixed(0) : current.toFixed(1)} ${unit}`
+  return `${current.toFixed(precision ?? (current >= 100 ? 0 : 1))} ${unit}`
 }
 
-export function formatDurationNanoseconds(value?: number): string {
-  if (value === undefined || !Number.isFinite(value)) return '—'
-  const seconds = Math.floor(value / 1_000_000_000)
+export function formatElapsedSince(value?: string, now = Date.now()): string {
+  if (!value || !Number.isFinite(now)) return '—'
+  const startedAt = Date.parse(value)
+  if (!Number.isFinite(startedAt) || startedAt > now) return '—'
+  const seconds = Math.floor((now - startedAt) / 1000)
+  const days = Math.floor(seconds / 86400)
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const remaining = seconds % 60
+  if (days > 0) return `${days} 天 ${Math.floor((seconds % 86400) / 3600)} 小时`
   if (hours > 0) return `${hours} 小时 ${minutes} 分`
   if (minutes > 0) return `${minutes} 分 ${remaining} 秒`
   return `${remaining} 秒`
-}
-
-// formatUptime 把"已运行秒数"渲染成人读的时长。
-//
-// 与 formatDurationNanoseconds 分开：那个渲染的是累计 CPU 时间，几小时就算多；
-// 运行时长动辄以天计，套用同一套单位会出现"8760 小时 0 分"这种没法一眼读的值。
-export function formatUptime(value?: number): string {
-  if (value === undefined || !Number.isFinite(value) || value < 0) return '—'
-  const seconds = Math.floor(value)
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  if (days > 0) return `${days} 天 ${hours} 小时`
-  if (hours > 0) return `${hours} 小时 ${minutes} 分`
-  if (minutes > 0) return `${minutes} 分`
-  return `${seconds} 秒`
 }
 
 export function formatDateTime(value?: string): string {
@@ -56,4 +44,3 @@ export function formatDateTime(value?: string): string {
 export function shortHash(value?: string): string {
   return value ? value.slice(0, 12) : '—'
 }
-

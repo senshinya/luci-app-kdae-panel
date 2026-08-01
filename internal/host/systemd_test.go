@@ -59,9 +59,9 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (comman
 }
 
 func TestStatus(t *testing.T) {
-	key := "systemctl show dae --no-page --property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStatus,ActiveEnterTimestamp,ExecMainStartTimestamp,MemoryCurrent,CPUUsageNSec,TasksCurrent,NRestarts,FragmentPath,ExecStart,Environment"
+	key := "systemctl show dae --no-page --property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStatus,ActiveEnterTimestamp,ExecMainStartTimestamp,MemoryCurrent,TasksCurrent,NRestarts,FragmentPath,ExecStart,Environment"
 	runner := &fakeRunner{results: map[string]command.Result{
-		key: {Stdout: "Id=dae.service\nDescription=dae Service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nMemoryCurrent=4096\nCPUUsageNSec=8000\nTasksCurrent=7\nNRestarts=2\nExecStart={ path=/usr/local/bin/dae ; argv[]=/usr/local/bin/dae run --disable-timestamp ; ignore_errors=no }\nEnvironment=DAE_LOCATION_ASSET=/opt/geo LANG=C\n"},
+		key: {Stdout: "Id=dae.service\nDescription=dae Service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nActiveEnterTimestamp=Sat 2026-08-01 10:20:00 UTC\nExecMainStartTimestamp=Sat 2026-08-01 10:20:01 UTC\nMemoryCurrent=4096\nTasksCurrent=7\nNRestarts=2\nExecStart={ path=/usr/local/bin/dae ; argv[]=/usr/local/bin/dae run --disable-timestamp ; ignore_errors=no }\nEnvironment=DAE_LOCATION_ASSET=/opt/geo LANG=C\n"},
 	}, errors: map[string]error{}}
 	manager, err := New(Options{
 		Backend:     BackendSystemd,
@@ -89,6 +89,9 @@ func TestStatus(t *testing.T) {
 	// DAE_LOCATION_ASSET 决定 dae 从哪里读 geo，漏了它会把更新写到不生效的地方
 	if status.Environment["DAE_LOCATION_ASSET"] != "/opt/geo" {
 		t.Fatalf("环境变量解析 = %+v", status.Environment)
+	}
+	if status.ActiveSince != "2026-08-01T10:20:00Z" || status.StartedAt != "2026-08-01T10:20:01Z" {
+		t.Fatalf("时间未规范化: active=%q started=%q", status.ActiveSince, status.StartedAt)
 	}
 }
 
@@ -124,9 +127,11 @@ func TestParseExecStartPath(t *testing.T) {
 
 func TestActionAllowlist(t *testing.T) {
 	runner := &fakeRunner{results: map[string]command.Result{
-		"systemctl restart dae": {},
-		"systemctl enable dae":  {},
-		"systemctl disable dae": {},
+		"systemctl restart dae":       {},
+		"systemctl enable dae":        {},
+		"systemctl disable dae":       {},
+		"systemctl enable --now dae":  {},
+		"systemctl disable --now dae": {},
 	}, errors: map[string]error{}}
 	manager, _ := New(Options{
 		Backend:     BackendSystemd,
@@ -145,14 +150,44 @@ func TestActionAllowlist(t *testing.T) {
 	if err := manager.Action(context.Background(), ActionDisable); err != nil {
 		t.Fatal(err)
 	}
+	if err := manager.Action(context.Background(), ActionEnableNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Action(context.Background(), ActionDisableNow); err != nil {
+		t.Fatal(err)
+	}
 	for _, forbidden := range []Action{"mask", "isolate", "poweroff"} {
 		if err := manager.Action(context.Background(), forbidden); err == nil {
 			t.Fatalf("未允许的动作 %q 应该被拒绝", forbidden)
 		}
 	}
-	want := []string{"systemctl restart dae", "systemctl enable dae", "systemctl disable dae"}
+	want := []string{
+		"systemctl restart dae",
+		"systemctl enable dae",
+		"systemctl disable dae",
+		"systemctl enable --now dae",
+		"systemctl disable --now dae",
+	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("命令调用 = %v，期望 %v", runner.calls, want)
+	}
+}
+
+func TestNormalizeSystemdTimestampRejectsAmbiguousInput(t *testing.T) {
+	for input, want := range map[string]string{
+		"Sat 2026-08-01 18:20:01 +08":    "2026-08-01T18:20:01+08:00",
+		"Sat 2026-08-01 18:20:01 +0800":  "2026-08-01T18:20:01+08:00",
+		"Sat 2026-08-01 18:20:01 +08:00": "2026-08-01T18:20:01+08:00",
+	} {
+		if got := normalizeSystemdTimestamp(input); got != want {
+			t.Fatalf("normalizeSystemdTimestamp(%q) = %q，期望 %q", input, got, want)
+		}
+	}
+	if got := normalizeSystemdTimestamp("n/a"); got != "" {
+		t.Fatalf("n/a = %q，期望空值", got)
+	}
+	if got := normalizeSystemdTimestamp("不是时间"); got != "" {
+		t.Fatalf("非法时间 = %q，期望空值", got)
 	}
 }
 
@@ -208,6 +243,36 @@ func TestLogsRejectInvalidPriorityValue(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Priority != -1 || entries[0].Level != "unknown" {
 		t.Fatalf("非法优先级解析结果 = %+v", entries)
+	}
+}
+
+func TestLogsPreferDaeMessageLevel(t *testing.T) {
+	entries, err := parseJournal(
+		"{\"PRIORITY\":\"6\",\"MESSAGE\":\"level=debug msg=\\\"dialing node\\\"\"}\n" +
+			"{\"PRIORITY\":\"6\",\"MESSAGE\":\"level=warning msg=\\\"slow request\\\"\"}\n" +
+			"{\"PRIORITY\":\"6\",\"MESSAGE\":\"level=trace msg=\\\"packet detail\\\"\"}\n" +
+			"{\"PRIORITY\":\"6\",\"MESSAGE\":\"ordinary output containing level=debug\"}\n" +
+			"{\"PRIORITY\":\"6\",\"MESSAGE\":\"level=\"}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("日志数量 = %d，期望 5", len(entries))
+	}
+	if entries[0].Priority != 7 || entries[0].Level != "debug" {
+		t.Fatalf("debug 日志解析异常: %+v", entries[0])
+	}
+	if entries[1].Priority != 4 || entries[1].Level != "warning" {
+		t.Fatalf("warning 日志解析异常: %+v", entries[1])
+	}
+	if entries[2].Priority != 7 || entries[2].Level != "trace" {
+		t.Fatalf("trace 日志解析异常: %+v", entries[2])
+	}
+	if entries[3].Priority != 6 || entries[3].Level != "info" {
+		t.Fatalf("正文中间的 level 字样不应覆盖 journald 级别: %+v", entries[3])
+	}
+	if entries[4].Priority != 6 || entries[4].Level != "info" {
+		t.Fatalf("空 level 不应引发异常或覆盖 journald 级别: %+v", entries[4])
 	}
 }
 

@@ -42,14 +42,15 @@ type Version struct {
 }
 
 type cacheMetadata struct {
-	Schema   int             `json:"schema"`
-	Source   upstream.Source `json:"source"`
-	Ref      string          `json:"ref"`
-	Label    string          `json:"label"`
-	Platform string          `json:"platform"`
-	SHA256   string          `json:"sha256"`
-	Size     int64           `json:"size"`
-	CachedAt time.Time       `json:"cachedAt"`
+	Schema        int             `json:"schema"`
+	Source        upstream.Source `json:"source"`
+	Ref           string          `json:"ref"`
+	Label         string          `json:"label"`
+	Platform      string          `json:"platform"`
+	AssetPlatform string          `json:"assetPlatform,omitempty"`
+	SHA256        string          `json:"sha256"`
+	Size          int64           `json:"size"`
+	CachedAt      time.Time       `json:"cachedAt"`
 }
 
 // versionCache 把每个版本保存成一个自描述文件，避免“二进制已写、索引未写”的
@@ -72,7 +73,7 @@ func (c *versionCache) path(source upstream.Source, ref, platform string) string
 	return filepath.Join(c.directory, cacheKey(source, ref, platform)+".cache")
 }
 
-func (c *versionCache) store(source upstream.Source, ref, label, platform string, content []byte) error {
+func (c *versionCache) store(source upstream.Source, ref, label, platform, assetPlatform string, content []byte) error {
 	if _, err := upstream.ParseSource(string(source)); err != nil {
 		return err
 	}
@@ -89,14 +90,15 @@ func (c *versionCache) store(source upstream.Source, ref, label, platform string
 		label = ref
 	}
 	metadata := cacheMetadata{
-		Schema:   cacheSchema,
-		Source:   source,
-		Ref:      ref,
-		Label:    label,
-		Platform: platform,
-		SHA256:   digestBytes(content),
-		Size:     int64(len(content)),
-		CachedAt: nowUTC(),
+		Schema:        cacheSchema,
+		Source:        source,
+		Ref:           ref,
+		Label:         label,
+		Platform:      platform,
+		AssetPlatform: assetPlatform,
+		SHA256:        digestBytes(content),
+		Size:          int64(len(content)),
+		CachedAt:      nowUTC(),
 	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil {

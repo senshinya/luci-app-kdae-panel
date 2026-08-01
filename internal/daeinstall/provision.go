@@ -208,7 +208,10 @@ func (i *Installer) FirstInstall(ctx context.Context, bundle upstream.Bundle, so
 		return Status{}, err
 	}
 
-	state := &State{Source: source, Ref: ref, Label: label, SHA256: digestBytes(bundle.Binary)}
+	state := &State{
+		Source: source, Ref: ref, Label: label, Platform: bundle.Platform,
+		SHA256: digestBytes(bundle.Binary),
+	}
 	state.InstalledAt = nowUTC()
 	if report := i.newProbe(i.binaryPath).Inspect(ctx); report.Available {
 		state.Version = report.Version

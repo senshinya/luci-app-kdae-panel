@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseNodeLink } from './nodelink'
+import { allocateNodeTags, parseNodeLink } from './nodelink'
 
 function base64(value: string): string {
   const bytes = new TextEncoder().encode(value)
@@ -57,5 +57,25 @@ describe('parseNodeLink', () => {
       expect(parseNodeLink(link)?.port).toBeNull()
     }
     expect(parseNodeLink(`vmess://${base64(JSON.stringify({ add: '1.2.3.4', port: 443 }))}`)?.port).toBe(443)
+  })
+})
+
+describe('allocateNodeTags', () => {
+  it('从链接备注生成唯一且可由 dae 作为配置键的稳定标签', () => {
+    expect(allocateNodeTags([
+      'trojan://pass@example.com:443#dmit%20lax%20pro-dmitlaxpro',
+      'vless://id@example.net:443#dmit%20lax%20pro-dmitlaxpro',
+    ], ['dmit_lax_pro-dmitlaxpro'])).toEqual([
+      'dmit_lax_pro-dmitlaxpro_2',
+      'dmit_lax_pro-dmitlaxpro_3',
+    ])
+  })
+
+  it('非 ASCII 备注回退到协议和主机，数字开头时补安全前缀', () => {
+    expect(allocateNodeTags([
+      'hysteria2://auth@hk.example.com:443#香港',
+      'trojan://pass@example.com:443#123',
+      'unknown://',
+    ])).toEqual(['hysteria2_hk.example.com', 'node_123', 'unknown'])
   })
 })

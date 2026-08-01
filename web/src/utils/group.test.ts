@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { createGroupFilter, describeGroupFilter, parseGroupFilter, serializeGroupFilter } from './group'
+import {
+  createGroupFilter,
+  describeGroupFilter,
+  includeNodesInGroups,
+  knownFixedCandidateCount,
+  parseGroupFilter,
+  serializeGroupFilter,
+} from './group'
 
 describe('分组资源过滤', () => {
   it('解析精确节点与订阅多选', () => {
@@ -40,5 +47,49 @@ describe('分组资源过滤', () => {
   it('卡片摘要对资源过滤使用可读标签', () => {
     expect(describeGroupFilter('name(node1, node2)')).toBe('节点：node1、node2')
     expect(describeGroupFilter('subtag(sub_a)')).toBe('订阅：sub_a')
+  })
+
+  it('把导入节点并入已有节点过滤，同时保留其他分组与条件', () => {
+    const text = [
+      'group {',
+      '  proxy {',
+      '    policy: min_moving_avg',
+      '    filter: name(old_node)',
+      '    filter: subtag(my_sub)',
+      '  }',
+      '  direct_group {',
+      '    policy: random',
+      '  }',
+      '}',
+      '',
+    ].join('\n')
+    const next = includeNodesInGroups(text, ['proxy', 'direct_group'], ['new_node', 'old_node'])
+    expect(next).toContain('filter: name(old_node, new_node)')
+    expect(next).toContain('filter: subtag(my_sub)')
+    expect(next.match(/direct_group \{[\s\S]*?\n  \}/)?.[0]).not.toContain('filter:')
+  })
+
+  it('复杂过滤保持原样，并追加独立的显式节点过滤', () => {
+    const text = "group {\n  proxy {\n    filter: name(regex: '^HK') && !name(keyword: '过期')\n  }\n}\n"
+    const next = includeNodesInGroups(text, ['proxy'], ['hk_01'])
+    expect(next).toContain("filter: name(regex: '^HK') && !name(keyword: '过期')")
+    expect(next).toContain('filter: name(hk_01)')
+  })
+
+  it('跨行过滤分组保持逐字节不变，避免把新声明插进续行中间', () => {
+    const text = "group {\n  proxy {\n    filter: subtag(a) &&\n      !name(keyword: '过期')\n  }\n}\n"
+    expect(includeNodesInGroups(text, ['proxy'], ['hk_01'])).toBe(text)
+  })
+
+  it('只在 fixed 候选数量可精确推导时返回数量', () => {
+    expect(knownFixedCandidateCount([], 2, false)).toBe(2)
+    expect(knownFixedCandidateCount([], 2, true)).toBeNull()
+    expect(knownFixedCandidateCount([{
+      ...createGroupFilter('nodes'), values: ['a', 'b', 'a'],
+    }], 9, false)).toBe(2)
+    expect(knownFixedCandidateCount([createGroupFilter('subscriptions')], 2, false)).toBeNull()
+    expect(knownFixedCandidateCount([{
+      ...createGroupFilter('nodes'), values: ['a'], exclude: true,
+    }], 2, false)).toBeNull()
   })
 })

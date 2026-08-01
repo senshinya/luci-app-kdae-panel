@@ -100,7 +100,11 @@ async function save(apply: boolean) {
       mode: document.value?.mode || '-rw-------',
       modifiedAt: result.savedAt,
     }
-    validationMessage.value = apply ? '配置已保存并完成无损重载' : '配置已保存，尚未应用到运行进程'
+    validationMessage.value = !apply
+      ? '配置已保存，尚未应用到运行进程'
+      : result.deferred
+        ? '配置已保存；dae 当前未运行，下次启动时生效'
+        : '配置已保存并完成无损重载'
     message.success(validationMessage.value)
   } catch (error) {
     if (error instanceof APIError && error.status === 409) {

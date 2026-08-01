@@ -92,10 +92,6 @@ type HostService interface {
 func New(cfg Config, logger *slog.Logger) (*App, error) {
 	cfg = cfg.withDefaults()
 	daeClient := dae.NewClient(cfg.DaeBinary)
-	configuration, err := configstore.NewManager(cfg.DaeConfigPath, cfg.BackupDir, daeClient)
-	if err != nil {
-		return nil, fmt.Errorf("初始化配置管理器: %w", err)
-	}
 	hostManager, err := host.New(host.Options{
 		Backend:     cfg.ServiceBackend,
 		ServiceName: cfg.ServiceName,
@@ -111,6 +107,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("解析服务后端: %w", err)
 	}
 	logger.Info("已选定服务后端", "backend", string(resolvedBackend))
+	adoptRunningServiceBootState(hostManager, logger)
+	daeService := newPIDReloadDaeService(daeClient, daeClient, daeClient, hostManager)
+	configuration, err := configstore.NewManager(cfg.DaeConfigPath, cfg.BackupDir, daeService)
+	if err != nil {
+		return nil, fmt.Errorf("初始化配置管理器: %w", err)
+	}
 	authStore, err := auth.Open(cfg.DatabasePath, cfg.SessionTTL)
 	if err != nil {
 		return nil, fmt.Errorf("初始化认证服务: %w", err)
@@ -137,7 +139,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		setupURLs = bootstrapSetupURLs(cfg.ListenAddress, cfg.BootstrapToken)
 	}
 	dependencies := Dependencies{
-		Dae:            daeClient,
+		Dae:            daeService,
 		Configuration:  configuration,
 		Host:           hostManager,
 		Authentication: authStore,
@@ -237,6 +239,23 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	return application, nil
 }
 
+// adoptRunningServiceBootState 迁移旧版面板留下的“正在运行但未启用”状态。
+// 新版服务控制会在每次启停时同步开机状态；这里只补一次历史缺口，而且绝不根据
+// inactive 状态自动 disable，避免面板与 dae 在开机时并行启动造成竞态。
+func adoptRunningServiceBootState(service HostService, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	status, err := service.Status(ctx)
+	if err != nil || status.ActiveState != "active" || status.UnitFileState != "disabled" {
+		return
+	}
+	if err := service.Action(ctx, host.ActionEnable); err != nil {
+		logger.Warn("无法把正在运行的 dae 迁移为随系统启动", "error", err)
+		return
+	}
+	logger.Info("已把正在运行的 dae 迁移为随系统启动")
+}
+
 func NewWithDae(cfg Config, logger *slog.Logger, daeService DaeService) (*App, error) {
 	return NewWithDependencies(cfg, logger, Dependencies{Dae: daeService})
 }
@@ -272,7 +291,11 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 					return errors.New("另一个控制操作正在执行，本轮已跳过")
 				}
 				defer operations.Unlock()
-				return dependencies.Dae.Reload(ctx)
+				err := dependencies.Dae.Reload(ctx)
+				if errors.Is(err, configstore.ErrReloadDeferred) {
+					return nil
+				}
+				return err
 			},
 		})
 		if err != nil {

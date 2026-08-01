@@ -43,6 +43,8 @@ type Version struct {
 
 // Asset 是某个版本针对本机架构的可下载文件。
 type Asset struct {
+	// Platform 是最终匹配到的发布资产变体，可能比主机首选变体更保守。
+	Platform string
 	URL      string
 	Filename string
 	SHA256   string

@@ -10,18 +10,34 @@
 | :--: | :--: |
 | ![运行概览](docs/screenshots/dashboard.png) | ![代理编排](docs/screenshots/orchestration.png) |
 
-| dae 版本管理 | 登录 |
+| 配置管理 | 动态配置能力 |
 | :--: | :--: |
-| ![dae 版本管理](docs/screenshots/versions.png) | ![登录](docs/screenshots/login.png) |
+| ![配置管理](docs/screenshots/config.png) | ![动态配置能力](docs/screenshots/schema.png) |
 
-*截图来自本地演示环境，节点、订阅与延迟均为示例数据。*
+| dae 版本管理 | Geo 数据管理 |
+| :--: | :--: |
+| ![dae 版本管理](docs/screenshots/versions.png) | ![Geo 数据管理](docs/screenshots/geo.png) |
+
+| 运行日志 | 配置备份 |
+| :--: | :--: |
+| ![运行日志](docs/screenshots/logs.png) | ![配置备份](docs/screenshots/backups.png) |
+
+| 面板设置 |
+| :--: |
+| ![面板设置](docs/screenshots/settings.png) |
+
+| 首次设置 | 登录 |
+| :--: | :--: |
+| ![首次设置](docs/screenshots/setup.png) | ![登录](docs/screenshots/login.png) |
+
+*截图由 v0.9.7 当前代码的 Playwright 演示环境生成，页面状态、节点、订阅、日志与延迟均为示例数据。*
 
 ## 功能
 
 - 通过 `dae export outline` 动态发现当前版本的配置结构；
-- systemd 与 OpenWrt procd 两套服务后端，自动探测；服务状态、启动、停止和重启；
+- systemd 与 OpenWrt procd 两套服务后端，自动探测；服务状态、运行时长、启动、停止和重启；面板启动 dae 时同步设为随系统启动，停止时同步取消，系统重启后保持最后一次面板控制的状态；
 - dae 无损重载、暂停和 sysdump 诊断；
-- `global`、DNS、节点、订阅、分组与路由的可视化编排：全局设置与 DNS 覆盖 dae 当前公开的字段，实际支持项和默认值由本机二进制的 `export outline` 动态确认，不兼容字段会明确标记；DNS 提供上游、请求/响应路由、缓存、监听地址和固定 TTL 编辑，以及彼此独立的简单/进阶草稿；同时支持分享链接批量导入、订阅与分组过滤条件编辑、逐条路由编辑，以及 GFW/中国列表/全局/MAC 常用路由模板；复杂内容可直接在当前页面编辑对应节原文，注释与未涉及的配置节保持不变；
+- `global`、DNS、节点、订阅、分组与路由的可视化编排：全局设置与 DNS 覆盖 dae 当前公开的字段，实际支持项和默认值由本机二进制的 `export outline` 动态确认，不兼容字段会明确标记；DNS 提供上游、请求/响应路由、缓存、监听地址和固定 TTL 编辑，以及彼此独立的简单/进阶草稿；同时支持分享链接批量导入并自动生成稳定节点标签、导入时加入已有分组、订阅与分组过滤条件编辑、逐条路由编辑，以及 GFW/中国列表/全局/MAC 常用路由模板；复杂内容可直接在当前页面编辑对应节原文，注释与未涉及的配置节保持不变；
 - 订阅离线缓存开关（dae 的 `-file` 持久化）、立即刷新与按间隔自动刷新；
 - 在官方 dae 发布与 kdae 分支 CI 构建之间安装、切换、回滚或卸载，安装前校验并在失败时自动恢复；下载过的二进制会保存在本地版本库，后续切换无需联网，并可逐个清理；机器上没有 dae 时可完成首次安装，卸载时可分别选择保留或删除配置与 geo 数据（默认保留，版本管理默认开启）；GitHub 元数据带短时缓存与并发合并，设置页可安全填写只读 Token 以避开匿名接口低额度；
 - 独立的 Geo 数据管理页：一键更新、文件状态与路径、每天到每 30 天的定时更新；内置 Loyalsoldier 与 v2fly，也可保存多组自定义公网 HTTPS 直链；两个文件逐一校验 SHA-256、就地替换 dae 实际读取的那一份，运行中按服务后端记录的 PID reload，未运行则在下次启动时生效，失败自动还原，来源沿用上次且绝不静默切换规则集；

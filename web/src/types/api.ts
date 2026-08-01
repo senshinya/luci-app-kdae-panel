@@ -54,12 +54,9 @@ export interface ServiceStatus {
   activeSince?: string
   startedAt?: string
   memoryBytes?: number
-  cpuUsageNanoseconds?: number
   tasks?: number
   /** systemd 的 NRestarts；procd 拿不到重启计数，恒为空。 */
   restarts?: number
-  /** 主进程已运行的秒数；只有 procd 后端填，与 restarts 正好互补。 */
-  uptimeSeconds?: number
   unitPath?: string
   suspended?: boolean
 }
@@ -82,6 +79,7 @@ export interface ConfigSaveResult {
   hash: string
   backupId?: string
   applied: boolean
+  deferred?: boolean
   savedAt: string
   rolledBack: boolean
 }
@@ -118,6 +116,7 @@ export interface InstalledState {
   source?: UpstreamSource
   ref?: string
   label?: string
+  platform?: string
   version?: string
   installedAt?: string
   sha256?: string
@@ -125,7 +124,10 @@ export interface InstalledState {
 
 export interface InstallStatus {
   binaryPath?: string
+  /** @deprecated 兼容旧客户端的首选构建标识。 */
   platform: string
+  architecture?: string
+  preferredPlatform?: string
   ready: boolean
   present: boolean
   version?: string
