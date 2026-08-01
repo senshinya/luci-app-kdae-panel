@@ -2235,7 +2235,9 @@ func TestDefaultConfigListensOnLAN(t *testing.T) {
 	}
 }
 
-func TestBootstrapSetupURLsIncludePrivateIPv4Addresses(t *testing.T) {
+// 链接的 fragment 里带着 bootstrap token，公网 IPv4 必须留在名单外：路由器上那种
+// 地址在 WAN 侧，把它渲染成可点链接等于劝管理员把 token 沿明文 HTTP 发到互联网上。
+func TestBootstrapSetupURLsIncludeLANIPv4AddressesOnly(t *testing.T) {
 	addresses := []net.Addr{
 		&net.IPNet{IP: net.ParseIP("192.168.50.8"), Mask: net.CIDRMask(24, 32)},
 		&net.IPNet{IP: net.ParseIP("10.20.30.40"), Mask: net.CIDRMask(8, 32)},
@@ -2256,11 +2258,50 @@ func TestBootstrapSetupURLsFallBackToLoopbackWithoutLAN(t *testing.T) {
 	addresses := []net.Addr{
 		&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
 		&net.IPNet{IP: net.ParseIP("203.0.113.7"), Mask: net.CIDRMask(24, 32)},
+		&net.IPNet{IP: net.ParseIP("224.0.0.1"), Mask: net.CIDRMask(24, 32)},
 	}
 	got := bootstrapSetupURLsForAddresses("0.0.0.0:2023", "secret", addresses)
 	want := "http://127.0.0.1:2023/setup#bootstrap=secret"
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("无内网地址时的初始化链接 = %q，期望 %q", got, want)
+	}
+}
+
+func TestBootstrapSetupURLIPv6WildcardFallsBackToIPv6Loopback(t *testing.T) {
+	got := bootstrapSetupURL("[::]:2023", "secret")
+	want := "http://[::1]:2023/setup#bootstrap=secret"
+	if got != want {
+		t.Fatalf("IPv6 wildcard 初始化链接 = %q，期望 %q", got, want)
+	}
+}
+
+func TestBootstrapSetupURLsIncludeUsableIPv6AndCGNATAddresses(t *testing.T) {
+	addresses := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("100.64.1.2"), Mask: net.CIDRMask(10, 32)},
+		&net.IPNet{IP: net.ParseIP("fd00::5"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("2001:db8::5"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
+	}
+	got := bootstrapSetupURLsForAddresses("[::]:2023", "secret", addresses)
+	want := []string{
+		"http://100.64.1.2:2023/setup#bootstrap=secret",
+		"http://[2001:db8::5]:2023/setup#bootstrap=secret",
+		"http://[fd00::5]:2023/setup#bootstrap=secret",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("IPv6 wildcard 初始化链接 = %q，期望 %q", got, want)
+	}
+}
+
+func TestBootstrapSetupURLsDeduplicateAddresses(t *testing.T) {
+	addresses := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("192.168.1.1"), Mask: net.CIDRMask(24, 32)},
+		&net.IPAddr{IP: net.ParseIP("192.168.1.1")},
+	}
+	got := bootstrapSetupURLsForAddresses("0.0.0.0:2023", "secret", addresses)
+	if len(got) != 1 || got[0] != "http://192.168.1.1:2023/setup#bootstrap=secret" {
+		t.Fatalf("重复地址应只生成一条链接，实际 %q", got)
 	}
 }
 

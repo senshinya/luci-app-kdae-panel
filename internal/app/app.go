@@ -409,8 +409,11 @@ func bootstrapSetupURL(listenAddress, token string) string {
 	if err != nil {
 		return "/setup#" + rawFragment
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	switch host {
+	case "", "0.0.0.0":
 		host = "127.0.0.1"
+	case "::":
+		host = "::1"
 	}
 	return (&url.URL{
 		Scheme:      "http",
@@ -432,9 +435,11 @@ func bootstrapSetupURLs(listenAddress, token string) []string {
 func bootstrapSetupURLsForAddresses(listenAddress, token string, addresses []net.Addr) []string {
 	fallback := bootstrapSetupURL(listenAddress, token)
 	host, port, err := net.SplitHostPort(listenAddress)
-	if err != nil || (host != "" && host != "0.0.0.0") {
+	if err != nil || !isWildcardListenHost(host) {
 		return []string{fallback}
 	}
+	// 监听 0.0.0.0 的 socket 收不到 IPv6 连接，列出 v6 地址只会给出一条打不开的链接。
+	allowIPv6 := host == "" || host == "::"
 
 	seen := make(map[string]struct{})
 	urls := make([]string, 0, len(addresses)+1)
@@ -448,7 +453,12 @@ func bootstrapSetupURLsForAddresses(listenAddress, token string, addresses []net
 		default:
 			continue
 		}
-		if ip = ip.To4(); ip == nil || !ip.IsPrivate() {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ip = ipv4
+		} else if !allowIPv6 {
+			continue
+		}
+		if !isLANAddress(ip) {
 			continue
 		}
 		setupURL := bootstrapSetupURL(net.JoinHostPort(ip.String(), port), token)
@@ -463,6 +473,33 @@ func bootstrapSetupURLsForAddresses(listenAddress, token string, addresses []net
 		return urls
 	}
 	return []string{fallback}
+}
+
+func isWildcardListenHost(host string) bool {
+	return host == "" || host == "0.0.0.0" || host == "::"
+}
+
+// isLANAddress 判断一个接口地址值不值得写进一次性初始化链接。
+//
+// 链接的 fragment 里带着 bootstrap token，所以只列局域网地址。IPv4 收 RFC1918
+// 与 CGNAT（100.64/10，ISP 下发给路由器的常见形态），公网 IPv4 一律排除：路由器
+// 上的公网 v4 在 WAN 侧，把 token 渲染成一条指向公网的明文 HTTP 链接摆在管理员
+// 面前，只会诱导他把它发到互联网上去。
+//
+// IPv6 相反，ULA 与全局单播都收：v6 局域网通常不做 NAT，br-lan 上那个 2001:
+// 开头的地址就是局域网客户端要访问的地址，按"是不是公网"筛会把它整个筛掉。
+//
+// IsGlobalUnicast 已经排除了 loopback、unspecified、multicast、link-local 与
+// IPv4 广播地址，不必再逐条重复。
+func isLANAddress(ip net.IP) bool {
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		// 100.64.0.0/10：第二个八位组的高两位恰好是 01。
+		return ipv4.IsPrivate() || (ipv4[0] == 100 && ipv4[1]&0xc0 == 64)
+	}
+	return true
 }
 
 func writeAPIError(writer http.ResponseWriter, status int, code, message string) {

@@ -5,6 +5,7 @@
 'require fs';
 'require rpc';
 'require ui';
+'require kdae_setup_urls';
 
 var callServiceList = rpc.declare({
 	object: 'service',
@@ -97,12 +98,12 @@ function withBusy(node, setBusy, fn) {
 	};
 }
 
-// setupURL 读面板启动时写下的一次性初始化链接。
+// setupURLs 读面板启动时写下的一次性初始化链接列表。
 // 文件不在是常态（管理员已创建，面板把它删了），不该当成错误。
-function setupURL() {
+function setupURLs() {
 	return fs.read('/var/run/kdae-panel/setup-url')
-		.then(function (content) { return (content || '').trim(); })
-		.catch(function () { return ''; });
+		.then(function (content) { return kdae_setup_urls.parse(content, location.hostname); })
+		.catch(function () { return { present: false, links: [], invalidCount: 0 }; });
 }
 
 // 开机自启的开关不跟启停按钮排在一起，而是放进「开机自启」那一列，紧挨着它自己
@@ -128,7 +129,7 @@ return view.extend({
 			uci.load('kdae-panel'),
 			callServiceList('kdae-panel'),
 			callServiceList('dae'),
-			setupURL(),
+			setupURLs(),
 			// 开机自启状态取不到时退回空对象而不是让整页加载失败：它只决定一个
 			// 徽标怎么显示，不该因为它把服务状态和配置表单一起拖下水。
 			L.resolveDefault(callInitList('kdae-panel'), {}),
@@ -137,7 +138,7 @@ return view.extend({
 	},
 
 	render: function (data) {
-		var link = data[3];
+		var setup = data[3] || { present: false, links: [], invalidCount: 0 };
 		var port = uci.get('kdae-panel', 'main', 'listen_port') || '2026';
 		var panelURL = location.protocol + '//' + location.hostname + ':' + port + '/';
 		var services = [
@@ -298,15 +299,31 @@ return view.extend({
 				daeHint
 			];
 
-			if (link) {
+			if (setup.present) {
+				var setupBody = [
+					E('p', {}, E('strong', {}, _('尚未创建管理员')))
+				];
+				if (setup.links.length) {
+					setupBody.push(E('p', {}, _('打开下面的一次性链接完成初始化，创建成功后链接立即失效：')));
+					setup.links.forEach(function (link) {
+						setupBody.push(E('p', {}, E('a', {
+							'href': link,
+							'target': '_blank',
+							'rel': 'noopener'
+						}, link)));
+					});
+					if (setup.invalidCount) {
+						setupBody.push(E('p', {}, _('初始化链接文件中有 %d 行格式无效，已忽略。')
+							.format(setup.invalidCount)));
+					}
+				} else {
+					setupBody.push(E('p', {}, _(
+						'一次性链接文件存在，但没有合法的 HTTP URL。请重启 kdae 面板重新生成，并检查系统日志。')));
+				}
 				body.push(E('div', {
 					'class': 'alert-message warning',
 					'style': 'margin:14px ' + BLOCK_INSET + ' 0'
-				}, [
-					E('p', {}, E('strong', {}, _('尚未创建管理员'))),
-					E('p', {}, _('打开下面的一次性链接完成初始化，创建成功后链接立即失效：')),
-					E('p', {}, E('a', { 'href': link, 'target': '_blank', 'rel': 'noopener' }, link))
-				]));
+				}, setupBody));
 			}
 
 			// padding-bottom 是补 argon 的：它把 .cbi-section 的 padding 设成 0，卡片
@@ -340,11 +357,6 @@ return view.extend({
 			_('默认 2026，避开 daed 等同类软件包占用的 2023。'));
 		o.datatype = 'port';
 		o.default = '2026';
-
-		o = s.option(form.Value, 'data_dir', _('数据目录'),
-			_('数据库、配置备份、状态文件与 dae 本地版本库的位置。' +
-			  '不要改到 /var 或 /tmp 下——那里是内存文件系统，重启即空。'));
-		o.default = '/etc/kdae-panel';
 
 		o = s.option(form.Value, 'dae_binary', _('dae 可执行文件'),
 			_('面板与 dae 的启动脚本读的是同一个值，不要单独修改启动脚本。'));

@@ -38,6 +38,7 @@ jobs:
           npm run typecheck --prefix web
           npm test --prefix web
           npm run build --prefix web
+          node --test openwrt/luci-app-kdae-panel/tests/*.mjs
           git diff --exit-code -- internal/webui/dist
           go test ./...
           go vet ./...

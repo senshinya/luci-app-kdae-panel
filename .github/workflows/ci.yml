@@ -34,6 +34,9 @@ jobs:
           npm test --prefix web
           npm run build --prefix web
 
+      - name: LuCI 辅助模块测试
+        run: node --test openwrt/luci-app-kdae-panel/tests/*.mjs
+
       - name: 确认嵌入资源已同步
         run: git diff --exit-code -- internal/webui/dist
 
