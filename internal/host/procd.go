@@ -71,9 +71,9 @@ type ubusService struct {
 
 // Status 汇报 dae 的运行状况。
 //
-// 不返回错误是有意的：procd 的状态全部来自本机文件与 ubus，读不到就是"没装/没跑"，
-// 不存在 systemd 那种"守护进程抽风导致查询失败"的中间态。把读不到当成错误，
-// 会让 daeinstall 的预检永久卡在"无法确认是否已有 dae"。
+// 只有成功的查询才能证明服务没装、没跑或没有启用。ubus 超时、返回坏 JSON，
+// 或 init 脚本执行异常都属于"状态未知"；把它们伪装成 inactive/disabled 会让
+// 安装跳过重启、卸载跳过停止，最终在磁盘和运行进程之间制造静默分叉。
 func (m *procdManager) Status(ctx context.Context) (Status, error) {
 	script := m.initScript()
 	// Restarts 刻意不填：procd 不暴露重启计数器，填 0 会让 daeinstall 的
@@ -90,9 +90,19 @@ func (m *procdManager) Status(ctx context.Context) (Status, error) {
 	}
 	if _, err := os.Stat(script); err == nil {
 		status.LoadState = "loaded"
-		status.UnitFileState = m.unitFileState(ctx)
+		unitFileState, err := m.unitFileState(ctx)
+		if err != nil {
+			return Status{}, err
+		}
+		status.UnitFileState = unitFileState
+	} else if !os.IsNotExist(err) {
+		return Status{}, fmt.Errorf("检查 procd init 脚本 %s: %w", script, err)
 	}
-	if instance, found := m.instance(ctx); found {
+	instance, found, err := m.instance(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	if found {
 		if instance.Running {
 			status.ActiveState = "active"
 			status.SubState = "running"
@@ -119,33 +129,38 @@ func (m *procdManager) Status(ctx context.Context) (Status, error) {
 }
 
 // instance 取 procd 记录的第一个实例。本包写出的服务只开一个实例。
-func (m *procdManager) instance(ctx context.Context) (ubusInstance, bool) {
+func (m *procdManager) instance(ctx context.Context) (ubusInstance, bool, error) {
 	result, err := m.run(ctx, "ubus", "call", "service", "list",
 		`{"name":"`+m.serviceName+`"}`)
 	if err != nil {
-		return ubusInstance{}, false
+		return ubusInstance{}, false, fmt.Errorf("读取 procd 服务状态: %s", command.Describe(err, result))
 	}
 	var services map[string]ubusService
 	if err := json.Unmarshal([]byte(result.Stdout), &services); err != nil {
-		return ubusInstance{}, false
+		return ubusInstance{}, false, fmt.Errorf("解析 procd 状态 JSON: %w", err)
 	}
 	service, ok := services[m.serviceName]
 	if !ok {
-		return ubusInstance{}, false
+		return ubusInstance{}, false, nil
 	}
 	// map 遍历顺序不定，但本包写出的服务只有一个实例，取到哪个都一样。
 	for _, instance := range service.Instances {
-		return instance, true
+		return instance, true, nil
 	}
-	return ubusInstance{}, false
+	return ubusInstance{}, false, nil
 }
 
 // unitFileState 把 `/etc/init.d/<name> enabled` 的退出码翻译成开机自启状态。
-func (m *procdManager) unitFileState(ctx context.Context) string {
-	if _, err := m.run(ctx, m.initScript(), "enabled"); err != nil {
-		return "disabled"
+func (m *procdManager) unitFileState(ctx context.Context) (string, error) {
+	result, err := m.run(ctx, m.initScript(), "enabled")
+	if err == nil {
+		return "enabled", nil
 	}
-	return "enabled"
+	// rc.common 用 1 明确表达“没有 enable”；它是业务状态，不是查询故障。
+	if result.ExitCode == 1 {
+		return "disabled", nil
+	}
+	return "", fmt.Errorf("读取 procd 开机自启状态: %s", command.Describe(err, result))
 }
 
 func (m *procdManager) run(ctx context.Context, name string, args ...string) (command.Result, error) {

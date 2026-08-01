@@ -85,11 +85,10 @@ func (i *Installer) Provision(ctx context.Context) Provision {
 	// 会让一次状态查询抽风变成一次无备份的覆盖安装。
 	status, err := i.service.Status(ctx)
 	if err != nil {
-		// 用 i.units.Path() 而不是 i.serviceUnit()：后者硬编码为 dae.service，
-		// procd 下这条消息今天不可达（procdManager.Status 约定永不报错），但那
-		// 只是写在注释里的承诺、没有测试守着。i.units.Path() 在两套后端下都
-		// 指向本机真实存在的文件（systemd 单元或 init 脚本），一旦这条不变量
-		// 哪天被打破，procd 用户看到的也是自己机器上真的有的东西。
+		// 用 i.units.Path() 而不是 i.serviceUnit()：后者硬编码为 dae.service。
+		// procd 的 ubus 或 init 状态查询同样可能失败；i.units.Path() 在两套后端
+		// 下都指向本机真实存在的文件（systemd 单元或 init 脚本），因此用户看到
+		// 的排障目标始终与自己的系统一致。
 		result.Blockers = append(result.Blockers, fmt.Sprintf(
 			"无法读取 %s 的状态，因而不能确认这台机器上是否已有 dae，已拒绝首次安装：%v",
 			i.units.Path(), err))

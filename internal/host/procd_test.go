@@ -336,6 +336,83 @@ func TestProcdStatusReportsMissingInitScript(t *testing.T) {
 	}
 }
 
+func TestProcdStatusRejectsUbusFailure(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	ubus := `ubus call service list {"name":"dae"}`
+	runner := &scriptedRunner{
+		t: t,
+		replies: map[string]command.Result{
+			ubus:                                   {Stderr: "ubus unavailable", ExitCode: 1},
+			filepath.Join(dir, "dae") + " enabled": {},
+		},
+		failures: map[string]error{ubus: errExitStatus},
+	}
+	manager := newTestProcdManager(t, runner)
+
+	if _, err := manager.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "ubus unavailable") {
+		t.Fatalf("ubus 失败应原样传播诊断，实际 %v", err)
+	}
+}
+
+func TestProcdStatusRejectsMalformedUbusJSON(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		`ubus call service list {"name":"dae"}`: {Stdout: `{"dae":`},
+		filepath.Join(dir, "dae") + " enabled":  {},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	if _, err := manager.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("非法 ubus JSON 应返回解析错误，实际 %v", err)
+	}
+}
+
+func TestProcdStatusRejectsUnexpectedEnabledExitCode(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	enabled := filepath.Join(dir, "dae") + " enabled"
+	runner := &scriptedRunner{
+		t: t,
+		replies: map[string]command.Result{
+			enabled:                                 {Stderr: "init script broken", ExitCode: 2},
+			`ubus call service list {"name":"dae"}`: {Stdout: "{}"},
+		},
+		failures: map[string]error{enabled: errors.New("exit status 2")},
+	}
+	manager := newTestProcdManager(t, runner)
+
+	if _, err := manager.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "init script broken") {
+		t.Fatalf("enabled 异常退出应返回错误，实际 %v", err)
+	}
+}
+
+func TestProcdStatusRecoversAfterTransientUbusFailure(t *testing.T) {
+	dir := initScriptDir(t, "dae")
+	ubus := `ubus call service list {"name":"dae"}`
+	runner := &scriptedRunner{
+		t: t,
+		replies: map[string]command.Result{
+			ubus:                                   {Stderr: "temporary failure", ExitCode: 1},
+			filepath.Join(dir, "dae") + " enabled": {},
+		},
+		failures: map[string]error{ubus: errExitStatus},
+	}
+	manager := newTestProcdManager(t, runner)
+
+	if _, err := manager.Status(context.Background()); err == nil {
+		t.Fatal("第一次 ubus 故障应返回错误")
+	}
+	delete(runner.failures, ubus)
+	runner.replies[ubus] = command.Result{Stdout: "{}"}
+
+	status, err := manager.Status(context.Background())
+	if err != nil {
+		t.Fatalf("外部故障解除后应立即恢复查询: %v", err)
+	}
+	if status.ActiveState != "inactive" {
+		t.Fatalf("恢复后的状态 = %q，期望 inactive", status.ActiveState)
+	}
+}
+
 func TestProcdActionRunsInitScript(t *testing.T) {
 	dir := initScriptDir(t, "dae")
 	runner := &scriptedRunner{t: t, replies: map[string]command.Result{

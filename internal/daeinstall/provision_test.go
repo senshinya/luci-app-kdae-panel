@@ -214,10 +214,9 @@ func TestProvisionUnwritableBlockerAvoidsSystemdVocabularyOnProcd(t *testing.T) 
 	}
 }
 
-// procdManager.Status 约定永不返回错误（见 host/procd.go），但那只是写在注释
-// 里的承诺，没有测试守着。这里用会报错的 fake service 模拟那条承诺被打破的
-// 情形，确认此时的 blocker 引用的是这台机器上真实存在的 init 脚本，
-// 而不是硬编码的 dae.service——procd 部署里根本没有这个文件。
+// procd 的 ubus 或 init 状态查询可能失败。这里用会报错的 fake service 确认
+// blocker 引用的是这台机器上真实存在的 init 脚本，而不是硬编码的
+// dae.service——procd 部署里根本没有这个文件。
 func TestProvisionStatusUnreadableBlockerReferencesRealPathOnProcd(t *testing.T) {
 	service := &fakeService{statusErr: errors.New("ubus 不可用")}
 	installer, _ := newTestInstallerWithBackend(t, &fakeFetcher{}, service, host.BackendProcd)
