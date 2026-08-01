@@ -172,8 +172,13 @@ logread -e kdae-panel
   比对，不是这个部署没有检查能力。比对只在版本形如 `vX.Y.Z` 时进行
   （`internal/app/panelupdate_handlers.go` 的 `parseSemver`），认不出就宁可不提示，也不拿一个没法
   比较的字符串去和 tag 硬比。正式发布的软件包不会出现这种情况；自己从源码编译时要让
-  `main.version` 带上版本号（仓库根目录的 `make build` 用 `git describe` 自动填），否则二进制里的
-  版本是 `dev`。
+  `main.version` 带上版本号（仓库根目录的 `make build` 用 `scripts/panel-version.sh` 自动填），
+  否则二进制里的版本是 `dev`。
+- **快照包（非 release 构建）不会提示"有新版本"指向它已经包含的那个发布。** 快照的版本号形如
+  `v1.0.0+git8.5df15b7`，加号后面是"在 v1.0.0 之后又领先 8 个提交"；按 semver 规范这段
+  build metadata 不参与比较，所以它与 v1.0.0 平级，而不是排在它前面。等真出了 v1.1.0，
+  同一个快照会照常提示。写成 `v1.0.0-8-g5df15b7` 或 `v0.0.1-git144.5df15b7` 就成了预发布段，
+  横幅会一直劝用户装回比在跑的代码更旧的包——`scripts/panel-version.sh` 存在的理由就是这个。
 
 ## 升级与卸载
 

@@ -226,10 +226,19 @@ type semver struct {
 	prerelease bool
 }
 
-// parseSemver 解析 vX.Y.Z 与 vX.Y.Z-pre。解析不了（如 "dev"）返回 false，
-// 调用方据此放弃比较而不是猜。
+// parseSemver 解析 vX.Y.Z、vX.Y.Z-pre 与 vX.Y.Z+build。解析不了（如 "dev"）返回
+// false，调用方据此放弃比较而不是猜。
+//
+// build metadata（+ 之后的部分）按 semver 规范不参与优先级比较，这条不是可有可无的
+// 细节：领先 tag 的构建正是靠它与所基于的 tag 平级（scripts/panel-version.sh 产出
+// v1.0.0+git8.<hash>）。把提交数写成预发布段会掉到 tag 之前，快照机器上因此恒亮
+// 一条"面板有新版本"，指向的却是比在跑的代码更旧的发布。
 func parseSemver(value string) (semver, bool) {
 	value = strings.TrimPrefix(value, "v")
+	value, build, hasBuild := strings.Cut(value, "+")
+	if hasBuild && build == "" {
+		return semver{}, false
+	}
 	base, pre, hasPre := strings.Cut(value, "-")
 	fields := strings.Split(base, ".")
 	if len(fields) != 3 || (hasPre && pre == "") {

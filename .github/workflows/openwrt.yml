@@ -101,6 +101,8 @@ jobs:
     steps:
       # fetch-depth: 0 不能删：下面的「计算软件包版本」用 git rev-list --count HEAD
       # 作为单调递增的构建号，浅克隆下它恒等于 1，每次 push 的版本号就都一样了。
+      # 面板版本还要用 git describe 找出所基于的 tag，浅克隆下一个 tag 都取不到，
+      # scripts/panel-version.sh 会直接失败。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -180,25 +182,13 @@ jobs:
           echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "软件包版本 ${version}"
 
-          # 编进二进制的版本号必须单独算，不能复用上面那个，也不能用 GITHUB_REF_NAME。
-          #
-          # 面板拿它和发布 tag 比对（internal/app/panelupdate_handlers.go 的 parseSemver），
-          # 只认 vX.Y.Z 与 vX.Y.Z-<pre>；解析不了就静默放弃检查，设置页显示"本部署不做新版本
-          # 检查"。非 release 触发时 GITHUB_REF_NAME 是 "main" 或 "123/merge"，于是每一个
-          # 快照包装上去都是这个样子——检查能力明明在，用户看到的却是"这个部署不检查"。
-          #
-          # 包版本号同样不能直接拿来用：ipk 的 0.0.1+124.abcdef 与 apk 的 0.0.1_git124~abcdef
-          # 都不是 semver，而且两种格式还不一样，编出来的二进制会因打包格式而异。
-          # 这里统一成 v0.0.1-git<commit数>.<短哈希>：连字符后的部分被当作预发布段，
-          # 比任何正式 tag 都低，快照机器上因此会如实提示"最新发布是 vX.Y.Z"。
-          if [ -n "${release_ref}" ]; then
-            binary_version="v${release_ref#v}"
-          else
-            binary_version="v0.0.1-git$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
-          fi
-          # 版本号写错的症状发生在用户的路由器上（一个不声不响关掉了的检查），在这里断言。
-          printf '%s' "${binary_version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
-            || { echo "面板版本 ${binary_version} 不是 vX.Y.Z[-pre]，面板会据此关掉新版本检查"; exit 1; }
+          # 编进二进制的版本号必须单独算，不能复用上面那个：ipk 的 0.0.1+124.abcdef 与
+          # apk 的 0.0.1_git124~abcdef 都不是 semver，两种格式还不一样，编出来的二进制
+          # 会因打包格式而异。规则连同它的理由写在 scripts/panel-version.sh 里，
+          # 与 Makefile 共用一份实现（形状漂移过一次，症状只在用户的路由器上看得见），
+          # 并由 internal/app 的 TestPanelBinaryVersionsAreComparable 钉住。
+          # 非 semver 时脚本自己退非零，这一步跟着失败。
+          binary_version="$(sh scripts/panel-version.sh "${release_ref}")"
           echo "KDAE_PANEL_BINARY_VERSION=${binary_version}" >> "${GITHUB_ENV}"
           echo "面板版本 ${binary_version}"
 

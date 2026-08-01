@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1494,6 +1495,12 @@ func TestVersionBehind(t *testing.T) {
 		{"v1.0.0", "v1.0.0-rc.1", false},
 		{"dev", "v1.0.0", false},
 		{"v0.1.2", "not-a-version", false},
+		// build metadata 不参与优先级比较（semver 规范）。快照构建靠这一条与它所
+		// 基于的 tag 平级：领先 8 个提交不该被判成落后。
+		{"v1.0.0+git8.5df15b7", "v1.0.0", false},
+		{"v1.0.0+git8.5df15b7", "v1.1.0", true},
+		{"v1.0.0-rc1+git3.abc1234", "v1.0.0", true},
+		{"v1.0.0+", "v1.1.0", false},
 	}
 	for _, item := range cases {
 		if got := versionBehind(item.current, item.latest); got != item.want {
@@ -1502,27 +1509,89 @@ func TestVersionBehind(t *testing.T) {
 	}
 }
 
-// OpenWrt 软件包编进二进制的版本号必须能被 parseSemver 认出来。
+// 编进二进制的版本号由 scripts/panel-version.sh 算出，Makefile 与 OpenWrt 流水线
+// 共用它。这里把那个脚本的产出直接喂给面板的比较器：形状与语义在同一个测试里钉死，
+// 改了脚本而没改比较器（或反过来）会立刻红。
 //
-// 认不出的后果不是报错而是静默降级：checked 恒为 false，设置页显示"本部署不做新版本
-// 检查"——检查能力明明注册好了，用户看到的却是"这个部署不检查"。曾经就是这样：
-// .github/workflows/openwrt.yml 拿 GITHUB_REF_NAME 当版本号，非 release 触发时它是
-// 分支名 "main"，于是每个快照包装上去都不检查。
+// 两种错法都不报错，症状全发生在用户的路由器上：
 //
-// 这里钉的是那条流水线「计算软件包版本」步骤产出的形状，改动那边要同步改这里。
-func TestOpenWrtPackageVersionsAreComparable(t *testing.T) {
-	for _, version := range []string{
-		"v1.0.0",                 // release：tag 原样
-		"v1.0.0-rc1",             // 预发布 tag
-		"v0.0.1-git136.b39515f2", // push/PR 的快照构建
+//   - 认不出（分支名 "main"、"123/merge"）：checked 恒为 false，设置页显示"本部署不做
+//     新版本检查"，而检查能力明明注册着。
+//   - 排在所基于的 tag 之前（写死的 v0.0.1-git<n>.<hash>，或 git describe 原样的
+//     v1.0.0-8-g<hash>——连字符后的部分都会被当作预发布段）：横幅恒亮"面板有新版本
+//     v1.0.0"，而那一版比正在跑的代码还旧。
+func TestPanelBinaryVersionsAreComparable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("脚本需要 POSIX sh")
+	}
+	script := filepath.Join("..", "..", "scripts", "panel-version.sh")
+	version := func(describe, release string) string {
+		t.Helper()
+		command := exec.Command("sh", script, release)
+		command.Env = append(os.Environ(), "KDAE_PANEL_DESCRIBE="+describe)
+		out, err := command.Output()
+		if err != nil {
+			t.Fatalf("panel-version.sh describe=%q release=%q: %v", describe, release, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	for _, item := range []struct {
+		describe, release, want string
+	}{
+		{release: "v1.2.0", want: "v1.2.0"},                                      // release：tag 原样
+		{release: "1.2.0", want: "v1.2.0"},                                       // 少写的 v 补上
+		{describe: "v1.0.0", want: "v1.0.0"},                                     // 正好落在 tag 上
+		{describe: "v1.0.0-dirty", want: "v1.0.0+dirty"},                         // 工作区有改动
+		{describe: "v1.0.0-8-g5df15b7", want: "v1.0.0+git8.5df15b7"},             // 领先 tag 8 个提交
+		{describe: "v1.0.0-8-g5df15b7-dirty", want: "v1.0.0+git8.5df15b7.dirty"}, //
+		{describe: "v1.0.0-rc1-3-gabc1234", want: "v1.0.0-rc1+git3.abc1234"},     // 预发布 tag 之后
 	} {
-		if _, ok := parseSemver(version); !ok {
-			t.Fatalf("parseSemver(%q) 解析失败，面板会据此关掉新版本检查", version)
+		got := version(item.describe, item.release)
+		if got != item.want {
+			t.Fatalf("describe=%q release=%q 得到 %q，期望 %q", item.describe, item.release, got, item.want)
+		}
+		if _, ok := parseSemver(got); !ok {
+			t.Fatalf("parseSemver(%q) 解析失败，面板会据此关掉新版本检查", got)
 		}
 	}
-	// 快照排在任何正式发布之前：装着快照的机器应当被如实告知最新发布是哪一版。
-	if !versionBehind("v0.0.1-git136.b39515f2", "v1.0.0") {
-		t.Fatal("快照构建应当被判为落后于正式发布")
+
+	// 领先 tag 的快照与该 tag 平级。这正是用户报的那条误报：v1.0.0 之后 8 个提交
+	// 构建出来的包，被劝去"升级"到 v1.0.0。
+	snapshot := version("v1.0.0-8-g5df15b7", "")
+	if versionBehind(snapshot, "v1.0.0") {
+		t.Fatalf("%q 被判为落后于 v1.0.0：横幅会劝用户装回比在跑的代码更旧的包", snapshot)
+	}
+	// 但真出了新发布仍要如实提示，否则就成了"永不提醒"。
+	if !versionBehind(snapshot, "v1.1.0") {
+		t.Fatalf("%q 应当被判为落后于 v1.1.0", snapshot)
+	}
+	// 基于旧 tag 的分支快照同样要提示。
+	if old := version("v0.9.3-5-gabc1234", ""); !versionBehind(old, "v1.0.0") {
+		t.Fatalf("%q 应当被判为落后于 v1.0.0", old)
+	}
+
+	// 用户看到的是接口的输出，这里就走一遍完整的 handler：快照机器上"查过了、
+	// 最新发布是 v1.0.0、但没有可升的版本"三件事必须同时成立。少了 checked，
+	// 界面会把它误当成"这个部署不做检查"。
+	payload := fetchPanelUpdate(t, newUpdateCheckApp(t, snapshot,
+		func(context.Context) (string, error) { return "v1.0.0", nil }))
+	if payload["checked"] != true || payload["latest"] != "v1.0.0" || payload["updateAvailable"] != false {
+		t.Fatalf("快照 %q 对 v1.0.0 的检查结果 = %v", snapshot, payload)
+	}
+
+	// 算不出一个能用的版本号时宁可让构建失败：两种症状都要等用户打开面板才看得见。
+	for _, describe := range []string{
+		"nightly-3-gabc1234", // tag 本身不是 semver → 面板会关掉检查
+		// 转换没生效（这里用一个 sed 认不出的哈希模拟）。原样输出本身是合法
+		// semver，形状断言拦不住，但那个领先段会被当成预发布排到 tag 之前。
+		"v1.0.0-9-gXXXXXXX",
+	} {
+		broken := exec.Command("sh", script, "")
+		broken.Env = append(os.Environ(), "KDAE_PANEL_DESCRIBE="+describe)
+		if out, err := broken.Output(); err == nil {
+			t.Fatalf("describe=%q 应当让构建失败，实际输出 %q", describe, strings.TrimSpace(string(out)))
+		}
 	}
 }
 
