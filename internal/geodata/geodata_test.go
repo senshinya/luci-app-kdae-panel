@@ -421,6 +421,98 @@ func TestSearchPathWithoutLocationAsset(t *testing.T) {
 	}
 }
 
+// 搜索顺序里同一个目录不得出现两次。
+//
+// procd 部署必然踩中：dae.init 设的 DAE_LOCATION_ASSET 就是 dirname $dae_config，
+// 与配置目录是同一个。列两次的后果不是多查一遍那么无害——locate 会在那里命中同一个
+// 文件两次，第二次记成"被遮蔽的副本"，界面于是给出一句自相矛盾的话：dae 只读
+// /etc/dae/geoip.dat，而 /etc/dae/geoip.dat 里的副本不会生效、可以删掉。
+func TestSearchPathDeduplicatesDirectories(t *testing.T) {
+	for name, environment := range map[string]map[string]string{
+		"与配置目录相同": {LocationAssetEnv: "/etc/dae"},
+		"只差一个尾斜杠": {LocationAssetEnv: "/etc/dae/"},
+	} {
+		paths := SearchPath("/etc/dae/config.dae", environment)
+		var hits int
+		for _, path := range paths {
+			if path == "/etc/dae" {
+				hits++
+			}
+		}
+		if hits != 1 {
+			t.Fatalf("%s：/etc/dae 在搜索顺序里出现 %d 次: %v", name, hits, paths)
+		}
+	}
+}
+
+// 同一个文件经由两条路径被找到时不算副本。
+//
+// 告警的措辞是"可以删掉"，而这两条路径指向的是同一个 inode——照着删就把 dae 唯一
+// 读得到的那份 geo 数据删了。目录是符号链接时同样成立。
+func TestLocateDoesNotShadowFileWithItself(t *testing.T) {
+	directory := testDirectory(t)
+	real := filepath.Join(directory, "real")
+	seedGeo(t, real, upstream.GeoIPName, "only-copy")
+
+	link := filepath.Join(directory, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("本机不支持创建符号链接: %v", err)
+	}
+	for name, searchPath := range map[string][]string{
+		"同一个目录列了两次": {real, real},
+		"目录是符号链接":   {link, real},
+	} {
+		files := locate(searchPath, []string{upstream.GeoIPName})
+		if len(files) != 1 || !files[0].Present {
+			t.Fatalf("%s：应找到文件: %+v", name, files)
+		}
+		if len(files[0].Shadowed) != 0 {
+			t.Fatalf("%s：生效的是 %s，却报称 %v 里的副本可以删掉——那是同一个文件",
+				name, files[0].Path, files[0].Shadowed)
+		}
+	}
+}
+
+// 用户看到的是 Status 里的那句告警，这里把 procd 的实际配置原样摆一遍。
+func TestStatusHasNoSelfShadowingWarning(t *testing.T) {
+	directory := testDirectory(t)
+	previousDirs := systemDirs
+	systemDirs = nil
+	t.Cleanup(func() { systemDirs = previousDirs })
+	seedGeo(t, directory, upstream.GeoIPName, "effective")
+	seedGeo(t, directory, upstream.GeoSiteName, "effective")
+
+	manager, err := New(Options{
+		ConfigPath: filepath.Join(directory, "config.dae"),
+		StatePath:  filepath.Join(directory, "state", "geo-update.json"),
+		Fetcher:    &fakeFetcher{},
+		// dae.init 设的就是这个：DAE_LOCATION_ASSET = 配置文件所在目录。
+		Service: &fakeService{
+			activeState: "active",
+			mainPID:     4321,
+			environment: map[string]string{LocationAssetEnv: directory},
+		},
+		Reloader:       &fakeReloader{},
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ServiceBackend: host.BackendProcd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status := manager.Status(context.Background())
+	for _, file := range status.Files {
+		if len(file.Shadowed) != 0 {
+			t.Fatalf("%s 生效于 %s，却报称 %v 里的副本可以删掉", file.Name, file.Path, file.Shadowed)
+		}
+	}
+	for _, warning := range status.Warnings {
+		if strings.Contains(warning, "可以删掉") {
+			t.Fatalf("不该出现让用户删掉唯一生效文件的告警: %s", warning)
+		}
+	}
+}
+
 // dae 只读优先级最高的那一份，被遮蔽的副本必须说出来——否则用户会以为
 // "我明明更新了却没生效"。
 func TestStatusReportsShadowedCopies(t *testing.T) {

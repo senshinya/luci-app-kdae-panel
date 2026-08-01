@@ -45,15 +45,30 @@ var systemDirs = []string{
 // 顺序错了后果很实际：往低优先级目录写的更新永远不会生效，而检查却显示已就位。
 //
 // environment 是 dae 单元声明的环境变量，可以为 nil。
+//
+// 结果按目录去重。同一个目录出现两次不是"多查一遍"这种无害的事：locate 会在那里
+// 命中同一个文件两次，第二次记成被遮蔽的副本，界面于是给出一句自相矛盾、照做还会
+// 丢数据的话——dae 只读 /etc/dae/geoip.dat，而 /etc/dae/geoip.dat 里的副本可以删掉。
+// procd 部署必然踩中：dae.init 设的 DAE_LOCATION_ASSET 就是 dirname $dae_config。
 func SearchPath(configPath string, environment map[string]string) []string {
-	paths := []string{}
+	candidates := make([]string, 0, len(systemDirs)+2)
 	if directory := environment[LocationAssetEnv]; directory != "" {
-		paths = append(paths, directory)
+		candidates = append(candidates, directory)
 	}
 	if configPath != "" {
-		paths = append(paths, filepath.Dir(configPath))
+		candidates = append(candidates, filepath.Dir(configPath))
 	}
-	return append(paths, systemDirs...)
+	candidates = append(candidates, systemDirs...)
+
+	paths := make([]string, 0, len(candidates))
+	for _, directory := range candidates {
+		// 环境变量里的值是用户写的，可能带尾斜杠或 ".."，先归一再比。
+		directory = filepath.Clean(directory)
+		if !slices.Contains(paths, directory) {
+			paths = append(paths, directory)
+		}
+	}
+	return paths
 }
 
 // MissingWarning 在面板可见的目录里都找不到 geo 数据时提醒，找得到就返回空。
@@ -130,6 +145,7 @@ func locate(searchPath []string, names []string) []File {
 	files := make([]File, 0, len(names))
 	for _, name := range names {
 		file := File{Name: name}
+		var effective os.FileInfo
 		for _, directory := range searchPath {
 			candidate := filepath.Join(directory, name)
 			info, err := os.Stat(candidate)
@@ -139,6 +155,12 @@ func locate(searchPath []string, names []string) []File {
 			if !file.Present {
 				modTime := info.ModTime().UTC()
 				file.Present, file.Path, file.Size, file.ModTime = true, candidate, info.Size(), &modTime
+				effective = info
+				continue
+			}
+			// 两条路径指向同一个 inode（目录是符号链接，或搜索顺序里重复列了同一个
+			// 目录）不算副本。告警的措辞是"可以删掉"，照着删掉的会是唯一生效的那份。
+			if os.SameFile(effective, info) {
 				continue
 			}
 			// dae 只读优先级最高的那一份，其余的既占磁盘，又会让人以为
