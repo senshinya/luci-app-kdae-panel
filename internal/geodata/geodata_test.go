@@ -273,6 +273,34 @@ func TestUpdateWaitsForTrustedServiceSearchPathAndCanRetry(t *testing.T) {
 	}
 }
 
+// 两套后端在状态查询失败时丢的东西不一样：systemd 丢的是单元里声明的
+// DAE_LOCATION_ASSET（可以指向任意目录，写错就静默不生效），procd 丢的是实例 PID
+// （搜索路径其实一个字都不差——dae.init 与面板读同一份 UCI）。写成一句通用话会把
+// OpenWrt 用户支去查一个在他机器上不可能出错的东西。
+func TestUnknownServiceStateProblemNamesTheRightLoss(t *testing.T) {
+	manager, _, _, _ := newTestManager(t)
+	manager.service = &fakeService{err: errors.New("systemctl exploded")}
+
+	systemdProblem := manager.Status(context.Background()).Problem
+	if !strings.Contains(systemdProblem, LocationAssetEnv) {
+		t.Fatalf("systemd 下应点名读不到的 %s: %s", LocationAssetEnv, systemdProblem)
+	}
+
+	manager.backend = host.BackendProcd
+	procdProblem := manager.Status(context.Background()).Problem
+	if strings.Contains(procdProblem, LocationAssetEnv) {
+		t.Fatalf("procd 下 %s 恒等于配置目录，提示不该点它: %s", LocationAssetEnv, procdProblem)
+	}
+	if !strings.Contains(procdProblem, "PID") {
+		t.Fatalf("procd 下丢的是实例 PID，提示应点名它: %s", procdProblem)
+	}
+	for _, problem := range []string{systemdProblem, procdProblem} {
+		if !strings.Contains(problem, "systemctl exploded") {
+			t.Fatalf("两条提示都必须保留原始故障: %s", problem)
+		}
+	}
+}
+
 // dae validate 察觉不到 geo 的问题，一份 dae 不接受的 geo 会让 reload 失败，
 // 而 dae 不运行时流量就不再被透明代理接管——必须能退回原样。
 func TestUpdateRestoresPreviousDataWhenReloadFails(t *testing.T) {

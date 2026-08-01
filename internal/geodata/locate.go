@@ -113,6 +113,30 @@ type serviceSnapshot struct {
 	inspectErr error
 }
 
+// unknownStateProblem 说明状态查询失败为什么足以拦下一次 geo 更新，并按后端给出
+// 对得上的理由。两套后端各丢的东西不一样，写成一句通用话会把用户支到错的地方：
+//
+// systemd 的 Environment 来自 `systemctl show` 读到的单元声明，DAE_LOCATION_ASSET
+// 可以是任意目录（dae-installer 装出来的就常指向 /usr/local/share/dae）。读不到它，
+// 那个目录压根不在搜索顺序里，targetDir 退回配置目录——优先级更低，更新静默不生效
+// 而接口报成功。
+//
+// procd 上这条不成立：dae.init 与面板 config_load 同一份 UCI，
+// DAE_LOCATION_ASSET 恒等于 dirname(dae_config)，也就是搜索顺序里本来就有的那一项，
+// 读不到它搜索路径一个字都不差。这里丢的是实例 PID：状态未知会退回不带 PID 的
+// `dae reload`，转而依赖 dae 默认的 PID 文件。那意味着先搬几十兆文件、再在 reload
+// 上失败、然后整个回滚，不如提前拒绝。
+func unknownStateProblem(backend host.Backend, err error) string {
+	if backend == host.BackendProcd {
+		return fmt.Sprintf(
+			"无法确认 dae 服务状态（%v）；拿不到实例 PID 就只能退回不带 PID 的 dae reload，"+
+				"更新多半会在重载这一步失败并整个回滚，因此在状态恢复前拒绝更新", err)
+	}
+	return fmt.Sprintf(
+		"无法确认 dae 服务状态（%v）；此时读不到单元里声明的 DAE_LOCATION_ASSET，"+
+			"更新可能写进优先级更低的目录而永不生效，因此在状态恢复前拒绝更新", err)
+}
+
 // inspectService 同时提供 geo 搜索路径所需的环境变量，以及 reload 所需的 PID。
 func (m *Manager) inspectService(ctx context.Context) serviceSnapshot {
 	if m.service == nil {
@@ -122,7 +146,7 @@ func (m *Manager) inspectService(ctx context.Context) serviceSnapshot {
 	if err != nil {
 		return serviceSnapshot{
 			state:      ServiceStateUnknown,
-			problem:    fmt.Sprintf("无法确认 dae 服务状态（%v）；在状态恢复前拒绝更新，以免忽略 DAE_LOCATION_ASSET 后写错目录", err),
+			problem:    unknownStateProblem(m.backend, err),
 			inspectErr: err,
 		}
 	}
