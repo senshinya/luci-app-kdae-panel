@@ -107,9 +107,10 @@ func SandboxHidesHome() bool {
 }
 
 type serviceSnapshot struct {
-	status  host.Status
-	state   ServiceState
-	problem string
+	status     host.Status
+	state      ServiceState
+	problem    string
+	inspectErr error
 }
 
 // inspectService 同时提供 geo 搜索路径所需的环境变量，以及 reload 所需的 PID。
@@ -120,8 +121,9 @@ func (m *Manager) inspectService(ctx context.Context) serviceSnapshot {
 	status, err := m.service.Status(ctx)
 	if err != nil {
 		return serviceSnapshot{
-			state:   ServiceStateUnknown,
-			problem: fmt.Sprintf("无法确认 dae 服务状态（%v）；更新时将使用 dae 默认的 PID 文件", err),
+			state:      ServiceStateUnknown,
+			problem:    fmt.Sprintf("无法确认 dae 服务状态（%v）；在状态恢复前拒绝更新，以免忽略 DAE_LOCATION_ASSET 后写错目录", err),
+			inspectErr: err,
 		}
 	}
 	if status.ActiveState == "active" && status.MainPID > 0 {
@@ -180,10 +182,12 @@ func locate(searchPath []string, names []string) []File {
 //
 // 两个文件都不存在时才退回配置目录——它在搜索顺序里优先级最高（仅次于
 // DAE_LOCATION_ASSET），且本来就在面板的 ReadWritePaths 里，不必放宽沙箱。
-func targetDir(files []File, fallback string) string {
-	for _, file := range files {
-		if file.Present {
-			return filepath.Dir(file.Path)
+func targetDir(searchPath []string, files []File, fallback string) string {
+	for _, directory := range searchPath {
+		for _, file := range files {
+			if file.Present && filepath.Clean(filepath.Dir(file.Path)) == filepath.Clean(directory) {
+				return directory
+			}
 		}
 	}
 	return fallback
@@ -191,10 +195,15 @@ func targetDir(files []File, fallback string) string {
 
 // Status 汇报 geo 数据的现状与可更新性。
 func (m *Manager) Status(ctx context.Context) Status {
-	service := m.inspectService(ctx)
+	return m.status(m.inspectService(ctx))
+}
+
+// status 使用一次已经取得的服务快照构造结果。Apply 也复用同一份快照，避免
+// 状态查询在“选目标目录”和“决定 reload PID”之间变化，产生 TOCTOU 偏差。
+func (m *Manager) status(service serviceSnapshot) Status {
 	search := SearchPath(m.configPath, service.status.Environment)
 	files := locate(search, Names)
-	target := targetDir(files, filepath.Dir(m.configPath))
+	target := targetDir(search, files, filepath.Dir(m.configPath))
 
 	status := Status{
 		Sources:       m.fetcher.Sources(),
@@ -220,6 +229,10 @@ func (m *Manager) Status(ctx context.Context) Status {
 					fmt.Sprintf("上次使用的 geo 来源 %s 已不存在；自动更新会保持失败而不会静默切换规则集，请先选择一个现有来源手动更新", state.Source))
 			}
 		}
+	}
+	if service.inspectErr != nil {
+		status.Problem = service.problem
+		return status
 	}
 
 	if err := atomicfile.Writable(target); err != nil {
