@@ -27,6 +27,7 @@
   /* 语义色：与 naive-ui 的 success/warning 呼应，用于自绘元素 */
   --ok: #4ade80;
   --warn: #fbbf24;
+  --danger: #f87171;
 
   /* 分隔线：两档足够，更多档位肉眼无法区分 */
   --border: rgba(148, 163, 184, 0.12);
@@ -415,6 +416,136 @@ textarea {
   line-height: 1.65;
 }
 
+.diagnostics-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostics-summary {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--bg-raised);
+}
+
+.diagnostics-summary-error {
+  border-left-color: var(--danger);
+}
+
+.diagnostics-summary-warning {
+  border-left-color: var(--warn);
+}
+
+.diagnostics-summary-ok {
+  border-left-color: var(--ok);
+}
+
+.diagnostics-summary > div {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: center;
+  gap: 7px 10px;
+}
+
+.diagnostics-summary > div > .n-text {
+  grid-column: 1 / -1;
+}
+
+.diagnostics-summary dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(52px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.diagnostics-summary dl > div {
+  min-width: 56px;
+  padding: 8px 10px;
+  border-left: 1px solid var(--border);
+}
+
+.diagnostics-summary dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.diagnostics-summary dd {
+  margin: 2px 0 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.diagnostics-section h3 {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.diagnostic-item {
+  min-height: 176px;
+}
+
+.diagnostic-item-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diagnostic-item-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.diagnostic-item-head span {
+  color: var(--text-muted);
+}
+
+.diagnostic-details {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.diagnostic-details li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.diagnostic-suggestion {
+  margin-top: 14px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-wash);
+  line-height: 1.55;
+}
+
+.diagnostic-suggestion span {
+  margin-right: 8px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.diagnostics-footer-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .details-list {
   margin: 0 0 18px;
 }
@@ -445,6 +576,80 @@ textarea {
 
 .backup-editor-modal {
   width: min(560px, calc(100vw - 32px));
+}
+
+.backup-diff-modal {
+  width: min(1040px, calc(100vw - 32px));
+}
+
+.backup-diff-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 14px 0 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.backup-diff {
+  max-height: min(62vh, 680px);
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-deep);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.backup-diff-line {
+  min-width: max-content;
+  display: grid;
+  grid-template-columns: 46px 46px 22px minmax(400px, 1fr);
+  padding-right: 12px;
+}
+
+.backup-diff-line code {
+  white-space: pre;
+}
+
+.backup-diff-number {
+  padding: 0 8px;
+  border-right: 1px solid var(--border-soft);
+  color: var(--text-faint);
+  text-align: right;
+  user-select: none;
+}
+
+.backup-diff-mark {
+  text-align: center;
+  user-select: none;
+}
+
+.backup-diff-add {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.backup-diff-remove {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.backup-diff-skip {
+  display: block;
+  min-width: 100%;
+  padding: 5px 12px;
+  color: var(--text-muted);
+  background: var(--bg-raised);
+  text-align: center;
+}
+
+.backup-validation-error {
+  max-height: 140px;
+  margin: 8px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .backup-editor-form label {
@@ -1637,6 +1842,35 @@ pre,
     gap: 6px !important;
   }
 
+  .diagnostics-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .diagnostics-actions .n-button {
+    width: 100%;
+    min-height: 40px;
+  }
+
+  .diagnostics-summary {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 16px;
+  }
+
+  .diagnostics-summary dl {
+    width: 100%;
+  }
+
+  .diagnostics-summary dl > div {
+    padding: 7px 8px;
+  }
+
+  .diagnostic-item {
+    min-height: auto;
+  }
+
   .version-toolbar-actions .n-button {
     min-width: 0;
     padding-inline: 6px;
@@ -1865,13 +2099,15 @@ pre,
   }
 
   .orchestrate-modal,
-  .backup-editor-modal {
+  .backup-editor-modal,
+  .backup-diff-modal {
     width: calc(100vw - 16px);
     max-height: calc(100dvh - 16px);
   }
 
   .orchestrate-modal > .n-card-content,
-  .backup-editor-modal > .n-card-content {
+  .backup-editor-modal > .n-card-content,
+  .backup-diff-modal > .n-card-content {
     max-height: calc(100dvh - 170px);
     overflow-y: auto;
   }

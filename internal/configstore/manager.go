@@ -77,6 +77,27 @@ type Backup struct {
 	Note       string    `json:"note,omitempty"`
 }
 
+// BackupPreview 是恢复前的只读检查结果。
+// CurrentHash 供真正恢复时继续做乐观锁校验，不能省略成“预览通过即可恢复”。
+type BackupPreview struct {
+	Backup          Backup     `json:"backup"`
+	CurrentHash     string     `json:"currentHash"`
+	CurrentPresent  bool       `json:"currentPresent"`
+	Same            bool       `json:"same"`
+	Valid           bool       `json:"valid"`
+	ValidationError string     `json:"validationError,omitempty"`
+	Diff            []DiffLine `json:"diff"`
+	DiffTruncated   bool       `json:"diffTruncated,omitempty"`
+}
+
+type DiffLine struct {
+	Kind      string `json:"kind"`
+	OldLine   int    `json:"oldLine,omitempty"`
+	NewLine   int    `json:"newLine,omitempty"`
+	Text      string `json:"text"`
+	SkipCount int    `json:"skipCount,omitempty"`
+}
+
 type backupMetadata struct {
 	Name string `json:"name"`
 	Note string `json:"note,omitempty"`
@@ -394,6 +415,53 @@ func (m *Manager) DeleteBackup(_ context.Context, backupID string) error {
 		return fmt.Errorf("同步配置备份目录: %w", err)
 	}
 	return nil
+}
+
+// PreviewBackup 比较存档与当前配置，并用当前 dae 校验存档内容。
+// 它只会创建并清理候选临时文件，不替换配置，也不重载服务。
+func (m *Manager) PreviewBackup(ctx context.Context, backupID string) (BackupPreview, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !validBackupID(backupID) {
+		return BackupPreview{}, ErrNotFound
+	}
+	backup, err := m.backupByID(backupID)
+	if err != nil {
+		return BackupPreview{}, err
+	}
+	backupContent, err := readFileLimited(filepath.Join(m.backupDir, backupID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return BackupPreview{}, ErrNotFound
+		}
+		return BackupPreview{}, err
+	}
+	currentContent, _, currentHash, currentPresent, err := m.readCurrentBytes()
+	if err != nil {
+		return BackupPreview{}, err
+	}
+	lines, truncated := compareConfigLines(currentContent, backupContent)
+	preview := BackupPreview{
+		Backup:         backup,
+		CurrentHash:    currentHash,
+		CurrentPresent: currentPresent,
+		Same:           currentPresent && currentHash == backup.Hash,
+		Diff:           lines,
+		DiffTruncated:  truncated,
+	}
+
+	tempPath, cleanup, err := m.writeCandidate(backupContent, 0o600)
+	if err != nil {
+		return BackupPreview{}, err
+	}
+	defer cleanup()
+	if err := m.control.Validate(ctx, tempPath); err != nil {
+		preview.ValidationError = err.Error()
+		return preview, nil
+	}
+	preview.Valid = true
+	return preview, nil
 }
 
 func (m *Manager) Restore(ctx context.Context, backupID, expectedHash string, apply bool) (SaveResult, error) {

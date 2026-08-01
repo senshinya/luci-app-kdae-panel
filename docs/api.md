@@ -46,6 +46,7 @@ X-CSRF-Token: <csrfToken>
 | `POST` | `/config/backups` | 将当前入口配置保存为带名称、备注的手动存档 |
 | `PUT` | `/config/backups/{id}` | 修改存档名称和备注 |
 | `DELETE` | `/config/backups/{id}` | 删除存档内容及其元数据 |
+| `GET` | `/config/backups/{id}/preview` | 对比存档与当前配置，并用当前 dae 预先校验 |
 | `POST` | `/config/backups/{id}/restore` | 恢复指定备份或存档 |
 
 创建和编辑存档请求体：
@@ -77,6 +78,8 @@ X-CSRF-Token: <csrfToken>
 
 所有备份（包括手动存档）共用最多 50 份、总大小 256 MiB 的保留上限。达到上限时按文件创建时间清理最旧的备份，手动存档的元数据会随对应内容一起清理。
 
+恢复前应先请求 `GET /config/backups/{id}/preview`。响应包含存档元数据、当前配置哈希、`same`、`valid`、校验错误和逐行 `diff`；前端以 `currentHash` 作为恢复请求的乐观锁。精确差异使用有边界的行级比较，最多返回 4000 行；输入超过 5 万行时不展开差异，但仍完整执行 dae 配置校验。预览不能代替恢复事务内的最终校验，磁盘在两次请求之间变化时恢复会返回 `409 configuration_conflict`。
+
 常见错误码：
 
 | HTTP | code | 含义 |
@@ -94,6 +97,8 @@ X-CSRF-Token: <csrfToken>
 |---|---|---|
 | `GET` | `/dae/install` | 当前安装状态与正在进行的任务 |
 | `GET` | `/dae/versions?source=official\|kdae` | 列出上游与本地版本 |
+| `GET` | `/dae/compatibility` | 读取当前版本预检任务 |
+| `POST` | `/dae/compatibility` | 下载并预检指定版本，不替换当前二进制 |
 | `POST` | `/dae/install` | 开始安装指定版本 |
 | `DELETE` | `/dae/cache` | 删除指定版本的本地缓存 |
 | `POST` | `/dae/rollback` | 回滚到上一版本 |
@@ -104,6 +109,8 @@ X-CSRF-Token: <csrfToken>
 ```json
 { "source": "kdae", "ref": "30187784287", "label": "d63a0c1" }
 ```
+
+兼容性预检使用相同请求体，立即返回 `202`。目标二进制会先进入本地版本库，再依次检查 ELF、`--version`、`export outline` 和当前配置 `validate`；全过程不替换 `/usr/bin/dae`，也不启动、停止或重载服务。预检通过不削弱安装事务：真正切换时仍会重新验证缓存摘要和当前配置。预检、安装、回滚、卸载和缓存删除共享版本任务门，同时只能执行一项。
 
 `source` 只接受 `official` 与 `kdae` 两个枚举值，仓库地址在代码中写死，不接受外部指定。`ref` 对官方来源是发布 tag，对 kdae 是构建编号。`GET /dae/versions` 另接受 `limit` 参数（1–100，默认 30），超出范围返回 `400 invalid_limit`。
 
@@ -288,6 +295,17 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 
 ## 服务与日志
 
+### 故障诊断
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/diagnostics/report` | 汇总 dae、配置、Geo、网络、内核、eBPF 基础条件与近期异常日志 |
+| `GET` | `/diagnostics/sysdump` | 调用 dae 公开命令导出原始 sysdump 归档 |
+
+诊断报告的每个检查项都包含 `level`（`ok` / `warning` / `error` / `unknown`）、摘要、证据详情和可选建议。独立检查并发执行，单个子系统不可读时对应项目记为 `unknown`，不会让整份报告返回 `500`。日志范围取当前服务周期与最近 30 分钟中的较短者，最多展示 12 条异常；正常 reload 生命周期的 warning 会被降噪。报告只使用 dae 公开命令、服务与日志接口（systemd/journald 或 procd/`logread`）、当前配置、Geo 状态及 Linux `/proc`、`/sys` 标准接口，不读取 dae 内部 eBPF Map。
+
+判定逻辑与 `level` 两个后端完全一致，分叉的只有证据标签和修复建议：systemd 下指向 `systemctl status dae`、journald、`dae.service` 和单元的 `ReadWritePaths`，procd 下换成 `ubus call service list`、`logread`、`/etc/init.d/dae`，缺 BTF 时说明那是固件编译期选项而非可安装的软件包。诊断页只在用户已经出故障时才会被点开，此时给出一条本机不存在的命令比不给更糟。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/host/interfaces` | 本机网络接口及其 IP/CIDR 地址，供 global 接口选择器使用 |
@@ -298,7 +316,6 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 | `POST` | `/service/actions/reload` | 运行中按服务后端记录的主进程号执行 `dae reload`；未运行则返回延后状态 |
 | `POST` | `/service/actions/suspend` | 执行 `dae suspend` |
 | `GET` | `/logs?limit=200` | 最近 1–500 条服务日志（systemd 后端读 journald，procd 后端读 `logread`） |
-| `GET` | `/diagnostics/sysdump` | 执行 dae sysdump，并以 `application/gzip` 下载生成的归档 |
 
 所有动作名和参数都由服务端白名单决定。URL、请求体和查询参数都不能注入额外命令参数。
 

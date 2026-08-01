@@ -25,6 +25,25 @@ export interface DaeReport {
   detectedAt: string
 }
 
+export type DiagnosticLevel = 'ok' | 'warning' | 'error' | 'unknown'
+
+export interface DiagnosticItem {
+  id: string
+  category: string
+  title: string
+  level: DiagnosticLevel
+  summary: string
+  details?: string[]
+  suggestion?: string
+}
+
+export interface DiagnosticReport {
+  generatedAt: string
+  overall: DiagnosticLevel
+  counts: Record<DiagnosticLevel, number>
+  items: DiagnosticItem[]
+}
+
 export interface OutlineElement {
   name?: string
   mapping?: string
@@ -94,6 +113,25 @@ export interface ConfigBackup {
   note?: string
 }
 
+export interface ConfigDiffLine {
+  kind: 'context' | 'add' | 'remove' | 'skip'
+  oldLine?: number
+  newLine?: number
+  text: string
+  skipCount?: number
+}
+
+export interface ConfigBackupPreview {
+  backup: ConfigBackup
+  currentHash: string
+  currentPresent: boolean
+  same: boolean
+  valid: boolean
+  validationError?: string
+  diff: ConfigDiffLine[]
+  diffTruncated?: boolean
+}
+
 export type UpstreamSource = 'official' | 'kdae'
 
 export interface UpstreamVersion {
@@ -160,6 +198,19 @@ export interface InstallJob {
   startedAt?: string
   endedAt?: string
   error?: string
+}
+
+export interface DaeCompatibility {
+  compatible: boolean
+  version?: string
+  outlineSupported: boolean
+  configPresent: boolean
+  validationError?: string
+  problem?: string
+}
+
+export interface CompatibilityJob extends InstallJob {
+  result?: DaeCompatibility
 }
 
 export interface GeoFile {

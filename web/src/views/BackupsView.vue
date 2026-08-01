@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { h, onMounted, ref } from 'vue'
-import { NButton, NCard, NDataTable, NEmpty, NIcon, NInput, NModal, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { CreateOutline, PencilOutline, RefreshOutline, ReturnUpBackOutline, TrashOutline } from '@vicons/ionicons5'
-import { APIError, deleteJSON, getJSON, postJSON, putJSON } from '../api/client'
-import type { ConfigBackup, ConfigDocument, ConfigSaveResult } from '../types/api'
+import { NAlert, NButton, NCard, NDataTable, NEmpty, NIcon, NInput, NModal, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { CreateOutline, GitCompareOutline, PencilOutline, RefreshOutline, ReturnUpBackOutline, TrashOutline } from '@vicons/ionicons5'
+import { deleteJSON, getJSON, postJSON, putJSON } from '../api/client'
+import type { ConfigBackup, ConfigBackupPreview, ConfigSaveResult } from '../types/api'
 import { useMobileViewport } from '../composables/useMobileViewport'
 import { formatBytes, formatDateTime, shortHash } from '../utils/format'
 
@@ -19,6 +19,9 @@ const saving = ref(false)
 const editingID = ref('')
 const draftName = ref('')
 const draftNote = ref('')
+const previewVisible = ref(false)
+const previewLoading = ref('')
+const preview = ref<ConfigBackupPreview | null>(null)
 
 const columns: DataTableColumns<ConfigBackup> = [
   {
@@ -61,7 +64,7 @@ const columns: DataTableColumns<ConfigBackup> = [
   {
     title: '操作',
     key: 'actions',
-    width: 250,
+    width: 286,
     fixed: 'right',
     render: (row) => h(
       NSpace,
@@ -69,10 +72,18 @@ const columns: DataTableColumns<ConfigBackup> = [
       {
         default: () => [
           h(NButton, {
+            size: 'small', quaternary: true, title: '与当前配置比较',
+            loading: previewLoading.value === row.id,
+            disabled: Boolean(restoring.value || deleting.value || previewLoading.value),
+            onClick: () => void openPreview(row),
+          }, {
+            icon: () => h(NIcon, null, { default: () => h(GitCompareOutline) }),
+          }),
+          h(NButton, {
             size: 'small', secondary: true, type: 'primary',
             loading: restoring.value === row.id,
-            disabled: Boolean(restoring.value || deleting.value),
-            onClick: () => confirmRestore(row),
+            disabled: Boolean(restoring.value || deleting.value || previewLoading.value),
+            onClick: () => void openPreview(row),
           }, {
             icon: () => h(NIcon, null, { default: () => h(ReturnUpBackOutline) }),
             default: () => '恢复',
@@ -109,14 +120,18 @@ async function load() {
   }
 }
 
-function confirmRestore(backup: ConfigBackup) {
-  dialog.warning({
-    title: '恢复配置备份',
-    content: `将恢复“${backup.name || '自动备份'}”（${formatDateTime(backup.createdAt)}），并执行 dae reload。当前配置也会先生成新备份。`,
-    positiveText: '恢复并重载',
-    negativeText: '取消',
-    onPositiveClick: () => restore(backup),
-  })
+async function openPreview(backup: ConfigBackup) {
+  previewLoading.value = backup.id
+  try {
+    preview.value = await getJSON<ConfigBackupPreview>(
+      `/api/v1/config/backups/${encodeURIComponent(backup.id)}/preview`,
+    )
+    previewVisible.value = true
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '比较配置存档失败')
+  } finally {
+    previewLoading.value = ''
+  }
 }
 
 function openEditor(backup?: ConfigBackup) {
@@ -174,19 +189,15 @@ async function deleteBackup(backup: ConfigBackup) {
   }
 }
 
-async function restore(backup: ConfigBackup) {
+async function restore(preflight: ConfigBackupPreview) {
+  const backup = preflight.backup
   restoring.value = backup.id
   try {
-    let expectedHash = ''
-    try {
-      expectedHash = (await getJSON<ConfigDocument>('/api/v1/config')).hash
-    } catch (error) {
-      if (!(error instanceof APIError && error.status === 404)) throw error
-    }
     const result = await postJSON<ConfigSaveResult>(`/api/v1/config/backups/${encodeURIComponent(backup.id)}/restore`, {
-      expectedHash,
+      expectedHash: preflight.currentHash,
       apply: true,
     })
+    previewVisible.value = false
     message.success(result.deferred
       ? '配置已恢复；dae 当前未运行，下次启动时生效'
       : '配置已恢复并完成无损重载')
@@ -244,10 +255,18 @@ onMounted(() => void load())
                 secondary
                 type="primary"
                 :loading="restoring === backup.id"
-                :disabled="Boolean(restoring || deleting)"
-                @click="confirmRestore(backup)"
+                :disabled="Boolean(restoring || deleting || previewLoading)"
+                @click="openPreview(backup)"
               >
                 <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复
+              </NButton>
+              <NButton
+                secondary
+                :loading="previewLoading === backup.id"
+                :disabled="Boolean(restoring || deleting || previewLoading)"
+                @click="openPreview(backup)"
+              >
+                <template #icon><NIcon><GitCompareOutline /></NIcon></template>比较
               </NButton>
               <NButton secondary :disabled="Boolean(restoring || deleting)" @click="openEditor(backup)">
                 <template #icon><NIcon><PencilOutline /></NIcon></template>编辑
@@ -284,6 +303,61 @@ onMounted(() => void load())
           <NButton @click="editorVisible = false">取消</NButton>
           <NButton type="primary" :loading="saving" :disabled="!draftName.trim()" @click="saveMetadata">
             {{ editingID ? '保存修改' : '保存存档' }}
+          </NButton>
+        </NSpace>
+      </template>
+    </NModal>
+
+    <NModal
+      v-model:show="previewVisible"
+      preset="card"
+      :title="`配置差异 · ${preview?.backup.name || '自动备份'}`"
+      class="backup-diff-modal"
+    >
+      <template v-if="preview">
+        <NAlert v-if="!preview.valid" type="error" :bordered="false">
+          这份存档无法通过当前 dae 的配置校验，不能恢复。
+          <pre class="backup-validation-error">{{ preview.validationError }}</pre>
+        </NAlert>
+        <NAlert v-else-if="preview.same" type="success" :bordered="false">
+          这份存档与当前配置内容相同，无需恢复。
+        </NAlert>
+        <NAlert v-else-if="preview.diffTruncated" type="warning" :bordered="false">
+          配置差异较大，下面只展示有边界的结果；目标配置仍已完整通过 dae 校验。
+        </NAlert>
+        <div class="backup-diff-legend">
+          <span class="backup-diff-remove">− 当前配置删除</span>
+          <span class="backup-diff-add">+ 存档配置加入</span>
+        </div>
+        <div class="backup-diff" role="region" aria-label="当前配置与存档配置差异">
+          <div
+            v-for="(line, index) in preview.diff"
+            :key="`${index}:${line.kind}:${line.oldLine}:${line.newLine}`"
+            class="backup-diff-line"
+            :class="`backup-diff-${line.kind}`"
+          >
+            <template v-if="line.kind === 'skip'">
+              <span class="backup-diff-skip-copy">{{ line.text }}（{{ line.skipCount }} 行）</span>
+            </template>
+            <template v-else>
+              <span class="backup-diff-number">{{ line.oldLine || '' }}</span>
+              <span class="backup-diff-number">{{ line.newLine || '' }}</span>
+              <span class="backup-diff-mark">{{ line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' ' }}</span>
+              <code>{{ line.text || ' ' }}</code>
+            </template>
+          </div>
+        </div>
+      </template>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="previewVisible = false">关闭</NButton>
+          <NButton
+            type="primary"
+            :loading="Boolean(preview && restoring === preview.backup.id)"
+            :disabled="!preview?.valid || preview.same"
+            @click="preview && restore(preview)"
+          >
+            <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复并重载
           </NButton>
         </NSpace>
       </template>

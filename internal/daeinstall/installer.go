@@ -117,6 +117,17 @@ type Status struct {
 	Problem  string   `json:"problem,omitempty"`
 }
 
+// Compatibility 是目标二进制对当前机器与配置的只读预检结果。
+// 预检只执行公开命令，不替换二进制，也不触碰服务状态。
+type Compatibility struct {
+	Compatible       bool   `json:"compatible"`
+	Version          string `json:"version,omitempty"`
+	OutlineSupported bool   `json:"outlineSupported"`
+	ConfigPresent    bool   `json:"configPresent"`
+	ValidationError  string `json:"validationError,omitempty"`
+	Problem          string `json:"problem,omitempty"`
+}
+
 type Installer struct {
 	binaryPath  string
 	configPath  string
@@ -444,6 +455,60 @@ func (i *Installer) DeleteCached(source upstream.Source, ref string) error {
 		return err
 	}
 	return i.cache.delete(source, ref, platform.Name)
+}
+
+// Preflight 用目标版本执行 --version、export outline 与 validate，但不安装它。
+// binary 已由 Acquire 完成来源校验；这里仍检查 ELF，防止缓存或解包契约回归。
+func (i *Installer) Preflight(ctx context.Context, binary []byte) (Compatibility, error) {
+	result := Compatibility{}
+	if err := assertELF(binary); err != nil {
+		result.Problem = err.Error()
+		return result, nil
+	}
+	directory := filepath.Dir(i.binaryPath)
+	if target, _, err := i.target(ctx); err == nil {
+		directory = filepath.Dir(target)
+	}
+	staged, cleanup, err := atomicfile.Stage(directory, binary, binaryMode)
+	if err != nil {
+		return result, fmt.Errorf("暂存待预检的 dae: %w", err)
+	}
+	defer cleanup()
+
+	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
+	report := i.newProbe(staged).Inspect(probeCtx)
+	cancelProbe()
+	result.Version = report.Version
+	result.OutlineSupported = report.OutlineSupported
+	if !report.Available {
+		result.Problem = report.Problem
+		if result.Problem == "" {
+			result.Problem = "目标版本无法在当前机器上运行"
+		}
+		return result, nil
+	}
+
+	if i.configPath == "" {
+		result.Compatible = true
+		return result, nil
+	}
+	if _, err := os.Stat(i.configPath); err != nil {
+		if os.IsNotExist(err) {
+			result.Compatible = true
+			return result, nil
+		}
+		return result, fmt.Errorf("读取当前配置状态: %w", err)
+	}
+	result.ConfigPresent = true
+	validateCtx, cancelValidate := context.WithTimeout(ctx, probeTimeout)
+	err = i.newProbe(staged).Validate(validateCtx, i.configPath)
+	cancelValidate()
+	if err != nil {
+		result.ValidationError = err.Error()
+		return result, nil
+	}
+	result.Compatible = true
+	return result, nil
 }
 
 // Install 把已下载的内容装上去。调用方应在持有全局控制锁时调用它。

@@ -341,6 +341,39 @@ func TestInstallUpgrade(t *testing.T) {
 	}
 }
 
+func TestPreflightValidatesWithoutReplacingBinary(t *testing.T) {
+	service := &fakeService{}
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, service)
+	seed(t, binaryPath, "v1")
+
+	result, err := installer.Preflight(context.Background(), elf("v2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Compatible || !result.ConfigPresent || result.Version != "dae \x7fELFv2" {
+		t.Fatalf("预检结果异常: %+v", result)
+	}
+	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v1")) {
+		t.Fatalf("预检不应替换当前二进制: %q", content)
+	}
+	if len(service.actions) != 0 {
+		t.Fatalf("预检不应控制服务: %v", service.actions)
+	}
+}
+
+func TestPreflightReportsConfigurationIncompatibility(t *testing.T) {
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, &fakeService{})
+	seed(t, binaryPath, "v1")
+
+	result, err := installer.Preflight(context.Background(), elf("rejects-config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Compatible || !strings.Contains(result.ValidationError, "不认识的字段") {
+		t.Fatalf("应明确报告配置不兼容: %+v", result)
+	}
+}
+
 func TestInstallPreservesInactiveServiceState(t *testing.T) {
 	service := &fakeService{activeState: "inactive"}
 	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, service)

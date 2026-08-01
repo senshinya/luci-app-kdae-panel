@@ -208,6 +208,67 @@ func TestListAndRestoreBackup(t *testing.T) {
 	}
 }
 
+func TestPreviewBackupValidatesAndShowsDiffWithoutChangingConfiguration(t *testing.T) {
+	controller := &fakeController{}
+	manager, entryPath := newTestManager(t, "global {\n  log_level: info\n}\n", controller)
+	backup, err := manager.CreateBackup(context.Background(), "当前", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entryPath, []byte("global {\n  log_level: warn\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := manager.PreviewBackup(context.Background(), backup.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Valid || preview.Same || !preview.CurrentPresent || preview.CurrentHash == "" {
+		t.Fatalf("预览状态异常: %+v", preview)
+	}
+	var added, removed bool
+	for _, line := range preview.Diff {
+		added = added || line.Kind == "add" && strings.Contains(line.Text, "info")
+		removed = removed || line.Kind == "remove" && strings.Contains(line.Text, "warn")
+	}
+	if !added || !removed {
+		t.Fatalf("差异方向应为当前配置到存档配置: %+v", preview.Diff)
+	}
+	content, err := os.ReadFile(entryPath)
+	if err != nil || !strings.Contains(string(content), "warn") {
+		t.Fatalf("预览不应改动当前配置: %q, %v", content, err)
+	}
+	if len(controller.validatedContent) == 0 || controller.reloadCount != 0 {
+		t.Fatalf("预览应校验但不重载: validate=%v reload=%d", controller.validatedContent, controller.reloadCount)
+	}
+}
+
+func TestPreviewBackupReportsValidationFailure(t *testing.T) {
+	controller := &fakeController{}
+	manager, _ := newTestManager(t, "legacy backup", controller)
+	backup, err := manager.CreateBackup(context.Background(), "不可用", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.validateErr = errors.New("unknown field legacy_option")
+
+	preview, err := manager.PreviewBackup(context.Background(), backup.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Valid || !strings.Contains(preview.ValidationError, "legacy_option") {
+		t.Fatalf("应把校验失败作为预览结果返回: %+v", preview)
+	}
+}
+
+func TestCompareConfigLinesBoundsHugeLineCount(t *testing.T) {
+	content := []byte(strings.Repeat("\n", maxDiffInputLines+1))
+	lines, truncated := compareConfigLines(content, []byte("global {}\n"))
+	if !truncated || len(lines) != 1 || lines[0].Kind != "skip" {
+		t.Fatalf("超大差异应受限: truncated=%t lines=%+v", truncated, lines)
+	}
+}
+
 func TestNamedBackupCanBeEditedRestoredAndDeleted(t *testing.T) {
 	controller := &fakeController{}
 	manager, _ := newTestManager(t, "stable config", controller)

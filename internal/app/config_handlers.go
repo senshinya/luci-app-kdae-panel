@@ -38,6 +38,7 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		router.HandleFunc("POST /api/v1/config/backups", unavailable)
 		router.HandleFunc("PUT /api/v1/config/backups/{id}", unavailable)
 		router.HandleFunc("DELETE /api/v1/config/backups/{id}", unavailable)
+		router.HandleFunc("GET /api/v1/config/backups/{id}/preview", unavailable)
 		router.HandleFunc("POST /api/v1/config/backups/{id}/restore", unavailable)
 		return
 	}
@@ -121,6 +122,14 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
+	})
+	router.HandleFunc("GET /api/v1/config/backups/{id}/preview", func(writer http.ResponseWriter, request *http.Request) {
+		preview, err := service.PreviewBackup(request.Context(), request.PathValue("id"))
+		if err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, preview)
 	})
 	router.HandleFunc("POST /api/v1/config/backups/{id}/restore", func(writer http.ResponseWriter, request *http.Request) {
 		var payload restoreBackupRequest

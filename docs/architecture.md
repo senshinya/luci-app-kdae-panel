@@ -90,6 +90,17 @@ kdae-panel
 `VerifyRemovable`、`Detect`、`Plan`、`Commit`），`daeinstall.Installer` 的安装、卸载事务逻辑不
 区分后端，只在构造时按 `host.Backend.Resolve()` 的结果选择其中一个实现。
 
+故障诊断（`internal/diagnostics`）是第三处必须分后端的地方，但分的只有措辞。检查项、判定条件、
+`level` 与汇总计数两套后端逐字相同，`internal/diagnostics/wording_test.go` 用同一组输入跑两遍并
+逐项比对 ID、分类与级别，防止有人顺手把"结论"也改成分支。分叉的是证据标签与修复建议，收在
+`internal/diagnostics/wording.go` 的一张表里：systemd 说 `systemctl status dae`、journald、
+`dae.service` 和单元的 `ReadWritePaths`，procd 说 `ubus call service list`、`logread`、
+`/etc/init.d/dae`；缺 BTF 时 systemd 说换内核，procd 说那是固件的编译期开关
+（`CONFIG_KERNEL_DEBUG_INFO_BTF`），装软件包补不出来。别处文案说错了顶多让人多看一眼，诊断页
+说错了是把一个已经卡在故障里的人直接支到不存在的文件和命令上，而会点开这一页的正是最没有余力
+分辨的那批用户。后端未知时退回 systemd 措辞——那是上游的原生部署，宁可对 procd 用户少说一句，
+也不要对 systemd 用户改口。
+
 ## 配置事务
 
 保存操作在进程级互斥锁内串行执行：

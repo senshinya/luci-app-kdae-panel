@@ -21,10 +21,88 @@ type InstallService interface {
 	Versions(ctx context.Context, source upstream.Source, limit int) ([]daeinstall.Version, error)
 	Acquire(ctx context.Context, source upstream.Source, ref, label string, requireBundle bool) (upstream.Bundle, bool, error)
 	DeleteCached(source upstream.Source, ref string) error
+	Preflight(ctx context.Context, binary []byte) (daeinstall.Compatibility, error)
 	Install(ctx context.Context, binary []byte, source upstream.Source, ref, label, platform string) (daeinstall.Status, error)
 	FirstInstall(ctx context.Context, bundle upstream.Bundle, source upstream.Source, ref, label string) (daeinstall.Status, error)
 	Rollback(ctx context.Context) (daeinstall.Status, error)
 	Uninstall(ctx context.Context, options daeinstall.UninstallOptions) error
+}
+
+type CompatibilityJob struct {
+	Phase     JobPhase                  `json:"phase"`
+	Source    string                    `json:"source,omitempty"`
+	Ref       string                    `json:"ref,omitempty"`
+	Label     string                    `json:"label,omitempty"`
+	Cached    bool                      `json:"cached,omitempty"`
+	Result    *daeinstall.Compatibility `json:"result,omitempty"`
+	StartedAt *time.Time                `json:"startedAt,omitempty"`
+	EndedAt   *time.Time                `json:"endedAt,omitempty"`
+	Error     string                    `json:"error,omitempty"`
+}
+
+type compatibilityJobs struct {
+	mu  sync.Mutex
+	job CompatibilityJob
+}
+
+// versionTaskGate 把下载、预检、切换、回滚、卸载与缓存删除视作同一类任务。
+// 这些动作会共享版本缓存或安装状态，必须在“检查并占用”这一步就原子互斥，
+// 不能先分别读取两套任务状态再启动，否则两个并发请求可能同时通过检查。
+type versionTaskGate struct {
+	mu   sync.Mutex
+	busy bool
+}
+
+func (g *versionTaskGate) begin() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.busy {
+		return false
+	}
+	g.busy = true
+	return true
+}
+
+func (g *versionTaskGate) end() {
+	g.mu.Lock()
+	g.busy = false
+	g.mu.Unlock()
+}
+
+func (j *compatibilityJobs) snapshot() CompatibilityJob {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.job
+}
+
+func (j *compatibilityJobs) begin(source, ref, label string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.job.Phase == PhaseDownloading || j.job.Phase == PhaseApplying {
+		return false
+	}
+	startedAt := time.Now().UTC()
+	j.job = CompatibilityJob{Phase: PhaseDownloading, Source: source, Ref: ref, Label: label, StartedAt: &startedAt}
+	return true
+}
+
+func (j *compatibilityJobs) checking(cached bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.job.Phase, j.job.Cached = PhaseApplying, cached
+}
+
+func (j *compatibilityJobs) finish(result *daeinstall.Compatibility, err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	endedAt := time.Now().UTC()
+	j.job.EndedAt = &endedAt
+	j.job.Result = result
+	if err != nil {
+		j.job.Phase, j.job.Error = PhaseFailed, err.Error()
+		return
+	}
+	j.job.Phase, j.job.Error = PhaseDone, ""
 }
 
 type installRequest struct {
@@ -132,6 +210,7 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 			"GET /api/v1/dae/install", "POST /api/v1/dae/install",
 			"GET /api/v1/dae/versions", "POST /api/v1/dae/rollback",
 			"DELETE /api/v1/dae/cache", "POST /api/v1/dae/uninstall",
+			"GET /api/v1/dae/compatibility", "POST /api/v1/dae/compatibility",
 		} {
 			router.HandleFunc(pattern, unavailable)
 		}
@@ -139,6 +218,8 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 	}
 
 	jobs := &installJobs{job: Job{Phase: PhaseIdle}}
+	compatibility := &compatibilityJobs{job: CompatibilityJob{Phase: PhaseIdle}}
+	versionTasks := &versionTaskGate{}
 
 	router.HandleFunc("GET /api/v1/dae/install", func(writer http.ResponseWriter, request *http.Request) {
 		status := service.Status(request.Context())
@@ -190,12 +271,51 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 			writeAPIError(writer, http.StatusBadRequest, "invalid_version", "必须指定要安装的版本")
 			return
 		}
+		if !versionTasks.begin() {
+			writeAPIError(writer, http.StatusConflict, "version_task_in_progress", "已有版本管理任务正在执行")
+			return
+		}
 		if !jobs.begin(PhaseDownloading, payload.Source, payload.Ref, payload.Label) {
+			versionTasks.end()
 			writeAPIError(writer, http.StatusConflict, "install_in_progress", "已有安装任务正在执行")
 			return
 		}
-		go runInstall(jobs, service, operations, logger, source, payload.Ref, payload.Label)
+		go runInstall(jobs, versionTasks, service, operations, logger, source, payload.Ref, payload.Label)
 		writeJSON(writer, http.StatusAccepted, map[string]any{"job": jobs.snapshot()})
+	})
+
+	router.HandleFunc("GET /api/v1/dae/compatibility", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, map[string]any{"job": compatibility.snapshot()})
+	})
+	router.HandleFunc("POST /api/v1/dae/compatibility", func(writer http.ResponseWriter, request *http.Request) {
+		var payload installRequest
+		if !decodeSmallJSONBody(writer, request, &payload) {
+			return
+		}
+		source, err := upstream.ParseSource(payload.Source)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_upstream_source", err.Error())
+			return
+		}
+		if payload.Ref == "" {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_version", "必须指定要预检的版本")
+			return
+		}
+		if !service.Status(request.Context()).Ready {
+			writeAPIError(writer, http.StatusConflict, "dae_not_installed", "首次安装会在安装事务内完成校验，无需单独预检")
+			return
+		}
+		if !versionTasks.begin() {
+			writeAPIError(writer, http.StatusConflict, "version_task_in_progress", "已有版本管理任务正在执行")
+			return
+		}
+		if !compatibility.begin(payload.Source, payload.Ref, payload.Label) {
+			versionTasks.end()
+			writeAPIError(writer, http.StatusConflict, "compatibility_in_progress", "已有兼容性预检正在执行")
+			return
+		}
+		go runCompatibility(compatibility, versionTasks, service, logger, source, payload.Ref, payload.Label)
+		writeJSON(writer, http.StatusAccepted, map[string]any{"job": compatibility.snapshot()})
 	})
 
 	router.HandleFunc("DELETE /api/v1/dae/cache", func(writer http.ResponseWriter, request *http.Request) {
@@ -212,6 +332,11 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 			writeAPIError(writer, http.StatusBadRequest, "invalid_version", "必须指定要删除的本地版本")
 			return
 		}
+		if !versionTasks.begin() {
+			writeAPIError(writer, http.StatusConflict, "version_task_in_progress", "已有版本管理任务正在执行")
+			return
+		}
+		defer versionTasks.end()
 		if err := service.DeleteCached(source, payload.Ref); err != nil {
 			if errors.Is(err, daeinstall.ErrCachedVersionNotFound) {
 				writeAPIError(writer, http.StatusNotFound, "cached_version_not_found", err.Error())
@@ -224,11 +349,16 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 	})
 
 	router.HandleFunc("POST /api/v1/dae/rollback", func(writer http.ResponseWriter, request *http.Request) {
+		if !versionTasks.begin() {
+			writeAPIError(writer, http.StatusConflict, "version_task_in_progress", "已有版本管理任务正在执行")
+			return
+		}
 		if !jobs.begin(PhaseApplying, "", "", "回滚") {
+			versionTasks.end()
 			writeAPIError(writer, http.StatusConflict, "install_in_progress", "已有安装任务正在执行")
 			return
 		}
-		go runRollback(jobs, service, operations, logger)
+		go runRollback(jobs, versionTasks, service, operations, logger)
 		writeJSON(writer, http.StatusAccepted, map[string]any{"job": jobs.snapshot()})
 	})
 
@@ -238,20 +368,47 @@ func registerUpstreamRoutes(router *http.ServeMux, service InstallService, opera
 		if !decodeOptionalJSONBody(writer, request, &options) {
 			return
 		}
+		if !versionTasks.begin() {
+			writeAPIError(writer, http.StatusConflict, "version_task_in_progress", "已有版本管理任务正在执行")
+			return
+		}
 		if !jobs.begin(PhaseApplying, "", "", "卸载 dae") {
+			versionTasks.end()
 			writeAPIError(writer, http.StatusConflict, "install_in_progress", "已有版本管理任务正在执行")
 			return
 		}
-		go runUninstall(jobs, service, operations, logger, options)
+		go runUninstall(jobs, versionTasks, service, operations, logger, options)
 		writeJSON(writer, http.StatusAccepted, map[string]any{"job": jobs.snapshot()})
 	})
+}
+
+func runCompatibility(jobs *compatibilityJobs, versionTasks *versionTaskGate, service InstallService, logger *slog.Logger,
+	source upstream.Source, ref, label string) {
+	defer versionTasks.end()
+	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
+	defer cancel()
+	logger.Info("开始预检 dae 版本兼容性", "source", source, "ref", ref)
+	bundle, cached, err := service.Acquire(ctx, source, ref, label, false)
+	if err != nil {
+		jobs.finish(nil, err)
+		return
+	}
+	jobs.checking(cached)
+	result, err := service.Preflight(ctx, bundle.Binary)
+	if err != nil {
+		jobs.finish(nil, err)
+		return
+	}
+	jobs.finish(&result, nil)
 }
 
 // installTimeout 覆盖下载与替换的总时长。任务在后台跑，不受 HTTP 写超时约束。
 const installTimeout = 15 * time.Minute
 
-func runInstall(jobs *installJobs, service InstallService, operations *sync.Mutex, logger *slog.Logger,
+func runInstall(jobs *installJobs, versionTasks *versionTaskGate, service InstallService,
+	operations *sync.Mutex, logger *slog.Logger,
 	source upstream.Source, ref, label string) {
+	defer versionTasks.end()
 	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
 	defer cancel()
 
@@ -289,7 +446,9 @@ func runInstall(jobs *installJobs, service InstallService, operations *sync.Mute
 	jobs.finish(nil)
 }
 
-func runRollback(jobs *installJobs, service InstallService, operations *sync.Mutex, logger *slog.Logger) {
+func runRollback(jobs *installJobs, versionTasks *versionTaskGate, service InstallService,
+	operations *sync.Mutex, logger *slog.Logger) {
+	defer versionTasks.end()
 	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
 	defer cancel()
 
@@ -304,8 +463,10 @@ func runRollback(jobs *installJobs, service InstallService, operations *sync.Mut
 	jobs.finish(nil)
 }
 
-func runUninstall(jobs *installJobs, service InstallService, operations *sync.Mutex, logger *slog.Logger,
+func runUninstall(jobs *installJobs, versionTasks *versionTaskGate, service InstallService,
+	operations *sync.Mutex, logger *slog.Logger,
 	options daeinstall.UninstallOptions) {
+	defer versionTasks.end()
 	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
 	defer cancel()
 

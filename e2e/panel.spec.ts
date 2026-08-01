@@ -112,7 +112,7 @@ async function expectColumnsAligned(locator: import('@playwright/test').Locator)
 // 这是唯一同时压到路由守卫、CSRF、配置事务与 dae 校验桩的测试，
 // 步骤之间共享账号与磁盘状态，因此收在一个用例里按序执行。
 test('首次初始化到编排保存的完整链路', async ({ page }) => {
-  test.setTimeout(UPDATE_SCREENSHOTS ? 120_000 : 60_000)
+  test.setTimeout(UPDATE_SCREENSHOTS ? 120_000 : 90_000)
   await test.step('通过一次性链接初始化管理员', async () => {
     await page.goto('/setup#bootstrap=e2e-bootstrap')
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible()
@@ -466,16 +466,33 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await capture(page, 'backups.png', 1600, 900)
 
     await renamedRow.getByRole('button', { name: '恢复' }).click()
-    await page.locator('.n-dialog').getByRole('button', { name: '恢复并重载' }).click()
+    const diffModal = page.locator('.n-modal', { hasText: '配置差异 · E2E 已命名配置' })
+    await expect(diffModal.getByText('这份存档与当前配置内容相同，无需恢复。')).toBeVisible()
+    await expect(diffModal.getByRole('button', { name: '恢复并重载' })).toBeDisabled()
+    await diffModal.getByRole('button', { name: '关闭' }).click()
+
+    // 先让当前配置与存档产生差异，再验证“预览 -> 恢复”的完整事务入口。
+    await page.goto('/config')
+    const configEditor = page.locator('.config-editor textarea')
+    await configEditor.fill((await configEditor.inputValue()).replace('log_level: debug', 'log_level: info'))
+    await page.locator('.page-toolbar').getByRole('button', { name: '保存并重载' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '保存并重载' }).click()
+    await expect(page.locator('.n-message').getByText('配置已保存并完成无损重载')).toBeVisible()
+    await page.goto('/backups')
+    const restorableRow = page.locator('tr', { hasText: 'E2E 已命名配置' })
+    await restorableRow.getByRole('button', { name: '恢复' }).click()
+    const restorableDiff = page.locator('.n-modal', { hasText: '配置差异 · E2E 已命名配置' })
+    await expect(restorableDiff.locator('.backup-diff-add, .backup-diff-remove')).not.toHaveCount(0)
+    await restorableDiff.getByRole('button', { name: '恢复并重载' }).click()
     await expect(page.getByText('配置已恢复并完成无损重载')).toBeVisible()
 
-    await renamedRow.getByTitle('删除配置存档').click()
+    await restorableRow.getByTitle('删除配置存档').click()
     await page.locator('.n-dialog').getByRole('button', { name: '删除存档' }).click()
     await expect(page.locator('tr', { hasText: 'E2E 已命名配置' })).toHaveCount(0)
   })
 
   await test.step('设置页左右列保持同一底边', async () => {
-    const targetPanelVersion = 'v0.9.7'
+    const targetPanelVersion = 'v1.0.0'
     let upgradeStarted = false
     await page.route('**/api/v1/panel/update/check', (route) => route.fulfill({
       contentType: 'application/json',
@@ -734,6 +751,33 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/logs?*')
   })
 
+  await test.step('故障诊断中心聚合公开检查并提供操作建议', async () => {
+    await page.route('**/api/v1/diagnostics/report', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        generatedAt: '2026-08-01T08:30:00Z',
+        overall: 'warning',
+        counts: { ok: 7, warning: 1, error: 0, unknown: 1 },
+        items: [
+          { id: 'service', category: '服务', title: 'dae 服务', level: 'ok', summary: '服务运行正常', details: ['状态：active/running', '主进程 PID：1487'] },
+          { id: 'service-boot', category: '服务', title: '开机状态', level: 'ok', summary: 'dae 已设为开机启动', details: ['systemd 状态：enabled'] },
+          { id: 'configuration', category: '配置', title: '当前配置', level: 'ok', summary: '当前配置已通过 dae validate', details: ['路径：/etc/dae/config.dae'] },
+          { id: 'geo', category: '数据', title: 'Geo 数据', level: 'warning', summary: '面板可见目录缺少 geosite.dat', suggestion: '如果路由使用 geosite，请先到 Geo 数据页更新数据' },
+          { id: 'kernel', category: '运行环境', title: 'Linux 内核', level: 'ok', summary: 'Linux 内核信息可读', details: ['内核：6.12.0-amd64'] },
+          { id: 'logs', category: '日志', title: '近期异常日志', level: 'unknown', summary: '无法读取 journald 日志', details: ['permission denied while reading a deliberately long diagnostic detail that must wrap on mobile instead of widening the page'] },
+        ],
+      }),
+    }))
+    await page.goto('/diagnostics')
+    await expect(page.getByRole('heading', { name: '故障诊断', level: 2 })).toBeVisible()
+    await expect(page.getByText('基础检查通过，但有需要确认的项目')).toBeVisible()
+    await expect(page.getByText('当前配置已通过 dae validate')).toBeVisible()
+    await expect(page.getByText('如果路由使用 geosite，请先到 Geo 数据页更新数据')).toBeVisible()
+    await expect(page.locator('.diagnostic-item')).toHaveCount(6)
+    await expectCardsAligned(page.locator('.diagnostic-item'))
+    await capture(page, 'diagnostics.png', 1600, 1120)
+  })
+
   await test.step('移动端导航、核心列表与编辑器使用独立布局', async () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/proxy')
@@ -843,6 +887,13 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
     await page.unroute('**/api/v1/config/backups')
+
+    await page.goto('/diagnostics')
+    await expect(page.getByRole('heading', { name: '故障诊断', level: 2 })).toBeVisible()
+    await expect(page.locator('.diagnostic-item')).toHaveCount(6)
+    overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/diagnostics/report')
 
     await page.route('**/api/v1/logs?*', (route) => route.fulfill({
       contentType: 'application/json',

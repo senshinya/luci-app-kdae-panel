@@ -23,6 +23,7 @@ import (
 	"github.com/tuoro/kdae-panel/internal/configstore"
 	"github.com/tuoro/kdae-panel/internal/dae"
 	"github.com/tuoro/kdae-panel/internal/daeinstall"
+	"github.com/tuoro/kdae-panel/internal/diagnostics"
 	"github.com/tuoro/kdae-panel/internal/geodata"
 	"github.com/tuoro/kdae-panel/internal/githubauth"
 	"github.com/tuoro/kdae-panel/internal/host"
@@ -55,6 +56,7 @@ type ConfigurationService interface {
 	CreateBackup(ctx context.Context, name, note string) (configstore.Backup, error)
 	UpdateBackup(ctx context.Context, backupID, name, note string) (configstore.Backup, error)
 	DeleteBackup(ctx context.Context, backupID string) error
+	PreviewBackup(ctx context.Context, backupID string) (configstore.BackupPreview, error)
 	Restore(ctx context.Context, backupID, expectedHash string, apply bool) (configstore.SaveResult, error)
 }
 
@@ -368,6 +370,13 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	registerScheduleRoutes(router, "/api/v1/schedule/geo", geoScheduleService)
 	registerUpstreamRoutes(router, dependencies.Install, operations, logger, backend)
 	registerGeoRoutes(router, geo, geoSources, backend)
+	diagnosticCollector := diagnostics.New(diagnostics.Options{
+		Dae: dependencies.Dae, Configuration: dependencies.Configuration,
+		Host: dependencies.Host, Geo: dependencies.Geo, Backend: backend,
+	})
+	router.HandleFunc("GET /api/v1/diagnostics/report", func(writer http.ResponseWriter, request *http.Request) {
+		writeJSON(writer, http.StatusOK, diagnosticCollector.Report(request.Context()))
+	})
 	registerAuthenticationRoutes(router, dependencies.Authentication, cfg.SecureCookie, cfg.BootstrapToken, cfg.SetupURLFile, proxyTrust, logger)
 	apiNotFound := func(writer http.ResponseWriter, _ *http.Request) {
 		writeAPIError(writer, http.StatusNotFound, "api_not_found", "API 路径不存在")

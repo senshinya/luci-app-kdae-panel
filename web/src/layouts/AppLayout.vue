@@ -27,6 +27,7 @@ import {
   GridOutline,
   LogOutOutline,
   MenuOutline,
+  PulseOutline,
   ReaderOutline,
   SettingsOutline,
 } from '@vicons/ionicons5'
@@ -63,6 +64,7 @@ const menuOptions: MenuOption[] = [
   menuLink('配置能力', 'schema', CodeSlashOutline),
   menuLink('dae 版本', 'versions', CubeOutline),
   menuLink('Geo 数据', 'geo', EarthOutline),
+  menuLink('故障诊断', 'diagnostics', PulseOutline),
   menuLink('运行日志', 'logs', ReaderOutline),
   menuLink('配置备份', 'backups', ArchiveOutline),
   menuLink('面板设置', 'settings', SettingsOutline),

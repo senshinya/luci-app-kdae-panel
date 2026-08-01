@@ -305,6 +305,27 @@ OpenWrt 上根本不存在。面板不会拿 0 去充数——那会让"服务�
 判定为起来就崩，与 systemd 那条 `NRestarts` 递增的判据等效。仪表盘不展示这两个数，接口里
 `restarts` 在 procd 上不出现。
 
+## 故障诊断页的差异
+
+诊断中心的检查项、判定条件和级别两种部署完全一致，不一致的是它让你去查什么：systemd 那套建议里
+的 `systemctl status dae`、journald、`dae.service` 和单元的 `ReadWritePaths` 在 OpenWrt 上一个都
+不存在，因此 procd 下换成 `ubus call service list`、`logread -e dae` 和 `/etc/init.d/dae`，服务项
+里那行证据也从「单元文件」改叫「init 脚本」。
+
+两处结论需要按 OpenWrt 的实际情况再读一遍：
+
+- **「近期异常日志」正常不等于真的没出过错。** 这项检查取当前服务周期与最近 30 分钟中较短的那
+  一段，而它读的是 `logread` 的环形缓冲区（见上面「日志功能的实际能力」）。默认 64 KiB 的缓冲区
+  在 `info` 级别下可能只装得下几分钟，路由器重启后更是直接清空——记录被挤掉时这一项照样显示
+  正常。systemd 部署的 journald 可持久化，同样的结论在那边更可信。
+- **「eBPF 基础能力」缺 BTF 时无法靠装包解决。** `/sys/kernel/btf/vmlinux` 由内核编译期选项
+  `CONFIG_KERNEL_DEBUG_INFO_BTF` 决定，OpenWrt 官方 snapshot 与部分厂商固件默认不开。这时只能
+  换一份带 BTF 的固件，装任何软件包都补不出来，因此 procd 下的建议不会让你"升级内核"。
+  dae 已经在跑时这一项直接判定为正常——运行中的事实比静态探测更硬。
+
+「导出 sysdump」两种部署走的是同一条路径（`dae sysdump` 生成到私有临时目录再下载），与 init
+系统无关。
+
 ## 排障
 
 ```sh
