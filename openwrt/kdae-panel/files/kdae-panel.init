@@ -5,21 +5,33 @@ START=99
 STOP=10
 
 PANEL_BIN=/usr/bin/kdae-panel
+PANEL_DATA_DIR=/etc/kdae-panel
 RUN_DIR=/var/run/kdae-panel
 
 start_service() {
 	config_load kdae-panel
 
-	local enabled listen_addr listen_port data_dir dae_binary dae_config service_name
+	local enabled listen_addr listen_port dae_binary dae_config service_name
 	local enable_dae_install enable_geo_update
 	local trusted_proxies session_ttl secure_cookie
+	local legacy_data_dir
 
 	config_get_bool enabled main enabled 1
 	[ "$enabled" = 1 ] || return 0
 
+	# data_dir 曾经可配，现在固定为 PANEL_DATA_DIR。/etc/config/kdae-panel 是
+	# conffile，升级不会覆盖，所以改过这一项的机器仍留着旧值。默默忽略它等于
+	# 从一个空目录重新开始：数据库、管理员账户和全部备份都还在老地方，界面上
+	# 却什么都没有，而且没有任何报错指向原因。宁可拒绝启动，让用户先搬完数据。
+	config_get legacy_data_dir main data_dir "$PANEL_DATA_DIR"
+	if [ "$legacy_data_dir" != "$PANEL_DATA_DIR" ]; then
+		logger -t kdae-panel -p daemon.err \
+			"UCI 里的 data_dir=$legacy_data_dir 已不再支持；数据仍在原处，请把它搬到 $PANEL_DATA_DIR 再执行 uci delete kdae-panel.main.data_dir && uci commit kdae-panel"
+		return 1
+	fi
+
 	config_get listen_addr main listen_addr '0.0.0.0'
 	config_get listen_port main listen_port '2026'
-	config_get data_dir main data_dir '/etc/kdae-panel'
 	config_get dae_binary main dae_binary '/usr/bin/dae'
 	config_get dae_config main dae_config '/etc/dae/config.dae'
 	config_get service_name main service_name 'dae'
@@ -30,12 +42,25 @@ start_service() {
 	config_get_bool secure_cookie main secure_cookie 0
 
 	# 数据目录在 overlay 上，必须持久；配置里可能有订阅地址与节点凭据，
-	# 因此只给 root 读写。
-	mkdir -p "$data_dir/backups" "$(dirname "$dae_config")"
-	chmod 0700 "$data_dir"
+	# 因此只给 root 读写。路径固定为面板专用目录，绝不对 UCI 输入的任意
+	# 目录执行 chmod；专用目录本身是软链时也拒绝跟随。
+	if [ -L "$PANEL_DATA_DIR" ]; then
+		logger -t kdae-panel -p daemon.err "$PANEL_DATA_DIR 不能是符号链接"
+		return 1
+	fi
+	if ! mkdir -p "$PANEL_DATA_DIR/backups" "$(dirname "$dae_config")"; then
+		logger -t kdae-panel -p daemon.err "创建面板数据目录失败"
+		return 1
+	fi
+	if ! chmod 0700 "$PANEL_DATA_DIR"; then
+		logger -t kdae-panel -p daemon.err "设置 $PANEL_DATA_DIR 权限失败"
+		return 1
+	fi
 	# 一次性初始化链接反而应当是易失的：重启后它本就该重新生成。
-	mkdir -p "$RUN_DIR"
-	chmod 0700 "$RUN_DIR"
+	if ! mkdir -p "$RUN_DIR" || ! chmod 0700 "$RUN_DIR"; then
+		logger -t kdae-panel -p daemon.err "准备 $RUN_DIR 失败"
+		return 1
+	fi
 
 	procd_open_instance
 	# 显式钉住后端而不是靠 /sbin/procd 探测：这个软件包只在 OpenWrt 上存在，
@@ -47,15 +72,15 @@ start_service() {
 		--dae-binary "$dae_binary" \
 		--dae-config "$dae_config" \
 		--service-name "$service_name" \
-		--database "$data_dir/panel.db" \
-		--backup-dir "$data_dir/backups" \
-		--schedule-file "$data_dir/schedule.json" \
-		--install-state-file "$data_dir/dae-install.json" \
-		--geo-state-file "$data_dir/geo-update.json" \
-		--geo-schedule-file "$data_dir/geo-schedule.json" \
-		--github-token-file "$data_dir/github-token" \
-		--geo-sources-file "$data_dir/geo-sources.json" \
-		--panel-backup-file "$data_dir/kdae-panel.previous" \
+		--database "$PANEL_DATA_DIR/panel.db" \
+		--backup-dir "$PANEL_DATA_DIR/backups" \
+		--schedule-file "$PANEL_DATA_DIR/schedule.json" \
+		--install-state-file "$PANEL_DATA_DIR/dae-install.json" \
+		--geo-state-file "$PANEL_DATA_DIR/geo-update.json" \
+		--geo-schedule-file "$PANEL_DATA_DIR/geo-schedule.json" \
+		--github-token-file "$PANEL_DATA_DIR/github-token" \
+		--geo-sources-file "$PANEL_DATA_DIR/geo-sources.json" \
+		--panel-backup-file "$PANEL_DATA_DIR/kdae-panel.previous" \
 		--setup-url-file "$RUN_DIR/setup-url" \
 		--enable-dae-install="$enable_dae_install" \
 		--enable-geo-update="$enable_geo_update" \

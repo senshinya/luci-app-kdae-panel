@@ -135,7 +135,6 @@ logread -e kdae-panel
 | `enabled` | `1` | 开机自启；关闭后面板不会随系统启动，已在跑的实例不受影响 |
 | `listen_addr` | `0.0.0.0` | 监听地址，默认接受本机与局域网连接 |
 | `listen_port` | `2026` | 监听端口；上游的 systemd 部署默认 2023，这里避开 daed 占用的同一个端口 |
-| `data_dir` | `/etc/kdae-panel` | 数据库、配置备份与存档、状态文件、GitHub Token、自定义 geo 来源与 dae 本地版本库的位置 |
 | `dae_binary` | `/usr/bin/dae` | dae 可执行文件路径；面板与 `/etc/init.d/dae` 读的是同一个值 |
 | `dae_config` | `/etc/dae/config.dae` | dae 入口配置；geo 数据也放在它所在的目录 |
 | `service_name` | `dae` | dae 的 init 脚本名（LuCI 表单未暴露这一项） |
@@ -145,17 +144,19 @@ logread -e kdae-panel
 | `session_ttl` | `12h` | 会话绝对有效期 |
 | `secure_cookie` | `0` | Cookie 是否仅 HTTPS 发送 |
 
-以上 12 项与 `/etc/config/kdae-panel` 的默认模板逐项一致；LuCI 的设置表单暴露其中 11 项，
+以上 11 项与 `/etc/config/kdae-panel` 的默认模板逐项一致；LuCI 的设置表单暴露其中 10 项，
 `service_name` 有意不放进界面（改错这一项会让面板和 init 脚本互相认不出对方）。
 
 四条必须知道的说明：
 
-- **`data_dir` 不要改到 `/var` 或 `/tmp` 下。** OpenWrt 上 `/var` 是 `/tmp` 的软链，两者都是内存
-  文件系统，重启即空。数据库、管理员账户和 dae 本地版本库一旦落在这里，重启路由器后会全部丢失。
-  默认值 `/etc/kdae-panel` 在 overlay 上，是持久的。面板自身的默认值（`/var/lib/kdae-panel/...`）
-  是按 systemd 部署选的，init 脚本会把每一个持久化文件逐项改写到 `data_dir` 下——上游新增
-  持久化文件时（例如 GitHub Token、自定义 geo 来源），这里必须同步补一行，否则那份数据
-  在 OpenWrt 上每次重启都会消失。
+- **数据目录固定为 `/etc/kdae-panel`。** OpenWrt 上 `/var` 是 `/tmp` 的软链，两者都是内存文件系统，
+  因此 init 脚本不再读取可配置路径，而是把数据库、管理员账户、备份、GitHub Token、自定义 geo
+  来源与 dae 本地版本库逐项放进这个 overlay 目录。`/etc/kdae-panel` 本身若是符号链接，服务会
+  拒绝启动，避免以 root 跟随到意外位置。
+  `/etc/config/kdae-panel` 是 conffile，升级不覆盖，所以此前改过 `data_dir` 的机器仍留着旧值。
+  init 发现它与 `/etc/kdae-panel` 不一致时**拒绝启动**并写一条 syslog——默默忽略等于从一个空目录
+  重新开始：数据库和管理员账户还在老地方，界面上却什么都没有，且没有任何报错指向原因。
+  按提示把数据搬过去，再 `uci delete kdae-panel.main.data_dir && uci commit kdae-panel` 即可。
 - **没有自升级开关，但版本检查照做。** 计划阶段设想过给面板加一个一键升级自身的能力，但
   该能力（`internal/panelupdate`）取件坐标写死指向上游仓库 `tuoro/kdae-panel`，那里发布的二进制
   不含本文档描述的 procd 后端。一旦在这个部署上打开它并触发一次升级，面板会以 root 权限把自己
