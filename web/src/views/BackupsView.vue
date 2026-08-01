@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NDataTable, NEmpty, NIcon, NInput, NModal, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { CreateOutline, GitCompareOutline, PencilOutline, RefreshOutline, ReturnUpBackOutline, TrashOutline } from '@vicons/ionicons5'
-import { deleteJSON, getJSON, postJSON, putJSON } from '../api/client'
+import { computed, h, onMounted, ref } from 'vue'
+import { NAlert, NButton, NCard, NCheckbox, NDataTable, NEmpty, NIcon, NInput, NModal, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns, type DataTableRowKey } from 'naive-ui'
+import { CreateOutline, DownloadOutline, GitCompareOutline, PencilOutline, RefreshOutline, ReturnUpBackOutline, TrashOutline } from '@vicons/ionicons5'
+import { deleteJSON, getDownload, getJSON, postJSON, putJSON } from '../api/client'
 import type { ConfigBackup, ConfigBackupPreview, ConfigSaveResult } from '../types/api'
 import { useMobileViewport } from '../composables/useMobileViewport'
 import { formatBytes, formatDateTime, shortHash } from '../utils/format'
@@ -13,7 +13,10 @@ const mobile = useMobileViewport()
 const loading = ref(true)
 const restoring = ref('')
 const deleting = ref('')
+const batchDeleting = ref(false)
+const exporting = ref('')
 const backups = ref<ConfigBackup[]>([])
+const checkedRowKeys = ref<DataTableRowKey[]>([])
 const editorVisible = ref(false)
 const saving = ref(false)
 const editingID = ref('')
@@ -22,8 +25,20 @@ const draftNote = ref('')
 const previewVisible = ref(false)
 const previewLoading = ref('')
 const preview = ref<ConfigBackupPreview | null>(null)
+const selectedIDs = computed(() => new Set(checkedRowKeys.value.map(String)))
+const selectedCount = computed(() => selectedIDs.value.size)
+const interactionBusy = computed(() => Boolean(
+  loading.value || saving.value || restoring.value || deleting.value
+  || batchDeleting.value || previewLoading.value || exporting.value,
+))
 
 const columns: DataTableColumns<ConfigBackup> = [
+  {
+    type: 'selection',
+    width: 46,
+    fixed: 'left',
+    disabled: () => interactionBusy.value,
+  },
   {
     title: '名称',
     key: 'name',
@@ -56,15 +71,9 @@ const columns: DataTableColumns<ConfigBackup> = [
     render: (row) => formatBytes(row.size),
   },
   {
-    title: '备份编号',
-    key: 'id',
-    minWidth: 320,
-    ellipsis: { tooltip: true },
-  },
-  {
     title: '操作',
     key: 'actions',
-    width: 286,
+    width: 376,
     fixed: 'right',
     render: (row) => h(
       NSpace,
@@ -72,17 +81,27 @@ const columns: DataTableColumns<ConfigBackup> = [
       {
         default: () => [
           h(NButton, {
-            size: 'small', quaternary: true, title: '与当前配置比较',
+            size: 'small', secondary: true, title: '与当前配置对比',
             loading: previewLoading.value === row.id,
-            disabled: Boolean(restoring.value || deleting.value || previewLoading.value),
+            disabled: interactionBusy.value,
             onClick: () => void openPreview(row),
           }, {
             icon: () => h(NIcon, null, { default: () => h(GitCompareOutline) }),
+            default: () => '对比',
+          }),
+          h(NButton, {
+            size: 'small', secondary: true,
+            loading: exporting.value === row.id,
+            disabled: interactionBusy.value,
+            onClick: () => void exportBackup(row),
+          }, {
+            icon: () => h(NIcon, null, { default: () => h(DownloadOutline) }),
+            default: () => '导出',
           }),
           h(NButton, {
             size: 'small', secondary: true, type: 'primary',
             loading: restoring.value === row.id,
-            disabled: Boolean(restoring.value || deleting.value || previewLoading.value),
+            disabled: interactionBusy.value,
             onClick: () => void openPreview(row),
           }, {
             icon: () => h(NIcon, null, { default: () => h(ReturnUpBackOutline) }),
@@ -90,7 +109,7 @@ const columns: DataTableColumns<ConfigBackup> = [
           }),
           h(NButton, {
             size: 'small', quaternary: true, title: '编辑名称和备注',
-            disabled: Boolean(restoring.value || deleting.value),
+            disabled: interactionBusy.value,
             onClick: () => openEditor(row),
           }, {
             icon: () => h(NIcon, null, { default: () => h(PencilOutline) }),
@@ -98,7 +117,7 @@ const columns: DataTableColumns<ConfigBackup> = [
           h(NButton, {
             size: 'small', quaternary: true, type: 'error', title: '删除配置存档',
             loading: deleting.value === row.id,
-            disabled: Boolean(restoring.value || deleting.value),
+            disabled: interactionBusy.value,
             onClick: () => confirmDelete(row),
           }, {
             icon: () => h(NIcon, null, { default: () => h(TrashOutline) }),
@@ -112,12 +131,40 @@ const columns: DataTableColumns<ConfigBackup> = [
 async function load() {
   loading.value = true
   try {
-    backups.value = await getJSON<ConfigBackup[]>('/api/v1/config/backups')
+    const loaded = await getJSON<ConfigBackup[]>('/api/v1/config/backups')
+    backups.value = loaded
+    const available = new Set(loaded.map((backup) => backup.id))
+    checkedRowKeys.value = checkedRowKeys.value.filter((id) => available.has(String(id)))
   } catch (error) {
     message.error(error instanceof Error ? error.message : '读取备份失败')
   } finally {
     loading.value = false
   }
+}
+
+async function exportBackup(backup: ConfigBackup) {
+  exporting.value = backup.id
+  try {
+    const result = await getDownload(`/api/v1/config/backups/${encodeURIComponent(backup.id)}/export`)
+    const url = URL.createObjectURL(result.blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = result.filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+    message.success('配置存档已导出')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '导出配置存档失败')
+  } finally {
+    exporting.value = ''
+  }
+}
+
+function setBackupSelected(id: string, checked: boolean) {
+  const selected = selectedIDs.value
+  if (checked) selected.add(id)
+  else selected.delete(id)
+  checkedRowKeys.value = [...selected]
 }
 
 async function openPreview(backup: ConfigBackup) {
@@ -189,6 +236,48 @@ async function deleteBackup(backup: ConfigBackup) {
   }
 }
 
+function confirmBatchDelete() {
+  const count = selectedCount.value
+  if (!count) return
+  dialog.warning({
+    title: '批量删除配置存档',
+    content: `将删除已选择的 ${count} 份配置存档及其配置内容，删除后无法恢复。`,
+    positiveText: `删除 ${count} 份`,
+    negativeText: '取消',
+    onPositiveClick: deleteSelectedBackups,
+  })
+}
+
+async function deleteSelectedBackups() {
+  const ids = [...selectedIDs.value]
+  if (!ids.length) return
+  batchDeleting.value = true
+  const deleted = new Set<string>()
+  const failures: string[] = []
+  try {
+    for (const id of ids) {
+      try {
+        await deleteJSON<void>(`/api/v1/config/backups/${encodeURIComponent(id)}`, {})
+        deleted.add(id)
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : `删除 ${id} 失败`)
+      }
+    }
+  } finally {
+    batchDeleting.value = false
+  }
+  backups.value = backups.value.filter((backup) => !deleted.has(backup.id))
+  checkedRowKeys.value = ids.filter((id) => !deleted.has(id))
+
+  if (!failures.length) {
+    message.success(`已删除 ${deleted.size} 份配置存档`)
+    return
+  }
+  message.error(
+    `已删除 ${deleted.size} 份，${failures.length} 份失败；失败项已保留选中。${failures[0]}`,
+  )
+}
+
 async function restore(preflight: ConfigBackupPreview) {
   const backup = preflight.backup
   restoring.value = backup.id
@@ -220,10 +309,20 @@ onMounted(() => void load())
         <NText depth="3">保存当前配置或查看自动历史；恢复操作同样受并发摘要保护</NText>
       </div>
       <NSpace>
-        <NButton type="primary" secondary @click="openEditor()">
+        <NButton
+          type="error"
+          secondary
+          :loading="batchDeleting"
+          :disabled="!selectedCount || interactionBusy"
+          @click="confirmBatchDelete"
+        >
+          <template #icon><NIcon><TrashOutline /></NIcon></template>
+          {{ selectedCount ? `批量删除 (${selectedCount})` : '批量删除' }}
+        </NButton>
+        <NButton type="primary" secondary :disabled="interactionBusy" @click="openEditor()">
           <template #icon><NIcon><CreateOutline /></NIcon></template>保存当前配置
         </NButton>
-        <NButton secondary :loading="loading" @click="load">
+        <NButton secondary :loading="loading" :disabled="interactionBusy" @click="load">
           <template #icon><NIcon><RefreshOutline /></NIcon></template>刷新
         </NButton>
       </NSpace>
@@ -235,13 +334,21 @@ onMounted(() => void load())
         :data="backups"
         :loading="loading"
         :row-key="(row: ConfigBackup) => row.id"
-        :scroll-x="920"
+        :checked-row-keys="checkedRowKeys"
+        :scroll-x="960"
         :bordered="false"
+        @update:checked-row-keys="checkedRowKeys = $event"
       />
       <NSpin v-else :show="loading">
         <div v-if="backups.length" class="mobile-record-list" data-testid="mobile-backup-list">
           <article v-for="backup in backups" :key="backup.id" class="mobile-record">
             <div class="mobile-record-head">
+              <NCheckbox
+                :checked="selectedIDs.has(backup.id)"
+                :disabled="interactionBusy"
+                :aria-label="`选择${backup.name || '自动备份'}`"
+                @update:checked="setBackupSelected(backup.id, $event)"
+              />
               <div class="mobile-record-title">{{ backup.name || '自动备份' }}</div>
               <NTag size="small" :bordered="false">{{ shortHash(backup.hash) }}</NTag>
             </div>
@@ -255,7 +362,7 @@ onMounted(() => void load())
                 secondary
                 type="primary"
                 :loading="restoring === backup.id"
-                :disabled="Boolean(restoring || deleting || previewLoading)"
+                :disabled="interactionBusy"
                 @click="openPreview(backup)"
               >
                 <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复
@@ -263,19 +370,27 @@ onMounted(() => void load())
               <NButton
                 secondary
                 :loading="previewLoading === backup.id"
-                :disabled="Boolean(restoring || deleting || previewLoading)"
+                :disabled="interactionBusy"
                 @click="openPreview(backup)"
               >
-                <template #icon><NIcon><GitCompareOutline /></NIcon></template>比较
+                <template #icon><NIcon><GitCompareOutline /></NIcon></template>对比
               </NButton>
-              <NButton secondary :disabled="Boolean(restoring || deleting)" @click="openEditor(backup)">
+              <NButton
+                secondary
+                :loading="exporting === backup.id"
+                :disabled="interactionBusy"
+                @click="exportBackup(backup)"
+              >
+                <template #icon><NIcon><DownloadOutline /></NIcon></template>导出
+              </NButton>
+              <NButton secondary :disabled="interactionBusy" @click="openEditor(backup)">
                 <template #icon><NIcon><PencilOutline /></NIcon></template>编辑
               </NButton>
               <NButton
                 secondary
                 type="error"
                 :loading="deleting === backup.id"
-                :disabled="Boolean(restoring || deleting)"
+                :disabled="interactionBusy"
                 @click="confirmDelete(backup)"
               >
                 <template #icon><NIcon><TrashOutline /></NIcon></template>删除

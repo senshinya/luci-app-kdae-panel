@@ -74,6 +74,10 @@ func (s stubConfigurationService) DeleteBackup(_ context.Context, _ string) erro
 	return nil
 }
 
+func (s stubConfigurationService) ExportBackup(_ context.Context, id string) (configstore.BackupExport, error) {
+	return configstore.BackupExport{Backup: configstore.Backup{ID: id}, Content: []byte("global {}")}, nil
+}
+
 func (s stubConfigurationService) PreviewBackup(_ context.Context, _ string) (configstore.BackupPreview, error) {
 	return configstore.BackupPreview{Valid: true, CurrentHash: s.document.Hash}, nil
 }
@@ -348,6 +352,16 @@ func TestConfigurationBackupMetadataRoutes(t *testing.T) {
 		t.Fatalf("预览存档响应异常: %+v", preview)
 	}
 
+	exported := httptest.NewRecorder()
+	application.Handler().ServeHTTP(exported, httptest.NewRequest(
+		http.MethodGet, "/api/v1/config/backups/"+url.PathEscape(backup.ID)+"/export", nil))
+	if exported.Code != http.StatusOK || exported.Body.String() != "global {}" {
+		t.Fatalf("导出存档响应异常: status=%d body=%q", exported.Code, exported.Body.String())
+	}
+	if disposition := exported.Header().Get("Content-Disposition"); !strings.Contains(disposition, "filename*=utf-8''%E6%97%A5%E5%B8%B8%E9%85%8D%E7%BD%AE.dae") {
+		t.Fatalf("导出文件名异常: %q", disposition)
+	}
+
 	deleted := httptest.NewRecorder()
 	application.Handler().ServeHTTP(deleted, httptest.NewRequest(
 		http.MethodDelete, "/api/v1/config/backups/"+url.PathEscape(backup.ID), nil))
@@ -358,6 +372,19 @@ func TestConfigurationBackupMetadataRoutes(t *testing.T) {
 	application.Handler().ServeHTTP(listed, httptest.NewRequest(http.MethodGet, "/api/v1/config/backups", nil))
 	if listed.Code != http.StatusOK || listed.Body.String() != "[]\n" {
 		t.Fatalf("删除后列表异常: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestBackupDownloadNameRemovesHeaderAndPathCharacters(t *testing.T) {
+	name := backupDownloadName(configstore.Backup{
+		ID:   "20260801.dae",
+		Name: "../../危险:\r\n配置?",
+	})
+	if name != "_.._危险___配置_.dae" {
+		t.Fatalf("下载文件名 = %q", name)
+	}
+	if strings.ContainsAny(name, "/\\:\r\n?\"<>|") {
+		t.Fatalf("下载文件名仍含非法字符: %q", name)
 	}
 }
 

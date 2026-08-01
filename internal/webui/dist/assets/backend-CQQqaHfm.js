@@ -1,1 +1,0 @@
-import{i as e}from"./client-BPPTDbz0.js";import{n as t}from"./pinia-CHCCvNfz.js";var n=null,r=t(`backend`,{state:()=>({backend:``}),getters:{isProcd:e=>e.backend===`procd`},actions:{async ensure(){this.backend||(n||=(async()=>{try{let t=await e(`/api/v1/health`);this.backend=t.backend===`procd`?`procd`:`systemd`}catch{}finally{n=null}})(),await n)}}});export{r as t};

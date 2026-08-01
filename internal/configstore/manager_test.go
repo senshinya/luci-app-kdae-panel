@@ -292,6 +292,13 @@ func TestNamedBackupCanBeEditedRestoredAndDeleted(t *testing.T) {
 	if updated.Name != "日常配置" || updated.Note != "确认可用" {
 		t.Fatalf("编辑后的信息异常: %+v", updated)
 	}
+	exported, err := manager.ExportBackup(context.Background(), backup.ID)
+	if err != nil || exported.Backup.Name != "日常配置" || string(exported.Content) != "stable config" {
+		t.Fatalf("导出存档异常: export=%+v err=%v", exported, err)
+	}
+	if _, err := manager.ExportBackup(context.Background(), "../config.dae"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("导出路径穿越错误 = %v", err)
+	}
 	listed, err := manager.ListBackups(context.Background())
 	if err != nil || len(listed) != 1 || listed[0].Name != "日常配置" {
 		t.Fatalf("列表未读回元数据: backups=%+v err=%v", listed, err)

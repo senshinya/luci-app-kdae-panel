@@ -56,6 +56,7 @@ type ConfigurationService interface {
 	CreateBackup(ctx context.Context, name, note string) (configstore.Backup, error)
 	UpdateBackup(ctx context.Context, backupID, name, note string) (configstore.Backup, error)
 	DeleteBackup(ctx context.Context, backupID string) error
+	ExportBackup(ctx context.Context, backupID string) (configstore.BackupExport, error)
 	PreviewBackup(ctx context.Context, backupID string) (configstore.BackupPreview, error)
 	Restore(ctx context.Context, backupID, expectedHash string, apply bool) (configstore.SaveResult, error)
 }

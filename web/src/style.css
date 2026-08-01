@@ -574,6 +574,12 @@ textarea {
   gap: 16px;
 }
 
+.backups-page .mobile-record-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+}
+
 .backup-editor-modal {
   width: min(560px, calc(100vw - 32px));
 }

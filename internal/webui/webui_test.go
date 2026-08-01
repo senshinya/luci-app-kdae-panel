@@ -114,6 +114,23 @@ func TestRealAssetsAreServed(t *testing.T) {
 	}
 }
 
+func TestFaviconIsEmbeddedAndServed(t *testing.T) {
+	response := get(t, "/favicon.svg")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("favicon 状态码 = %d", response.StatusCode)
+	}
+	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "image/svg+xml") {
+		t.Fatalf("favicon Content-Type = %q", contentType)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "<svg") || strings.Contains(string(body), "<div id=\"app\">") {
+		t.Fatalf("favicon 没有返回 SVG 资源: %q", string(body))
+	}
+}
+
 // embed 的文件没有修改时间，响应里发不出 Last-Modified/ETag，浏览器会
 // 启发式缓存入口页，面板升级后用户停留在旧界面。资产靠文件名里的内容
 // 哈希放心长缓存，入口页（含 SPA 兜底与直接请求）必须每次取新。

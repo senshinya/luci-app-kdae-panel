@@ -77,6 +77,13 @@ type Backup struct {
 	Note       string    `json:"note,omitempty"`
 }
 
+// BackupExport 是配置存档的原始导出内容。
+// 内容保持落盘字节不变，名称只用于生成浏览器下载文件名。
+type BackupExport struct {
+	Backup  Backup
+	Content []byte
+}
+
 // BackupPreview 是恢复前的只读检查结果。
 // CurrentHash 供真正恢复时继续做乐观锁校验，不能省略成“预览通过即可恢复”。
 type BackupPreview struct {
@@ -417,6 +424,17 @@ func (m *Manager) DeleteBackup(_ context.Context, backupID string) error {
 	return nil
 }
 
+// ExportBackup 读取一份存档的原始内容，不校验也不修改当前配置。
+func (m *Manager) ExportBackup(_ context.Context, backupID string) (BackupExport, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !validBackupID(backupID) {
+		return BackupExport{}, ErrNotFound
+	}
+	return m.backupExportByID(backupID)
+}
+
 // PreviewBackup 比较存档与当前配置，并用当前 dae 校验存档内容。
 // 它只会创建并清理候选临时文件，不替换配置，也不重载服务。
 func (m *Manager) PreviewBackup(ctx context.Context, backupID string) (BackupPreview, error) {
@@ -559,26 +577,34 @@ func (m *Manager) writeBackupMetadata(backupID string, metadata backupMetadata) 
 }
 
 func (m *Manager) backupByID(backupID string) (Backup, error) {
+	exported, err := m.backupExportByID(backupID)
+	return exported.Backup, err
+}
+
+func (m *Manager) backupExportByID(backupID string) (BackupExport, error) {
 	path := filepath.Join(m.backupDir, backupID)
 	content, err := readFileLimited(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Backup{}, ErrNotFound
+			return BackupExport{}, ErrNotFound
 		}
-		return Backup{}, err
+		return BackupExport{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return Backup{}, err
+		return BackupExport{}, err
 	}
 	metadata, err := m.readBackupMetadata(backupID)
 	if err != nil {
-		return Backup{}, err
+		return BackupExport{}, err
 	}
-	return Backup{
-		ID: backupID, Hash: hashBytes(content), Size: info.Size(),
-		CreatedAt: info.ModTime().UTC(), SourcePath: m.entryPath,
-		Name: metadata.Name, Note: metadata.Note,
+	return BackupExport{
+		Backup: Backup{
+			ID: backupID, Hash: hashBytes(content), Size: info.Size(),
+			CreatedAt: info.ModTime().UTC(), SourcePath: m.entryPath,
+			Name: metadata.Name, Note: metadata.Note,
+		},
+		Content: content,
 	}, nil
 }
 

@@ -115,6 +115,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   test.setTimeout(UPDATE_SCREENSHOTS ? 120_000 : 90_000)
   await test.step('通过一次性链接初始化管理员', async () => {
     await page.goto('/setup#bootstrap=e2e-bootstrap')
+    await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg')
+    expect((await page.request.get('/favicon.svg')).status()).toBe(200)
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible()
     await expect(page.getByRole('button', { name: '完成初始化' })).toBeVisible()
     await capture(page, 'setup.png', 1600, 900)
@@ -449,6 +451,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   await test.step('配置存档可以命名、恢复并删除', async () => {
     await page.goto('/backups')
     await expect(page.getByRole('heading', { name: '配置历史', level: 2 })).toBeVisible()
+    await expect(page.getByRole('columnheader', { name: '备份编号' })).toHaveCount(0)
     await page.getByRole('button', { name: '保存当前配置' }).click()
     const editor = page.locator('.n-modal', { hasText: '保存当前配置' })
     await editor.getByPlaceholder('例如：稳定线路').fill('E2E 稳定配置')
@@ -463,6 +466,20 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await editModal.getByRole('button', { name: '保存修改' }).click()
     const renamedRow = page.locator('tr', { hasText: 'E2E 已命名配置' })
     await expect(renamedRow).toContainText('E2E 回档测试')
+    await expect(renamedRow.getByRole('button', { name: '对比' })).toBeVisible()
+    const downloadPromise = page.waitForEvent('download')
+    await renamedRow.getByRole('button', { name: '导出' }).click()
+    const download = await downloadPromise
+    expect(download.suggestedFilename()).toBe('E2E 已命名配置.dae')
+    const downloadedPath = await download.path()
+    expect(downloadedPath).not.toBeNull()
+    expect(readFileSync(downloadedPath!, 'utf8')).toContain('global {')
+
+    await page.getByRole('button', { name: '保存当前配置' }).click()
+    const batchEditor = page.locator('.n-modal', { hasText: '保存当前配置' })
+    await batchEditor.getByPlaceholder('例如：稳定线路').fill('E2E 批量配置')
+    await batchEditor.getByRole('button', { name: '保存存档' }).click()
+    await expect(page.locator('tr', { hasText: 'E2E 批量配置' })).toBeVisible()
     await capture(page, 'backups.png', 1600, 900)
 
     await renamedRow.getByRole('button', { name: '恢复' }).click()
@@ -486,9 +503,12 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await restorableDiff.getByRole('button', { name: '恢复并重载' }).click()
     await expect(page.getByText('配置已恢复并完成无损重载')).toBeVisible()
 
-    await restorableRow.getByTitle('删除配置存档').click()
-    await page.locator('.n-dialog').getByRole('button', { name: '删除存档' }).click()
+    await page.locator('tr', { hasText: 'E2E 已命名配置' }).getByRole('checkbox').check()
+    await page.locator('tr', { hasText: 'E2E 批量配置' }).getByRole('checkbox').check()
+    await page.getByRole('button', { name: '批量删除 (2)' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '删除 2 份' }).click()
     await expect(page.locator('tr', { hasText: 'E2E 已命名配置' })).toHaveCount(0)
+    await expect(page.locator('tr', { hasText: 'E2E 批量配置' })).toHaveCount(0)
   })
 
   await test.step('设置页左右列保持同一底边', async () => {
@@ -884,6 +904,10 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const mobileBackups = page.getByTestId('mobile-backup-list')
     await expect(mobileBackups).toBeVisible()
     await expect(mobileBackups.getByText('手机端存档')).toBeVisible()
+    await mobileBackups.getByRole('checkbox', { name: '选择手机端存档' }).check()
+    await expect(page.getByRole('button', { name: '批量删除 (1)' })).toBeVisible()
+    await expect(mobileBackups.getByRole('button', { name: '对比' })).toBeVisible()
+    await expect(mobileBackups.getByRole('button', { name: '导出' })).toBeVisible()
     overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
     await page.unroute('**/api/v1/config/backups')

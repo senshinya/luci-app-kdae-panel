@@ -97,9 +97,18 @@ export async function getDownload(path: string): Promise<{ blob: Blob; filename:
     throw new APIError(response.status, body as APIErrorBody)
   }
   const disposition = response.headers.get('Content-Disposition') || ''
+  const encoded = /filename\*=utf-8''([^;]+)/i.exec(disposition)
   const matched = /filename="?([^";]+)"?/i.exec(disposition)
+  let filename = matched?.[1] || 'dae-sysdump.tar.gz'
+  if (encoded?.[1]) {
+    try {
+      filename = decodeURIComponent(encoded[1])
+    } catch {
+      // 非法扩展文件名退回普通 filename，下载内容本身不受影响。
+    }
+  }
   return {
     blob: await response.blob(),
-    filename: matched?.[1] || 'dae-sysdump.tar.gz',
+    filename,
   }
 }

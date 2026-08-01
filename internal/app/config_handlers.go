@@ -3,9 +3,13 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/tuoro/kdae-panel/internal/configstore"
 )
@@ -38,6 +42,7 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		router.HandleFunc("POST /api/v1/config/backups", unavailable)
 		router.HandleFunc("PUT /api/v1/config/backups/{id}", unavailable)
 		router.HandleFunc("DELETE /api/v1/config/backups/{id}", unavailable)
+		router.HandleFunc("GET /api/v1/config/backups/{id}/export", unavailable)
 		router.HandleFunc("GET /api/v1/config/backups/{id}/preview", unavailable)
 		router.HandleFunc("POST /api/v1/config/backups/{id}/restore", unavailable)
 		return
@@ -123,6 +128,20 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		}
 		writer.WriteHeader(http.StatusNoContent)
 	})
+	router.HandleFunc("GET /api/v1/config/backups/{id}/export", func(writer http.ResponseWriter, request *http.Request) {
+		exported, err := service.ExportBackup(request.Context(), request.PathValue("id"))
+		if err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+			"filename": backupDownloadName(exported.Backup),
+		}))
+		writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(exported.Content)))
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write(exported.Content)
+	})
 	router.HandleFunc("GET /api/v1/config/backups/{id}/preview", func(writer http.ResponseWriter, request *http.Request) {
 		preview, err := service.PreviewBackup(request.Context(), request.PathValue("id"))
 		if err != nil {
@@ -152,6 +171,24 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		}
 		writeJSON(writer, http.StatusOK, result)
 	})
+}
+
+func backupDownloadName(backup configstore.Backup) string {
+	name := strings.TrimSpace(backup.Name)
+	name = strings.Map(func(value rune) rune {
+		if unicode.IsControl(value) || strings.ContainsRune(`/\:*?"<>|`, value) {
+			return '_'
+		}
+		return value
+	}, name)
+	name = strings.Trim(name, " .")
+	if name == "" {
+		name = strings.TrimSuffix(backup.ID, ".dae")
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".dae") {
+		name += ".dae"
+	}
+	return name
 }
 
 // decodeJSONBody 解码必需的请求体，上限按配置大小放宽——保存配置走的正是这条。
