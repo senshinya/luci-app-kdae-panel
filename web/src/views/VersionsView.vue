@@ -29,7 +29,6 @@ import {
 } from '@vicons/ionicons5'
 import { APIError, deleteJSON, getJSON, postJSON } from '../api/client'
 import type {
-  CompatibilityJob,
   InstallJob,
   InstallProvision,
   InstallStatus,
@@ -59,8 +58,6 @@ const disabled = ref(false)
 const status = ref<InstallStatus | null>(null)
 const provision = ref<InstallProvision | null>(null)
 const job = ref<InstallJob | null>(null)
-const compatibilityJob = ref<CompatibilityJob | null>(null)
-const pendingInstall = ref<UpstreamVersion | null>(null)
 const versions = ref<UpstreamVersion[]>([])
 const source = ref<UpstreamSource>('official')
 const loadError = ref('')
@@ -82,35 +79,9 @@ const installPolling = useJobPolling({
   },
 })
 
-const compatibilityPolling = useJobPolling({
-  refresh: () => loadCompatibility(),
-  phase: () => compatibilityJob.value?.phase,
-  onSettled: (phase) => {
-    const version = pendingInstall.value
-    pendingInstall.value = null
-    if (phase === 'failed') {
-      message.error(compatibilityJob.value?.error || '兼容性预检失败')
-      return
-    }
-    if (!version || !compatibilityMatches(version)) return
-    if (compatibilityJob.value?.result?.compatible) {
-      message.success(`${version.label} 已通过兼容性预检`)
-      confirmCompatibleInstall(version)
-      return
-    }
-    message.error(compatibilityProblem.value || `${version.label} 不兼容当前配置`)
-  },
-})
-
 const activeSource = computed(() => SOURCES.find((item) => item.value === source.value)!)
 const installBusy = computed(() => job.value?.phase === 'downloading' || job.value?.phase === 'applying')
-const compatibilityBusy = computed(() => compatibilityJob.value?.phase === 'downloading'
-  || compatibilityJob.value?.phase === 'applying')
-const busy = computed(() => installBusy.value || compatibilityBusy.value)
-const compatibilityProblem = computed(() => compatibilityJob.value?.result?.validationError
-  || compatibilityJob.value?.result?.problem
-  || compatibilityJob.value?.error
-  || '')
+const busy = installBusy
 const installedRef = computed(() => status.value?.managed?.ref || '')
 const showGitHubNotice = computed(() =>
   githubStatus.value?.configured === false || listError.value.includes('GitHub 接口调用频率已达上限'))
@@ -156,19 +127,6 @@ async function loadStatus() {
   } finally {
     loading.value = false
   }
-}
-
-async function loadCompatibility() {
-  try {
-    const payload = await getJSON<{ job: CompatibilityJob }>('/api/v1/dae/compatibility')
-    compatibilityJob.value = payload.job
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : '读取兼容性预检状态失败')
-  }
-}
-
-function compatibilityMatches(version: UpstreamVersion): boolean {
-  return compatibilityJob.value?.source === version.source && compatibilityJob.value?.ref === version.ref
 }
 
 // 只认最后一次发出的请求。用序号而不是比对来源：连点刷新会发出多个同来源的
@@ -252,51 +210,9 @@ async function confirmInstall(version: UpstreamVersion) {
     return
   }
 
-  if (!compatibilityMatches(version) || compatibilityJob.value?.phase !== 'done'
-      || !compatibilityJob.value.result?.compatible) {
-    await startCompatibility(version, true)
-    return
-  }
-  confirmCompatibleInstall(version)
-}
-
-function confirmCompatibleInstall(version: UpstreamVersion) {
-  const local = version.cached === true
-  const serviceState = status.value?.serviceActive
-  dialog.warning({
-    title: `安装 ${version.label}`,
-    content: (local
-      ? '面板会读取并重新校验本地版本，用它验证当前配置，然后替换二进制。'
-      : '面板会从 GitHub/CDN 下载并校验该版本，成功后保存为本地版本，再用它验证当前配置并替换二进制。')
-      + (serviceState
-        ? '当前 dae 正在运行，切换时会重启它并短暂中断现有连接。'
-        : '当前 dae 未运行，切换后会保持未运行，不会自动启动。')
-      + '若运行中的新版本起不来，会自动回滚到当前版本。',
-    positiveText: local ? '使用本地版本' : '下载并安装',
-    negativeText: '取消',
-    onPositiveClick: () => install(version),
-  })
-}
-
-async function startCompatibility(version: UpstreamVersion, continueInstall = false) {
-  pendingInstall.value = continueInstall ? version : null
-  try {
-    const payload = await postJSON<{ job: CompatibilityJob }>('/api/v1/dae/compatibility', {
-      source: version.source,
-      ref: version.ref,
-      label: version.label,
-    })
-    compatibilityJob.value = payload.job
-    message.info(version.cached ? '正在使用本地版本预检兼容性' : '正在下载目标版本并预检兼容性')
-    compatibilityPolling.start()
-  } catch (error) {
-    pendingInstall.value = null
-    message.error(error instanceof Error ? error.message : '启动兼容性预检失败')
-    if (error instanceof APIError && error.status === 409) {
-      await Promise.all([loadStatus(), loadCompatibility()])
-      if (compatibilityBusy.value) compatibilityPolling.start()
-    }
-  }
+  // 安装事务会在替换前用目标二进制执行版本探测和配置 validate；
+  // 直接进入事务即可完成“预检并切换”，无需先跑一份独立预检再让用户确认第二次。
+  await install(version)
 }
 
 async function install(version: UpstreamVersion) {
@@ -536,13 +452,10 @@ onMounted(async () => {
   void loadGitHubStatus()
   await loadStatus()
   if (unmounted) return
-  await loadCompatibility()
-  if (unmounted) return
   await loadVersions()
   if (unmounted) return
   // 任务可能在本页打开之前就已在跑，这时也要接上轮询
   if (installBusy.value) installPolling.start()
-  if (compatibilityBusy.value) compatibilityPolling.start()
 })
 // 轮询的卸载清理由 useJobPolling 自己挂钩，这里只管本组件的加载链
 onBeforeUnmount(() => {
@@ -612,37 +525,6 @@ onBeforeUnmount(() => {
       <NAlert v-else-if="job?.phase === 'failed'" type="error" :bordered="false">
         上次操作失败：{{ job.error }}
       </NAlert>
-      <NAlert v-if="compatibilityJob?.phase === 'downloading'" type="info" :bordered="false">
-        <div class="version-download-copy">
-          <strong>正在取得 {{ compatibilityJob.label || compatibilityJob.ref }} 并准备兼容性预检…</strong>
-          <span>未下载的版本会先保存到本地；通过后实际切换不会重复下载。</span>
-        </div>
-      </NAlert>
-      <NAlert v-else-if="compatibilityJob?.phase === 'applying'" type="info" :bordered="false">
-        正在用 {{ compatibilityJob.label || compatibilityJob.ref }} 检查当前机器与配置，不会替换二进制或控制服务…
-      </NAlert>
-      <NAlert
-        v-else-if="compatibilityJob?.phase === 'done' && compatibilityJob.result?.compatible"
-        type="success"
-        :bordered="false"
-      >
-        <strong>{{ compatibilityJob.label || compatibilityJob.ref }} 已通过兼容性预检。</strong>
-        目标报告为 {{ compatibilityJob.result.version || '未知版本' }}；
-        {{ compatibilityJob.result.configPresent ? '当前配置已通过 validate' : '当前没有入口配置可校验' }}；
-        {{ compatibilityJob.result.outlineSupported ? '支持动态配置结构' : '未提供动态配置结构' }}。
-      </NAlert>
-      <NAlert
-        v-else-if="compatibilityJob?.phase === 'done' && compatibilityJob.result && !compatibilityJob.result.compatible"
-        type="error"
-        :bordered="false"
-      >
-        <strong>{{ compatibilityJob.label || compatibilityJob.ref }} 未通过兼容性预检。</strong>
-        <pre class="compatibility-error">{{ compatibilityProblem }}</pre>
-      </NAlert>
-      <NAlert v-else-if="compatibilityJob?.phase === 'failed'" type="error" :bordered="false">
-        兼容性预检失败：{{ compatibilityJob.error }}
-      </NAlert>
-
       <InstallStatusCard :loading="loading" :busy="busy" :status="status" :provision="provision" />
 
       <NCard class="panel-card" content-style="padding: 0;">
@@ -682,14 +564,6 @@ onBeforeUnmount(() => {
                   <NTag v-if="isInstalled(version)" size="tiny" type="success" :bordered="false">当前</NTag>
                   <NTag v-if="version.cached" size="tiny" type="info" :bordered="false">已下载</NTag>
                   <NTag v-if="version.prerelease" size="tiny" type="warning" :bordered="false">预发布</NTag>
-                  <NTag
-                    v-if="compatibilityMatches(version) && compatibilityJob?.phase === 'done'"
-                    size="tiny"
-                    :type="compatibilityJob.result?.compatible ? 'success' : 'error'"
-                    :bordered="false"
-                  >
-                    {{ compatibilityJob.result?.compatible ? '已预检' : '不兼容' }}
-                  </NTag>
                 </div>
               </div>
               <p class="mobile-record-description">{{ version.description || '没有发布说明' }}</p>

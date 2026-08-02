@@ -747,6 +747,66 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/dae/versions**')
   })
 
+  await test.step('预检并切换直接进入安装事务且不再二次确认', async () => {
+    let installRequests = 0
+    let compatibilityRequests = 0
+    await page.route('**/api/v1/dae/install', async (route) => {
+      if (route.request().method() === 'POST') {
+        installRequests++
+        expect(route.request().postDataJSON()).toEqual({
+          source: 'official', ref: 'v1.9.0', label: 'v1.9.0',
+        })
+        await route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            job: { phase: 'downloading', source: 'official', ref: 'v1.9.0', label: 'v1.9.0' },
+          }),
+        })
+        return
+      }
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: {
+            binaryPath: '/usr/bin/dae', platform: 'linux-amd64', ready: true, present: true,
+            version: 'dae version v2.0.0',
+            managed: {
+              source: 'official', ref: 'v2.0.0', label: 'v2.0.0',
+              installedAt: '2026-07-30T00:00:00Z', sha256: 'e2e',
+            },
+            rollbackAvailable: true, serviceActive: true,
+          },
+          job: { phase: installRequests ? 'done' : 'idle' },
+        }),
+      })
+    })
+    await page.route('**/api/v1/dae/versions**', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ versions: [{
+        source: 'official', ref: 'v1.9.0', label: 'v1.9.0', description: '待切换版本',
+        publishedAt: '2026-07-01T00:00:00Z', installable: true,
+      }] }),
+    }))
+    await page.route('**/api/v1/dae/compatibility', async (route) => {
+      compatibilityRequests++
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ job: { phase: 'idle' } }),
+      })
+    })
+
+    await page.goto('/versions')
+    await page.locator('tr', { hasText: 'v1.9.0' }).getByRole('button', { name: '预检并切换' }).click()
+    await expect.poll(() => installRequests).toBe(1)
+    await expect(page.locator('.n-dialog')).toHaveCount(0)
+    expect(compatibilityRequests).toBe(0)
+
+    await page.unroute('**/api/v1/dae/install')
+    await page.unroute('**/api/v1/dae/versions**')
+    await page.unroute('**/api/v1/dae/compatibility')
+  })
+
   await test.step('切换中隐藏事务告警并可管理本地版本', async () => {
     let applying = true
     let cached = true
