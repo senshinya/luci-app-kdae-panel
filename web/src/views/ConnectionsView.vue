@@ -11,6 +11,8 @@ import {
   NGridItem,
   NIcon,
   NInput,
+  NRadioButton,
+  NRadioGroup,
   NSelect,
   NSkeleton,
   NSpace,
@@ -61,15 +63,27 @@ const mobileListCap = 100
 
 const entries = computed(() => data.value?.entries ?? [])
 const summary = computed(() => data.value?.summary)
-const endpoints = computed(() => data.value?.endpoints ?? [])
-const nodes = computed(() => data.value?.nodes ?? [])
+
+// 分布卡的维度。按远端 IP 分组的出站 socket 曾经也在这里，但只有几个节点时
+// 它退化成"全压在主用节点上"，说的和上面的总数是同一件事，因此换成了这四个
+// 真正有区分度的维度。
+const dimension = ref<'clients' | 'domains' | 'nodes' | 'groups'>('domains')
+const dimensionOptions = [
+  { label: '目的域名', value: 'domains' },
+  { label: '客户端', value: 'clients' },
+  { label: '节点', value: 'nodes' },
+  { label: '出站组', value: 'groups' },
+]
+const distributionCap = 8
+const distribution = computed(() => (data.value?.[dimension.value] ?? []).slice(0, distributionCap))
+const distributionTotal = computed(() => (data.value?.[dimension.value] ?? []).length)
 const logLevelInsufficient = computed(() => {
   const level = data.value?.logLevel
   return !!level && !['info', 'debug', 'trace'].includes(level)
 })
 
 const outboundOptions = computed(() => {
-  const names = (data.value?.groups ?? []).map((group) => group.key)
+  const names = (data.value?.groups ?? []).map((item) => item.key)
   return [{ label: '全部出站', value: '' }, ...names.map((name) => ({ label: name, value: name }))]
 })
 
@@ -121,40 +135,28 @@ function sourceDetail(entry: ConnectionEvent): string {
 
 const columns = computed<DataTableColumns<ConnectionEvent>>(() => [
   {
-    title: '建立时间',
-    key: 'at',
-    width: 200,
-    sorter: true,
-    sortOrder: sortOrder.value,
-    render: (row) => [h('div', timeLabel(row)), h('div', { class: 'conn-secondary' }, agoLabel(row))],
-  },
-  {
-    title: '协议',
-    key: 'network',
-    width: 78,
-    render: (row) => h(NTag, { size: 'tiny', bordered: false }, { default: () => row.network }),
-  },
-  {
-    title: '源',
-    key: 'src',
-    minWidth: 180,
+    // 目的放在首列并加重：用户看这张表是想知道"谁在访问什么"，
+    // 域名是那个答案，时间只是限定语。
+    title: '目的',
+    key: 'dst',
+    minWidth: 260,
+    ellipsis: { tooltip: true },
     render: (row) => {
-      const lines = [h('div', { class: 'mono' }, row.src)]
-      const detail = sourceDetail(row)
-      if (detail) lines.push(h('div', { class: 'conn-secondary' }, detail))
+      const lines = [h('div', { class: 'conn-primary' }, destinationTitle(row))]
+      if (row.dstAddr && row.dstAddr !== destinationTitle(row)) {
+        lines.push(h('div', { class: 'conn-secondary mono' }, row.dstAddr))
+      }
       return lines
     },
   },
   {
-    title: '目的',
-    key: 'dst',
-    minWidth: 230,
-    ellipsis: { tooltip: true },
+    title: '源',
+    key: 'src',
+    minWidth: 190,
     render: (row) => {
-      const lines = [h('div', { class: 'mono' }, destinationTitle(row))]
-      if (row.dstAddr && row.dstAddr !== destinationTitle(row)) {
-        lines.push(h('div', { class: 'conn-secondary mono' }, row.dstAddr))
-      }
+      const lines = [h('div', { class: 'mono' }, row.src)]
+      const detail = sourceDetail(row)
+      if (detail) lines.push(h('div', { class: 'conn-secondary' }, detail))
       return lines
     },
   },
@@ -168,6 +170,23 @@ const columns = computed<DataTableColumns<ConnectionEvent>>(() => [
       if (detail) lines.push(h('div', { class: 'conn-secondary' }, detail))
       return lines
     },
+  },
+  {
+    title: '协议',
+    key: 'network',
+    width: 78,
+    render: (row) => h(NTag, { size: 'tiny', bordered: false }, { default: () => row.network }),
+  },
+  {
+    title: '建立时间',
+    key: 'at',
+    width: 176,
+    sorter: true,
+    sortOrder: sortOrder.value,
+    render: (row) => [
+      h('div', { class: 'conn-secondary' }, timeLabel(row)),
+      h('div', { class: 'conn-secondary' }, agoLabel(row)),
+    ],
   },
 ])
 
@@ -219,7 +238,7 @@ onBeforeUnmount(() => {
     <div class="page-toolbar">
       <div>
         <h2>连接活动</h2>
-        <NText depth="3">dae 记录的连接建立流水，以及它当前扛着的出站连接分布</NText>
+        <NText depth="3">dae 记录的连接建立流水，按客户端、域名、节点与出站组分布</NText>
       </div>
       <NSpace align="center">
         <NCheckbox v-model:checked="autoRefresh">每 5 秒刷新</NCheckbox>
@@ -268,44 +287,34 @@ onBeforeUnmount(() => {
       </NGridItem>
     </NGrid>
 
-    <NGrid responsive="screen" cols="1 l:2" :x-gap="16" :y-gap="16" class="equal-height-grid">
-      <NGridItem>
-        <NCard title="当前出站连接分布" size="small">
-          <template #header-extra><NText depth="3">实时 · 按远端</NText></template>
-          <div v-if="endpoints.length" class="conn-bars">
-            <div v-for="item in endpoints" :key="item.key" class="conn-bar">
-              <span class="mono conn-bar-label">{{ item.key }}</span>
-              <span class="conn-bar-track">
-                <span
-                  class="conn-bar-fill"
-                  :style="{ width: `${Math.round((item.count / endpoints[0].count) * 100)}%` }"
-                />
-              </span>
-              <strong>{{ item.count }}</strong>
-            </div>
-          </div>
-          <NText v-else depth="3">dae 当前没有出站连接</NText>
-        </NCard>
-      </NGridItem>
-      <NGridItem>
-        <NCard title="窗口内按节点" size="small">
-          <template #header-extra><NText depth="3">历史 · 新建连接数</NText></template>
-          <div v-if="nodes.length" class="conn-bars">
-            <div v-for="item in nodes.slice(0, 8)" :key="item.key" class="conn-bar">
-              <span class="conn-bar-label">{{ item.key }}</span>
-              <span class="conn-bar-track">
-                <span
-                  class="conn-bar-fill"
-                  :style="{ width: `${Math.round((item.count / nodes[0].count) * 100)}%` }"
-                />
-              </span>
-              <strong>{{ item.count }}</strong>
-            </div>
-          </div>
-          <NText v-else depth="3">窗口内没有连接记录</NText>
-        </NCard>
-      </NGridItem>
-    </NGrid>
+    <NCard size="small">
+      <template #header>
+        <NRadioGroup v-model:value="dimension" size="small">
+          <NRadioButton v-for="option in dimensionOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
+          </NRadioButton>
+        </NRadioGroup>
+      </template>
+      <template #header-extra>
+        <NText depth="3">窗口内新建连接数 · 共 {{ distributionTotal }} 项</NText>
+      </template>
+      <div v-if="distribution.length" class="conn-bars">
+        <div v-for="item in distribution" :key="item.key" class="conn-bar">
+          <span class="conn-bar-label">
+            <span :class="{ mono: dimension === 'clients' }">{{ item.key }}</span>
+            <NText v-if="item.note" depth="3" class="conn-bar-note">{{ item.note }}</NText>
+          </span>
+          <span class="conn-bar-track">
+            <span
+              class="conn-bar-fill"
+              :style="{ width: `${Math.round((item.count / distribution[0].count) * 100)}%` }"
+            />
+          </span>
+          <strong>{{ item.count }}</strong>
+        </div>
+      </div>
+      <NText v-else depth="3">窗口内没有连接记录</NText>
+    </NCard>
 
     <NCard content-style="padding: 0;">
       <div class="filter-bar">
@@ -345,8 +354,8 @@ onBeforeUnmount(() => {
           <article v-for="entry in mobileEntries" :key="`${entry.network}|${entry.src}|${entry.dst}|${entry.at}`" class="mobile-record">
             <div class="mobile-record-head">
               <div class="mobile-record-title">
+                <span class="conn-mobile-destination">{{ destinationTitle(entry) }}</span>
                 <NTag size="small" :type="outboundType(entry)" :bordered="false">{{ entry.outbound }}</NTag>
-                <span class="conn-mobile-destination mono">{{ destinationTitle(entry) }}</span>
               </div>
               <NTag size="tiny" :bordered="false">{{ entry.network }}</NTag>
             </div>

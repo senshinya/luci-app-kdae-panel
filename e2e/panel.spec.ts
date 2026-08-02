@@ -871,19 +871,32 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
         snapshotAt: at(0),
         snapshotOk: true,
         logLevel: 'info',
-        summary: { outboundSockets: 32, udpSockets: 2, windowEvents: 6, activeNodes: 2 },
-        endpoints: [
-          { key: '144.34.225.42:30128', count: 26 },
-          { key: '223.6.6.6:443', count: 4 },
-          { key: '38.55.107.116:443', count: 2 },
+        summary: { outboundSockets: 51, udpSockets: 2, windowEvents: 415, activeNodes: 4 },
+        clients: [
+          { key: '192.168.10.24', count: 281, note: 'aa:bb:cc:dd:ee:01' },
+          { key: '192.168.10.60', count: 63, note: 'aa:bb:cc:dd:ee:02' },
+          { key: '192.168.10.31', count: 44 },
+          { key: '192.168.10.87', count: 27 },
+        ],
+        domains: [
+          { key: 'api.github.com', count: 80 },
+          { key: 'registry.npmjs.org', count: 52 },
+          { key: 'www.youtube.com', count: 38 },
+          { key: 'api.anthropic.com', count: 24 },
+          { key: 'cdn.jsdelivr.net', count: 18 },
+          { key: 'www.bilibili.com', count: 11 },
+          { key: 'stun.example.com', count: 7 },
+          { key: 'mirrors.example.cn', count: 5 },
         ],
         nodes: [
-          { key: 'demo-sg', count: 4 },
-          { key: 'demo-us', count: 1 },
+          { key: 'demo-sg', count: 305 },
+          { key: 'demo-us', count: 62 },
+          { key: 'demo-jp', count: 42 },
+          { key: 'direct', count: 6 },
         ],
         groups: [
-          { key: 'proxy', count: 4 },
-          { key: 'direct', count: 2 },
+          { key: 'proxy', count: 341 },
+          { key: 'direct', count: 74 },
         ],
         entries: [
           { at: at(12), network: 'tcp4', src: '192.168.10.24:52144', dst: 'www.youtube.com:443', dstAddr: '142.250.66.78:443', sniffed: 'www.youtube.com', outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01' },
@@ -897,10 +910,14 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     }))
     await page.goto('/connections')
     await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
-    // 实时出站分布来自 socket，与日志流水是两个口径
-    await expect(page.getByText('当前出站连接分布')).toBeVisible()
-    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
-    await expect(page.getByText('窗口内按节点')).toBeVisible()
+    // 分布卡默认按目的域名，可切到其它维度
+    await expect(page.locator('.conn-bar-label', { hasText: 'www.youtube.com' })).toBeVisible()
+    await page.locator('.n-radio-button', { hasText: '客户端' }).click()
+    await expect(page.locator('.conn-bar-label', { hasText: '192.168.10.24' })).toBeVisible()
+    await expect(page.locator('.conn-bar-note', { hasText: 'aa:bb:cc:dd:ee:01' })).toBeVisible()
+    await page.locator('.n-radio-button', { hasText: '节点' }).click()
+    await expect(page.locator('.conn-bar-label', { hasText: 'demo-sg' })).toBeVisible()
+    await page.locator('.n-radio-button', { hasText: '目的域名' }).click()
 
     const rows = page.locator('.n-data-table-tbody .n-data-table-tr')
     // 默认最近 5 分钟：最旧那条（15 分钟前）应被时间窗挡掉
@@ -915,7 +932,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.locator('.filter-bar .n-select').first().click()
     await clickVisibleOption(page, '全部')
     await expect(rows).toHaveCount(6)
-    await expect(page.getByText('mirrors.example.cn')).toBeVisible()
+    await expect(page.locator('.conn-primary', { hasText: 'mirrors.example.cn' })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.locator('.n-base-select-menu:visible')).toHaveCount(0)
     await capture(page, 'connections.png', 1600, 1000)

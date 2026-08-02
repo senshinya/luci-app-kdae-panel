@@ -394,10 +394,12 @@ export interface ConnectionEvent {
   approxTime?: boolean
 }
 
-/** 一组计数；key 的含义由所在字段决定（出站端点、节点或出站组）。 */
+/** 一组计数；key 的含义由所在字段决定（客户端、域名、节点或出站组）。 */
 export interface ConnectionGroup {
   key: string
   count: number
+  /** 补充说明，目前只有客户端分组用它带上 MAC。 */
+  note?: string
 }
 
 export interface ConnectionsSummary {
@@ -418,9 +420,9 @@ export interface ConnectionsResponse {
   /** 有事件未被逐条列出；summary 与分组计数仍完整。 */
   truncated?: boolean
   summary: ConnectionsSummary
-  /** dae 当前出站连接按远端分组，来自 socket，实时。 */
-  endpoints: ConnectionGroup[] | null
-  /** 窗口内新建连接按节点、按出站组分组，来自日志，历史。 */
+  /** 窗口内新建连接的四种分组，均来自日志。 */
+  clients: ConnectionGroup[] | null
+  domains: ConnectionGroup[] | null
   nodes: ConnectionGroup[] | null
   groups: ConnectionGroup[] | null
   entries: ConnectionEvent[] | null

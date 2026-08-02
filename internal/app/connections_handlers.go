@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/daeconn"
@@ -29,10 +30,12 @@ type connectionsSummary struct {
 	ActiveNodes  int `json:"activeNodes"`
 }
 
-// connectionsGroup 是一组计数。Key 的含义由所在字段决定：出站端点、节点或出站组。
+// connectionsGroup 是一组计数。Key 的含义由所在字段决定：客户端、域名、节点或出站组。
 type connectionsGroup struct {
 	Key   string `json:"key"`
 	Count int    `json:"count"`
+	// Note 是补充说明，目前只有客户端分组用它带上 MAC。
+	Note string `json:"note,omitempty"`
 }
 
 type connectionsResponse struct {
@@ -42,9 +45,11 @@ type connectionsResponse struct {
 	Dropped    int                `json:"dropped,omitempty"`
 	Truncated  bool               `json:"truncated,omitempty"`
 	Summary    connectionsSummary `json:"summary"`
-	// Endpoints 是 dae 当前出站连接按远端 ip:port 的分组，来自 socket，实时。
-	Endpoints []connectionsGroup `json:"endpoints"`
-	// Nodes、Groups 是窗口内新建连接按节点、按出站组的分组，来自日志，历史。
+	// 以下四组都是窗口内新建连接的分组，来自日志。
+	// 不按 dae 当前出站 socket 的远端分组：那张表的键是代理服务器地址，
+	// 有几个节点就只有几行，说的和 summary.outboundSockets 是同一件事。
+	Clients []connectionsGroup `json:"clients"`
+	Domains []connectionsGroup `json:"domains"`
 	Nodes   []connectionsGroup `json:"nodes"`
 	Groups  []connectionsGroup `json:"groups"`
 	Entries []daeconn.Event    `json:"entries"`
@@ -88,6 +93,8 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 			}
 		}
 
+		clients := countClients(merged)
+		domains := countBy(merged, destinationName)
 		nodes := countBy(merged, func(event daeconn.Event) string { return event.Dialer })
 		groups := countBy(merged, func(event daeconn.Event) string { return event.Outbound })
 		summary := connectionsSummary{
@@ -123,7 +130,8 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 			Dropped:    dropped,
 			Truncated:  truncated,
 			Summary:    summary,
-			Endpoints:  sortGroups(snapshot.Outbound),
+			Clients:    clients,
+			Domains:    domains,
 			Nodes:      nodes,
 			Groups:     groups,
 			Entries:    listed,
@@ -140,6 +148,54 @@ func countBy(events []daeconn.Event, key func(daeconn.Event) string) []connectio
 		}
 	}
 	return sortGroups(counts)
+}
+
+// countClients 按客户端地址统计，并带上该地址最近一次出现的 MAC。
+// 局域网里 IP 会变而 MAC 不变，带上它才能认出是哪台设备。
+func countClients(events []daeconn.Event) []connectionsGroup {
+	counts := map[string]int{}
+	macs := map[string]string{}
+	for _, event := range events {
+		address := hostOnly(event.Src)
+		if address == "" {
+			continue
+		}
+		counts[address]++
+		// 事件已按时间倒序，第一次见到的就是最近一次。
+		if _, known := macs[address]; !known && event.Mac != "" && event.Mac != "00:00:00:00:00:00" {
+			macs[address] = event.Mac
+		}
+	}
+	groups := sortGroups(counts)
+	for index := range groups {
+		groups[index].Note = macs[groups[index].Key]
+	}
+	return groups
+}
+
+// destinationName 取一条连接的可读目的地：优先嗅探到的域名，没有就用拨号目标的主机部分。
+func destinationName(event daeconn.Event) string {
+	if event.Sniffed != "" {
+		return event.Sniffed
+	}
+	return hostOnly(event.Target)
+}
+
+// hostOnly 去掉 "host:port" 的端口部分，兼容 "[v6]:port" 形态。
+func hostOnly(value string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "[") {
+		if end := strings.LastIndex(value, "]"); end > 0 {
+			return value[1:end]
+		}
+		return value
+	}
+	if index := strings.LastIndex(value, ":"); index > 0 {
+		return value[:index]
+	}
+	return value
 }
 
 func sortGroups(counts map[string]int) []connectionsGroup {

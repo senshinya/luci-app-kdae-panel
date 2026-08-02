@@ -358,9 +358,8 @@ JSON 里），因为那台机器上真的没有这个数：
 | 字段 | 来源 | 口径 |
 |---|---|---|
 | `entries` | dae `info` 级别的连接建立日志 | **历史流水**，按时间倒序；每条带源、目的、嗅探域名、出站、节点、进程名与 MAC |
-| `nodes`、`groups` | 同上，按 `dialer` / `outbound` 聚合 | **历史**，窗口内新建连接数 |
-| `endpoints` | `/proc/net/tcp{,6}` 里 dae 持有的 socket，按远端 `ip:port` 分组 | **实时**，dae 此刻扛着多少条出站连接、压在哪个远端 |
-| `summary.outboundSockets`、`udpSockets` | 同上 | **实时**总数 |
+| `clients`、`domains`、`nodes`、`groups` | 同上，按客户端地址 / 目的域名 / `dialer` / `outbound` 聚合 | **历史**，窗口内新建连接数；`clients` 的 `note` 带该地址最近一次出现的 MAC |
+| `summary.outboundSockets`、`udpSockets` | `/proc/net/tcp{,6}` 里 dae 持有的 socket | **实时**总数 |
 | `summary.windowEvents`、`activeNodes` | 日志 | **历史**计数 |
 
 **不提供逐条连接的存活状态**，这不是简化而是能力边界：dae 的 eBPF 数据面把被代理连接的
@@ -377,6 +376,9 @@ JSON 里），因为那台机器上真的没有这个数：
 | 上游日志格式变化 | 解析失败的行静默跳过，只累计到 `dropped`；非 `info` 级别的行主动忽略，不计入 `dropped` |
 | 日志内容可被外部影响 | 嗅探到的域名、订阅里的节点名都可能含引号。解析器按 logrus 的 `%q` 规则处理转义并对同名键取首次出现的值，避免日志内容伪造出 `outbound` 一类字段；`network` 只接受 dae 的四种取值 |
 | 流水或分组超出上限 | 响应带 `truncated: true`；`summary` 与分组计数不受裁剪影响，始终完整 |
+
+不按 dae 当前出站 socket 的远端地址分组：那张表的键是代理服务器地址，有几个节点就只有几行，
+说的和 `summary.outboundSockets` 是同一件事，没有额外信息量。
 
 ## 错误格式
 

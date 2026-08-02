@@ -2433,7 +2433,24 @@ pre,
 
 /* ---- 连接活动页 ---- */
 
-/* 表格单元里的第二行：进程/MAC、持续时长、真实目的地址等次要信息。 */
+/* naive-ui 会给当前排序列加一层底色。这张表的排序状态始终存在（时间列默认
+   倒序），那层底色就一直亮着，把最次要的一列标成了视觉重点。 */
+/* 多带一层 .n-data-table 是为了压过 naive-ui 运行时注入的同名规则——
+   它在 <head> 里排在本文件之后，同特异度时会赢。 */
+.connections-page .n-data-table .n-data-table-th--sorting,
+.connections-page .n-data-table .n-data-table-td--sorting {
+  background-color: transparent;
+}
+
+/* 目的域名是这张表的主角，用最亮的前景色与稍大的字号把它从其余列里提出来。 */
+.conn-primary {
+  color: var(--text-bright);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* 表格单元里的第二行：进程/MAC、真实目的地址、建立时间等次要信息。 */
 .conn-secondary {
   margin-top: 2px;
   color: var(--text-faint);
@@ -2464,6 +2481,8 @@ pre,
 
 .conn-mobile-destination {
   min-width: 0;
+  color: var(--text-bright);
+  font-weight: 700;
   overflow-wrap: anywhere;
 }
 
@@ -2483,18 +2502,33 @@ pre,
 .conn-bar {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px auto;
+  /* 标签定宽、条形吃掉剩余宽度：卡片是整宽的，让标签占满会把条形挤成一小截，
+     反而看不出比例。 */
+  grid-template-columns: minmax(0, 280px) minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   font-size: 13px;
 }
 
 .conn-bar-label {
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--text-muted);
+}
+
+.conn-bar-label > span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-muted);
+}
+
+.conn-bar-note {
+  flex: none;
+  font-size: 12px;
 }
 
 .conn-bar-track {
