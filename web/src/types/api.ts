@@ -397,17 +397,35 @@ export interface ConnectionEndpoint {
   count: number
 }
 
+export interface ConnectionFacet {
+  id: string
+  label: string
+  count: number
+  note?: string
+}
+
+export interface ConnectionFacets {
+  targets: ConnectionFacet[]
+  clients: ConnectionFacet[]
+  nodes: ConnectionFacet[]
+  groups: ConnectionFacet[]
+}
+
 export interface ConnectionsResponse {
   snapshotAt: string
   snapshotOk: boolean
   logsOk: boolean
   dropped?: number
   truncated?: boolean
+  facetLimited?: boolean
   summary: {
     outboundTcp: number
     udpSockets: number
     windowEvents: number
+    windowClients: number
+    windowTargets: number
   }
+  facets: ConnectionFacets
   endpoints: ConnectionEndpoint[]
   entries: ConnectionEvent[]
 }

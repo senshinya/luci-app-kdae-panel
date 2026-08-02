@@ -910,7 +910,34 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
         snapshotAt: at(0),
         snapshotOk: true,
         logsOk: true,
-        summary: { outboundTcp: 32, udpSockets: 1, windowEvents: 6 },
+        summary: { outboundTcp: 32, udpSockets: 1, windowEvents: 205, windowClients: 4, windowTargets: 8 },
+        facets: {
+          targets: [
+            { id: 'api.github.com', label: 'api.github.com', count: 72 },
+            { id: 'registry.npmjs.org', label: 'registry.npmjs.org', count: 49 },
+            { id: 'www.youtube.com', label: 'www.youtube.com', count: 33 },
+            { id: 'cdn.jsdelivr.net', label: 'cdn.jsdelivr.net', count: 21 },
+            { id: 'www.bilibili.com', label: 'www.bilibili.com', count: 13 },
+            { id: 'mirrors.example.net', label: 'mirrors.example.net', count: 8 },
+            { id: 'dns.google', label: 'dns.google', count: 5 },
+            { id: 'ntp.org', label: 'ntp.org', count: 4 },
+          ],
+          clients: [
+            { id: 'mac:02:00:00:00:00:10', label: '192.168.31.10', count: 96, note: '02:00:00:00:00:10' },
+            { id: 'mac:02:00:00:00:00:11', label: '192.168.31.11', count: 57, note: '02:00:00:00:00:11' },
+            { id: 'ip:2001:db8::10', label: '2001:db8::10', count: 31 },
+            { id: 'ip:192.168.31.12', label: '192.168.31.12', count: 21 },
+          ],
+          nodes: [
+            { id: 'demo-sg', label: 'demo-sg', count: 124 },
+            { id: 'demo-us', label: 'demo-us', count: 46 },
+            { id: 'demo-jp', label: 'demo-jp', count: 22 },
+          ],
+          groups: [
+            { id: 'proxy', label: 'proxy', count: 183 },
+            { id: 'direct', label: 'direct', count: 22 },
+          ],
+        },
         endpoints: [
           { address: '144.34.225.42:30128', count: 26 },
           { address: '223.6.6.6:443', count: 4 },
@@ -920,8 +947,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
         entries: [
           {
             at: at(12), network: 'tcp4', src: '192.168.31.10:51324',
-            dst: 'www.example.com:443', dstAddr: '93.184.216.34:443', sniffed: 'www.example.com:443',
-            outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', pname: 'curl',
+            dst: 'api.github.com:443', dstAddr: '140.82.113.6:443', sniffed: 'api.github.com',
+            outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', pname: 'curl', mac: '02:00:00:00:00:10',
           },
           {
             at: at(48), network: 'tcp6', src: '[2001:db8::10]:52100',
@@ -930,7 +957,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
           },
           {
             at: at(96), network: 'tcp4', src: '192.168.31.11:51325',
-            dst: 'api.example.com:443', dstAddr: '203.0.113.8:443', outbound: 'direct',
+            dst: 'registry.npmjs.org:443', dstAddr: '104.16.31.34:443', sniffed: 'registry.npmjs.org',
+            outbound: 'direct', mac: '02:00:00:00:00:11',
           },
           {
             at: at(150), network: 'udp4', src: '192.168.31.12:5353',
@@ -938,7 +966,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
           },
           {
             at: at(220), network: 'tcp4', src: '192.168.31.13:51326',
-            dst: 'offload.example:443', dstAddr: '198.51.100.8:443', outbound: 'proxy', offloaded: true,
+            dst: 'cdn.jsdelivr.net:443', dstAddr: '104.16.85.20:443', sniffed: 'cdn.jsdelivr.net',
+            outbound: 'proxy', offloaded: true, mac: '02:00:00:00:00:10',
           },
           {
             at: at(1800), network: 'tcp4', src: '192.168.31.14:51327',
@@ -950,24 +979,52 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.goto('/connections')
     await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
     await expect(page.locator('.connection-pulse')).toContainText('32条 dae TCP 出站')
-    await expect(page.getByText('dae 出站远端')).toBeVisible()
-    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
-    await page.getByRole('button', { name: '查看全部 4' }).click()
+    await expect(page.locator('.connection-facet-row', { hasText: 'api.github.com' })).toBeVisible()
+    await page.locator('.connection-facet-row', { hasText: 'api.github.com' }).click()
+    await expect(page.locator('tbody tr')).toHaveCount(1)
+    await page.locator('.connection-facet-row', { hasText: 'api.github.com' }).click()
+    await expect(page.locator('tbody tr')).toHaveCount(5)
+    await page.locator('.connection-facet-modes .n-radio-button', { hasText: '客户端' }).click()
+    await page.locator('.connection-facet-row', { hasText: '192.168.31.10' }).click()
+    await expect(page.locator('tbody tr')).toHaveCount(2)
+    await page.locator('.connection-facet-row', { hasText: '192.168.31.10' }).click()
+    await page.locator('.connection-facet-modes .n-radio-button', { hasText: '目标' }).click()
+    await page.getByRole('button', { name: '实时端点 4' }).click()
     await expect(page.locator('.n-drawer').getByText('203.0.113.90:8443')).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.locator('.n-drawer')).not.toBeVisible()
     await expect(page.locator('tbody tr')).toHaveCount(5)
     await expect(page.getByText('old.example:443')).toHaveCount(0)
     await expect(page.getByText('存活', { exact: true })).toHaveCount(0)
+
+    await page.setViewportSize({ width: 1600, height: 600 })
+    const scrollState = await page.locator('.app-content > .n-layout-scroll-container').evaluate((element) => {
+      element.scrollTop = 320
+      return {
+        contentScrollTop: element.scrollTop,
+        contentOverflows: element.scrollHeight > element.clientHeight,
+        pageScrollTop: window.scrollY,
+      }
+    })
+    expect(scrollState.contentOverflows).toBe(true)
+    expect(scrollState.contentScrollTop).toBeGreaterThan(0)
+    expect(scrollState.pageScrollTop).toBe(0)
+    await expect.poll(async () => (await page.locator('.app-sidebar').boundingBox())?.y).toBe(0)
+
+    await page.setViewportSize({ width: 1600, height: 1000 })
     await capture(page, 'connections.png', 1600, 1000)
 
     await page.setViewportSize({ width: 390, height: 844 })
     await expect(page.locator('.connection-mobile-row')).toHaveCount(5)
     await expect(page.locator('.n-data-table')).toHaveCount(0)
     await capture(page, 'connections-mobile.png', 390, 844)
-    await page.getByRole('button', { name: '展开' }).click()
-    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
-    await expect(page.getByRole('button', { name: '查看全部 4 个远端' })).toBeVisible()
+    await page.locator('.connection-facet-mobile').click()
+    await expect(page.locator('.n-drawer').getByText('活动分布')).toBeVisible()
+    await expect(page.locator('.n-drawer').getByText('api.github.com')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '实时端点 4' }).click()
+    await expect(page.locator('.n-drawer').getByText('144.34.225.42:30128')).toBeVisible()
+    await page.keyboard.press('Escape')
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     await page.setViewportSize({ width: 1600, height: 900 })
     await page.unroute('**/api/v1/connections?*')

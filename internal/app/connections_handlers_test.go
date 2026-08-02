@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,13 +29,19 @@ func (snapshotter *stubConnectionSnapshotter) Snapshot(_ context.Context, pid in
 }
 
 func TestConnectionsEndpoint(t *testing.T) {
-	timestamp := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	timestamp := time.Now().UTC().Add(-time.Minute)
 	hostService := &stubHostService{
 		status: host.Status{MainPID: 42, ActiveState: "active"},
-		logs: []host.LogEntry{{
-			Timestamp: timestamp,
-			Message:   `level=info msg="192.0.2.1:1234 <-> example.com:443" ip=203.0.113.1:443 network=tcp4 outbound=proxy dialer=tokyo`,
-		}},
+		logs: []host.LogEntry{
+			{
+				Timestamp: timestamp,
+				Message:   `level=info msg="192.0.2.2:1234 <-> example.com:443" ip=203.0.113.1:443 sniffed=Example.COM. network=tcp4 outbound=proxy dialer=tokyo mac=02:00:00:00:00:01`,
+			},
+			{
+				Timestamp: timestamp.Add(-time.Minute),
+				Message:   `level=info msg="192.0.2.1:1235 <-> example.com:443" ip=203.0.113.1:443 network=tcp4 outbound=proxy dialer=tokyo mac=02:00:00:00:00:01`,
+			},
+		},
 	}
 	snapshotter := &stubConnectionSnapshotter{snapshot: daeconn.Snapshot{
 		TakenAt:     timestamp.Add(time.Second),
@@ -51,7 +58,7 @@ func TestConnectionsEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/connections?limit=100", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/connections?limit=100&window=15", nil)
 	recorder := httptest.NewRecorder()
 	application.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -61,14 +68,27 @@ func TestConnectionsEndpoint(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if snapshotter.pid != 42 || !response.SnapshotOK || !response.LogsOK || response.Summary.OutboundTCP != 2 || response.Summary.UDPSockets != 1 || response.Summary.WindowEvents != 1 {
+	if snapshotter.pid != 42 || !response.SnapshotOK || !response.LogsOK || response.Summary.OutboundTCP != 2 ||
+		response.Summary.UDPSockets != 1 || response.Summary.WindowEvents != 2 ||
+		response.Summary.WindowClients != 1 || response.Summary.WindowTargets != 1 {
 		t.Fatalf("响应概况异常: %+v, pid=%d", response, snapshotter.pid)
 	}
 	if len(response.Endpoints) != 2 || response.Endpoints[0].Address != "203.0.113.8:443" || response.Endpoints[0].Count != 3 {
 		t.Fatalf("端点分布异常: %+v", response.Endpoints)
 	}
-	if len(response.Entries) != 1 || response.Entries[0].Outbound != "proxy" {
+	if len(response.Entries) != 2 || response.Entries[0].Outbound != "proxy" {
 		t.Fatalf("响应记录异常: %+v", response.Entries)
+	}
+	if len(response.Facets.Targets) != 1 || response.Facets.Targets[0].Label != "example.com" || response.Facets.Targets[0].Count != 2 {
+		t.Fatalf("目标分布异常: %+v", response.Facets.Targets)
+	}
+	if len(response.Facets.Clients) != 1 || response.Facets.Clients[0].Label != "192.0.2.2" ||
+		response.Facets.Clients[0].Note != "02:00:00:00:00:01" || response.Facets.Clients[0].Count != 2 {
+		t.Fatalf("客户端未按 MAC 合并或没有保留最新 IP: %+v", response.Facets.Clients)
+	}
+	if len(response.Facets.Nodes) != 1 || response.Facets.Nodes[0].Label != "tokyo" || response.Facets.Nodes[0].Count != 2 ||
+		len(response.Facets.Groups) != 1 || response.Facets.Groups[0].Label != "proxy" || response.Facets.Groups[0].Count != 2 {
+		t.Fatalf("路由分布异常: nodes=%+v groups=%+v", response.Facets.Nodes, response.Facets.Groups)
 	}
 }
 
@@ -87,6 +107,73 @@ func TestConnectionsEndpointRejectsInvalidLimit(t *testing.T) {
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("limit=%q 状态码 = %d，响应 = %s", value, recorder.Code, recorder.Body.String())
 		}
+	}
+	for _, value := range []string{"0", "1441", "999999999999999999", "invalid"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/connections?window="+value, nil)
+		recorder := httptest.NewRecorder()
+		application.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("window=%q 状态码 = %d，响应 = %s", value, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestConnectionsEndpointAppliesWindowBeforeFacetsAndLimit(t *testing.T) {
+	now := time.Now().UTC()
+	hostService := &stubHostService{logs: []host.LogEntry{
+		{Timestamp: now.Add(-time.Minute), Message: `level=info msg="192.0.2.1:1 <-> recent.example:443" ip=203.0.113.1:443 network=tcp4 outbound=proxy`},
+		{Timestamp: now.Add(-20 * time.Minute), Message: `level=info msg="192.0.2.2:2 <-> old.example:443" ip=203.0.113.2:443 network=tcp4 outbound=direct`},
+	}}
+	application, err := NewWithDependencies(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Dependencies{
+		Dae: stubDaeService{}, Host: hostService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/connections?window=5&limit=1", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，响应 = %s", recorder.Code, recorder.Body.String())
+	}
+	var response connectionsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Summary.WindowEvents != 1 || len(response.Entries) != 1 || len(response.Facets.Targets) != 1 ||
+		response.Facets.Targets[0].Label != "recent.example" || len(response.Facets.Groups) != 1 || response.Facets.Groups[0].Label != "proxy" {
+		t.Fatalf("时间窗没有在分布和列表之前生效: %+v", response)
+	}
+}
+
+func TestConnectionHostAndMACNormalization(t *testing.T) {
+	for input, expected := range map[string]string{
+		"example.com:443":  "example.com",
+		"[2001:db8::1]:53": "2001:db8::1",
+		"2001:db8::1":      "2001:db8::1",
+		"[2001:db8::2]":    "2001:db8::2",
+	} {
+		if actual := connectionHost(input); actual != expected {
+			t.Errorf("connectionHost(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+	if actual := connectionMAC("02-00-00-00-00-01"); actual != "02:00:00:00:00:01" {
+		t.Fatalf("正常 MAC = %q", actual)
+	}
+	for _, invalid := range []string{"", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "invalid"} {
+		if actual := connectionMAC(invalid); actual != "" {
+			t.Errorf("无效 MAC %q = %q", invalid, actual)
+		}
+	}
+}
+
+func TestBuildConnectionFacetsLimitsOnlyPayload(t *testing.T) {
+	events := make([]daeconn.Event, connectionFacetLimit+1)
+	for index := range events {
+		events[index] = daeconn.Event{Target: fmt.Sprintf("target-%03d.example:443", index)}
+	}
+	facets, clientCount, targetCount, limited := buildConnectionFacets(events)
+	if !limited || len(facets.Targets) != connectionFacetLimit || targetCount != connectionFacetLimit+1 || clientCount != 0 {
+		t.Fatalf("分布上限误伤摘要计数: limited=%v targets=%d/%d clients=%d", limited, len(facets.Targets), targetCount, clientCount)
 	}
 }
 

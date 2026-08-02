@@ -133,6 +133,7 @@ onBeforeUnmount(() => {
   <NLayout :has-sider="!mobile" class="app-shell">
     <NLayoutSider
       v-if="!mobile"
+      class="app-sidebar"
       bordered
       collapse-mode="width"
       :collapsed-width="64"
@@ -177,9 +178,7 @@ onBeforeUnmount(() => {
       </NDrawerContent>
     </NDrawer>
 
-    <!-- content-class 落到 naive-ui 自己的滚动容器上：桌面端要在这一层把顶栏钉住，
-         把滚动交给下面的 .app-content，否则唯一能挂样式的就是 naive-ui 的内部类名 -->
-    <NLayout content-class="app-main">
+    <NLayout class="app-main">
       <NLayoutHeader bordered class="app-header">
         <div class="app-header-leading">
           <NButton
