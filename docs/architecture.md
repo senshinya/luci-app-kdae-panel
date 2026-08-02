@@ -68,6 +68,13 @@ kdae-panel
 - 日志级别名共用 `internal/host/loglevel.go` 的一张表。dae 写的是 logrus 那套（`warn`、`fatal`、
   `trace`），syslog 前缀写的是另一套（`warning`、`crit`），日志页按 `level` 精确匹配做筛选，
   两边不归一到同一组名字就会出现"同一条日志在 systemd 上筛得出、在 procd 上筛不出"。
+- 日志时间戳一律是绝对时刻。journald 直接给 epoch 微秒，没有歧义；`logread` 给的是不带时区的
+  墙上时间，要靠本机 UTC 偏移才能还原成时刻，而这个偏移**不能问 Go 的 `time.Local`**：OpenWrt 把
+  时区写在 `/etc/TZ`（POSIX 串，如 `CST-8`），Go 只认 IANA 名字与 tzdata 文件，默认镜像不装
+  zoneinfo、`/etc/localtime` 又是指向 `/tmp/localtime` 的空悬软链，于是 `time.Local` 一路退回
+  UTC——在 UTC+8 上每条日志都会落到未来 8 小时。`internal/host/procd.go` 的 `logZone` 改问
+  `date +%z`，也就是打印这些时间戳的 busybox 自己，偏移与产出口径天然一致、夏令时也由它负责，
+  结果按 5 分钟缓存。拿不到时退回 `time.Local`。
 
 服务控制的 `enable-now` / `disable-now` 两个动作在两套后端上落法不同：systemd 直接用
 `systemctl enable --now`，rc.common 没有 `--now`，procd 拆成 `enable` + `start` 两条命令按同样的

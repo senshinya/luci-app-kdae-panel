@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/command"
@@ -32,7 +33,17 @@ type procdManager struct {
 	daeBinary   string
 	runner      command.Runner
 	timeout     time.Duration
+
+	// logread 打印不带时区的墙上时间，把它读成绝对时刻需要本机当前的 UTC 偏移，
+	// 而 Go 在 OpenWrt 上恰恰拿不到（见 logZone）。缓存一份，别每次拉日志都 fork。
+	zoneMu sync.Mutex
+	zone   *time.Location
+	zoneAt time.Time
 }
+
+// zoneTTL 是本机 UTC 偏移的缓存时长。取值只需满足两点：连接活动页几秒一刷时
+// 不要跟着 fork 出一堆 date，以及夏令时切换后不要陈旧太久。
+const zoneTTL = 5 * time.Minute
 
 func newProcdManager(options Options) (*procdManager, error) {
 	if options.Runner == nil {
@@ -367,21 +378,68 @@ func (m *procdManager) Logs(ctx context.Context, limit int) ([]LogEntry, error) 
 	if err != nil {
 		return nil, fmt.Errorf("读取 logread 日志: %s", command.Describe(err, result))
 	}
-	entries := parseLogread(result.Stdout, m.serviceName)
+	entries := parseLogread(result.Stdout, m.serviceName, m.logZone(ctx))
 	if len(entries) > limit {
 		entries = entries[len(entries)-limit:]
 	}
 	return entries, nil
 }
 
-func parseLogread(output, serviceName string) []LogEntry {
+// logZone 取本机当前的 UTC 偏移，问的是 `date`——也就是打印这些时间戳的
+// busybox 自己，因此偏移与日志的产出口径天然一致，夏令时也由它负责。
+//
+// 不能用 time.Local：OpenWrt 把时区写在 /etc/TZ 里（POSIX 串，如 CST-8），
+// 而 Go 只认 IANA 名字与 tzdata 文件。默认镜像不装 zoneinfo，/etc/localtime
+// 是一条指向 /tmp/localtime 的空悬软链，于是 Go 的 time.Local 一路退回 UTC。
+// 在 UTC+8 上照 time.Local 解析，每条日志都会落到未来 8 小时。
+//
+// 拿不到就退回 time.Local，与修复前同义——这条路上没有比"不知道"更好的猜法，
+// 而 date 属于 busybox 核心命令，正常机器上不会缺。
+func (m *procdManager) logZone(ctx context.Context) *time.Location {
+	m.zoneMu.Lock()
+	defer m.zoneMu.Unlock()
+	if m.zone != nil && timeNow().Sub(m.zoneAt) < zoneTTL {
+		return m.zone
+	}
+	zone := time.Local
+	if result, err := m.run(ctx, "date", "+%z"); err == nil {
+		if parsed, ok := parseUTCOffset(strings.TrimSpace(result.Stdout)); ok {
+			zone = parsed
+		}
+	}
+	m.zone, m.zoneAt = zone, timeNow()
+	return zone
+}
+
+// parseUTCOffset 解析 `date +%z` 的 ±hhmm。
+func parseUTCOffset(value string) (*time.Location, bool) {
+	if len(value) != 5 || (value[0] != '+' && value[0] != '-') {
+		return nil, false
+	}
+	hours, err := strconv.Atoi(value[1:3])
+	if err != nil {
+		return nil, false
+	}
+	minutes, err := strconv.Atoi(value[3:5])
+	if err != nil || minutes > 59 {
+		return nil, false
+	}
+	seconds := hours*3600 + minutes*60
+	if value[0] == '-' {
+		seconds = -seconds
+	}
+	// 名字只在格式化时露面，面板一律以 UTC 出口，用不到它。
+	return time.FixedZone(value, seconds), true
+}
+
+func parseLogread(output, serviceName string, zone *time.Location) []LogEntry {
 	entries := make([]LogEntry, 0)
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if entry, ok := parseLogreadLine(line, serviceName); ok {
+		if entry, ok := parseLogreadLine(line, serviceName, zone); ok {
 			entries = append(entries, entry)
 		}
 	}
@@ -396,7 +454,7 @@ func parseLogread(output, serviceName string) []LogEntry {
 // 唯一可靠的锚点是 "<服务名>["，因此从它切开：之前是时间戳与 facility.level，
 // 之后是 pid 和消息体。解析不出的部分一律退化而不丢弃整行——用户看日志
 // 正是因为出了问题，这时候少一行比格式难看严重得多。
-func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
+func parseLogreadLine(line, serviceName string, zone *time.Location) (LogEntry, bool) {
 	tag := serviceName + "["
 	index := strings.Index(line, tag)
 	if index < 0 {
@@ -404,7 +462,7 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	}
 	entry := LogEntry{Unit: serviceName, Level: "info", Priority: 6}
 	prefix := strings.TrimSpace(line[:index])
-	entry.Timestamp = parseLogreadTimestamp(prefix)
+	entry.Timestamp = parseLogreadTimestamp(prefix, zone)
 	if priority, level, ok := logreadLevel(prefix); ok {
 		entry.Level = level
 		entry.Priority = priority
@@ -446,27 +504,33 @@ var timeNow = time.Now
 
 // parseLogreadTimestamp 解析行首时间戳，解析不出返回零值。
 //
-// logread 打印的是本机墙上时间，不带时区信息——用 time.ParseInLocation 配
-// time.Local 才是对它的正确解释：数字本身就是本地时间，不是 UTC 只是"标签
-// 恰好没写"。两组布局解析都统一走本地时区，最后再各自转 UTC 交给上层，
-// 与 systemd 后端返回 UTC 的约定一致。
+// logread 打印的是本机墙上时间，不带时区信息——用 time.ParseInLocation 配本机
+// 时区才是对它的正确解释：数字本身就是本地时间，不是 UTC 只是"标签恰好没写"。
+// 两组布局解析都统一走同一个时区，最后再各自转 UTC 交给上层，与 systemd 后端
+// 返回 UTC 的约定一致。
+//
+// zone 由 logZone 从 `date +%z` 取得而不是 time.Local：Go 在默认的 OpenWrt 镜像
+// 上认不出本机时区，详见 logZone。
 //
 // 零值只在"这段前缀本就不像时间戳"时出现——这时候编造一个日期比说"不知道"
 // 更容易误导，与 systemd 后端解析失败时的行为一致。但 busybox 格式没有年份，
 // 这不属于"解析不出"：月/日/时间是真实信息，直接丢给零值太可惜，因此单独
 // 用 withInferredYear 补全，而不是并入失败路径。
-func parseLogreadTimestamp(prefix string) time.Time {
+func parseLogreadTimestamp(prefix string, zone *time.Location) time.Time {
+	if zone == nil {
+		zone = time.Local
+	}
 	fields := strings.Fields(prefix)
 	for count := len(fields); count > 0; count-- {
 		candidate := strings.Join(fields[:count], " ")
 		for _, layout := range logreadTimestampLayoutsWithYear {
-			if parsed, err := time.ParseInLocation(layout, candidate, time.Local); err == nil {
+			if parsed, err := time.ParseInLocation(layout, candidate, zone); err == nil {
 				return parsed.UTC()
 			}
 		}
 		for _, layout := range logreadTimestampLayoutsWithoutYear {
-			if parsed, err := time.ParseInLocation(layout, candidate, time.Local); err == nil {
-				return withInferredYear(parsed)
+			if parsed, err := time.ParseInLocation(layout, candidate, zone); err == nil {
+				return withInferredYear(parsed, zone)
 			}
 		}
 	}
@@ -480,36 +544,39 @@ func parseLogreadTimestamp(prefix string) time.Time {
 // 之前的实现把 parsed 的裸数字硬套上 time.UTC 标签去跟 timeNow().UTC()
 // （一次真实的时区换算）比较，在 UTC+8（面向国内用户的部署最常见的时区）
 // 上会让 8 小时以内的日志全部被判成"来自未来"进而误回拨一年。
-func withInferredYear(parsed time.Time) time.Time {
-	now := timeNow()
-	guess := dateInYear(now.Year(), parsed)
+//
+// now 也要换算到 zone 再取年份：跨年那一刻两个参照系分属不同年份（UTC 的
+// 12 月 31 日 16:00 已经是 UTC+8 的 1 月 1 日），取错年份就差整整一年。
+func withInferredYear(parsed time.Time, zone *time.Location) time.Time {
+	now := timeNow().In(zone)
+	guess := dateInYear(now.Year(), parsed, zone)
 	// 回拨要求"晚于现在超过 24 小时"而不是"晚于现在"：几秒到几分钟的偏差是
 	// 路由器 RTC 与日志时间戳之间常见的时钟误差，为此回拨一整年是灾难性的
 	// 误判；真正的跨年场景（元旦读上一年 12 月的日志）与"现在"差着将近
 	// 一年，24 小时的宽限足以把两者分开，不会误伤时钟误差。
 	if guess.Sub(now) > 24*time.Hour {
-		guess = dateInYear(guess.Year()-1, parsed)
+		guess = dateInYear(guess.Year()-1, parsed, zone)
 	}
 	return guess.UTC()
 }
 
-// dateInYear 用给定年份重建 parsed 的月/日/时刻，落在 time.Local 下。
+// dateInYear 用给定年份重建 parsed 的月/日/时刻，落在 zone 下。
 //
 // 只有 2 月 29 日会让目标年份"没有这一天"——time.Date 对此不报错，而是把
 // 溢出静默归一化成 3 月 1 日，月和日一起被改掉，不校验就会把闰年才有的
 // 日志显示成 3 月的日志。校验不通过就退到更早的年份重建，直到找到真正
 // 拥有这一天的年份；8 次封顶只是给异常输入（parsed 根本不是真实存在过的
 // 日期）一个退出条件，正常情况下最近的闰年最多退 4 年就能找到。
-func dateInYear(year int, parsed time.Time) time.Time {
+func dateInYear(year int, parsed time.Time, zone *time.Location) time.Time {
 	for attempt := 0; attempt < 8; attempt++ {
 		guess := time.Date(year-attempt, parsed.Month(), parsed.Day(),
-			parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.Local)
+			parsed.Hour(), parsed.Minute(), parsed.Second(), 0, zone)
 		if guess.Month() == parsed.Month() && guess.Day() == parsed.Day() {
 			return guess
 		}
 	}
 	return time.Date(year, parsed.Month(), parsed.Day(),
-		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, time.Local)
+		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, zone)
 }
 
 // logreadLevel 从前缀里找 "facility.level" 形式的 token 并取出 level。

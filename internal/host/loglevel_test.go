@@ -1,6 +1,9 @@
 package host
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // 日志页按 level 字段精确匹配筛选，所以同一条 dae 日志在两个后端下必须得到
 // 同一个 level/priority。这个用例把两条解析路径摆在一起比：systemd 侧走
@@ -32,7 +35,7 @@ func TestBothBackendsAgreeOnDaeLogLevels(t *testing.T) {
 
 		// procd：logread 前缀里的 daemon.info 同样不可信，正文优先。
 		line := "Fri Jul 31 01:02:03 2026 daemon.info dae[4321]: " + message
-		entry, ok := parseLogreadLine(line, "dae")
+		entry, ok := parseLogreadLine(line, "dae", time.Local)
 		if !ok {
 			t.Fatalf("procd 侧未能解析 %q", line)
 		}
@@ -53,7 +56,7 @@ func TestUnknownLevelFallsBackPerBackend(t *testing.T) {
 		t.Errorf("systemd 侧 = %s/%d，期望退回 journald 的 warning/4", level, priority)
 	}
 
-	entry, ok := parseLogreadLine("Fri Jul 31 01:02:03 2026 daemon.err dae[4321]: "+message, "dae")
+	entry, ok := parseLogreadLine("Fri Jul 31 01:02:03 2026 daemon.err dae[4321]: "+message, "dae", time.Local)
 	if !ok {
 		t.Fatal("procd 侧未能解析")
 	}

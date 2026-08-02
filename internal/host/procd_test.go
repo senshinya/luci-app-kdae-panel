@@ -156,6 +156,13 @@ func newTestProcdManager(t *testing.T, runner command.Runner) *procdManager {
 	if err != nil {
 		t.Fatalf("构造 procd 管理器: %v", err)
 	}
+	// 预置时区缓存，免得每个取日志的用例都要为 `date +%z` 备一条回复。取
+	// time.Local 是为了让既有用例的期望值继续按各自 pin 的本地时区成立；
+	// zoneAt 放到远期等于"永不过期"，这样用例把 timeNow 拨到哪一年都不会
+	// 意外触发那次 date 调用。真机上问 date 的路径由
+	// TestProcdLogsResolveZoneFromDate 单独覆盖。
+	manager.zone = time.Local
+	manager.zoneAt = time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
 	return manager
 }
 
@@ -813,6 +820,99 @@ func TestProcdLogsKeepRawLineForConnectionParsing(t *testing.T) {
 	}
 	if event.Mac != "28:d0:43:f9:3e:ec" {
 		t.Fatalf("mac = %s", event.Mac)
+	}
+}
+
+// logread 打印不带时区的墙上时间，本机偏移只能问 `date`——不能用 Go 的
+// time.Local：OpenWrt 把时区写在 /etc/TZ（POSIX 串 CST-8），Go 只认 IANA 名字与
+// tzdata 文件，默认镜像不装 zoneinfo 且 /etc/localtime 是空悬软链，于是 Go 一路
+// 退回 UTC。真机上因此每条日志都落到未来 8 小时：日志页时间整体偏移，连接活动的
+// "建立时间"还因为 startedAt > now 被前端显示成"—前"。
+func TestProcdLogsResolveZoneFromDate(t *testing.T) {
+	initScriptDir(t, "dae")
+	// 把 Go 的本地时区钉成 UTC，复现真机上 Go 认不出时区的状态。
+	pinLocalTimeZone(t, time.UTC)
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"date +%z":       {Stdout: "+0800\n"},
+		"logread -e dae": {Stdout: "Sun Aug  2 22:41:27 2026 daemon.err dae[7]: level=info msg=\"连上了\"\n"},
+	}}
+	manager := newTestProcdManager(t, runner)
+	manager.zone = nil // 清掉预置缓存，走真正的解析路径
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	// 22:41:27 是 UTC+8 的墙上时间，对应 14:41:27Z。照 time.Local（此处为 UTC）
+	// 解析会得到 22:41:27Z，正好差 8 小时。
+	wantUTC := time.Date(2026, time.August, 2, 14, 41, 27, 0, time.UTC)
+	if !entries[0].Timestamp.Equal(wantUTC) {
+		t.Fatalf("时间戳 = %v，期望 %v", entries[0].Timestamp.UTC(), wantUTC)
+	}
+}
+
+// date 拿不到时退回 time.Local——没有比"不知道"更好的猜法，也不该因此丢掉整页日志。
+func TestProcdLogsFallBackToLocalZoneWhenDateFails(t *testing.T) {
+	initScriptDir(t, "dae")
+	pinLocalTimeZone(t, time.UTC)
+	runner := &scriptedRunner{
+		t: t,
+		replies: map[string]command.Result{
+			"date +%z":       {},
+			"logread -e dae": {Stdout: "Sun Aug  2 22:41:27 2026 daemon.err dae[7]: level=info msg=\"连上了\"\n"},
+		},
+		failures: map[string]error{"date +%z": errExitStatus},
+	}
+	manager := newTestProcdManager(t, runner)
+	manager.zone = nil
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	wantUTC := time.Date(2026, time.August, 2, 22, 41, 27, 0, time.UTC)
+	if !entries[0].Timestamp.Equal(wantUTC) {
+		t.Fatalf("时间戳 = %v，期望按 time.Local 解析的 %v", entries[0].Timestamp.UTC(), wantUTC)
+	}
+}
+
+func TestParseUTCOffset(t *testing.T) {
+	cases := []struct {
+		input   string
+		seconds int
+		ok      bool
+	}{
+		{"+0800", 8 * 3600, true},
+		{"-0500", -5 * 3600, true},
+		{"+0000", 0, true},
+		{"+0545", 5*3600 + 45*60, true},
+		{"-0330", -(3*3600 + 30*60), true},
+		{"0800", 0, false},
+		{"+08", 0, false},
+		{"+08000", 0, false},
+		{"+08:00", 0, false},
+		{"", 0, false},
+		{"+0899", 0, false}, // 分钟越界，宁可退回 time.Local 也不编一个偏移
+		{"+ab00", 0, false},
+	}
+	for _, item := range cases {
+		zone, ok := parseUTCOffset(item.input)
+		if ok != item.ok {
+			t.Fatalf("parseUTCOffset(%q) ok = %v，期望 %v", item.input, ok, item.ok)
+		}
+		if !ok {
+			continue
+		}
+		_, offset := time.Now().In(zone).Zone()
+		if offset != item.seconds {
+			t.Fatalf("parseUTCOffset(%q) 偏移 = %d 秒，期望 %d", item.input, offset, item.seconds)
+		}
 	}
 }
 
