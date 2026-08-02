@@ -862,47 +862,64 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/logs?*')
   })
 
-  await test.step('连接活动页对账存活状态并支持按活跃时间排序', async () => {
+  await test.step('连接活动页展示流水、出站分布与按节点统计', async () => {
     const reference = Date.now()
     const at = (secondsAgo: number) => new Date(reference - secondsAgo * 1000).toISOString()
-    await page.route('**/api/v1/connections?*', (route) => route.fulfill({
+    await page.route('**/api/v1/connections**', (route) => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         snapshotAt: at(0),
         snapshotOk: true,
         logLevel: 'info',
-        summary: { liveTcp: 3, tcpSockets: 5, udpSockets: 2, windowEvents: 5 },
+        summary: { outboundSockets: 32, udpSockets: 2, windowEvents: 6, activeNodes: 2 },
+        endpoints: [
+          { key: '144.34.225.42:30128', count: 26 },
+          { key: '223.6.6.6:443', count: 4 },
+          { key: '38.55.107.116:443', count: 2 },
+        ],
+        nodes: [
+          { key: 'demo-sg', count: 4 },
+          { key: 'demo-us', count: 1 },
+        ],
+        groups: [
+          { key: 'proxy', count: 4 },
+          { key: 'direct', count: 2 },
+        ],
         entries: [
-          { firstSeen: at(42), network: 'tcp4', src: '192.168.10.24:52144', dst: 'www.youtube.com:443', dstAddr: '142.250.66.78:443', sniffed: 'www.youtube.com', outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01', status: 'live' },
-          { firstSeen: at(96), network: 'udp4', src: '192.168.10.31:50012', dst: 'stun.example.com:3478', dstAddr: '203.0.113.40:3478', outbound: 'proxy', dialer: 'demo-sg', status: 'unknown' },
-          { firstSeen: at(133), network: 'tcp4', src: '192.168.10.24:52102', dst: 'api.github.com:443', dstAddr: '20.205.243.168:443', sniffed: 'api.github.com', outbound: 'proxy', dialer: 'demo-us', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01', status: 'closed' },
-          { firstSeen: at(214), network: 'tcp4', src: '192.168.10.60:41208', dst: 'www.bilibili.com:443', dstAddr: '119.3.70.188:443', sniffed: 'www.bilibili.com', outbound: 'direct', policy: 'fixed', mac: 'aa:bb:cc:dd:ee:02', status: 'live' },
-          { firstSeen: at(390), network: 'tcp4', src: '192.168.10.24:51830', dst: 'cdn.jsdelivr.net:443', dstAddr: '104.16.85.20:443', sniffed: 'cdn.jsdelivr.net', outbound: 'proxy', dialer: 'demo-sg', offloaded: true, status: 'unknown' },
-          { firstSeen: at(1740), network: 'tcp', src: '192.168.10.87:39644', dst: '34.107.243.93:443', dstAddr: '34.107.243.93:443', outbound: '', status: 'orphan', approxFirstSeen: true },
+          { at: at(12), network: 'tcp4', src: '192.168.10.24:52144', dst: 'www.youtube.com:443', dstAddr: '142.250.66.78:443', sniffed: 'www.youtube.com', outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01' },
+          { at: at(48), network: 'udp4', src: '192.168.10.31:50012', dst: 'stun.example.com:3478', dstAddr: '203.0.113.40:3478', outbound: 'proxy', dialer: 'demo-sg' },
+          { at: at(96), network: 'tcp4', src: '192.168.10.24:52102', dst: 'api.github.com:443', dstAddr: '20.205.243.168:443', sniffed: 'api.github.com', outbound: 'proxy', dialer: 'demo-us', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01' },
+          { at: at(150), network: 'tcp4', src: '192.168.10.60:41208', dst: 'www.bilibili.com:443', dstAddr: '119.3.70.188:443', sniffed: 'www.bilibili.com', outbound: 'direct', policy: 'fixed', mac: 'aa:bb:cc:dd:ee:02' },
+          { at: at(220), network: 'tcp4', src: '192.168.10.24:51830', dst: 'cdn.jsdelivr.net:443', dstAddr: '104.16.85.20:443', sniffed: 'cdn.jsdelivr.net', outbound: 'proxy', dialer: 'demo-sg' },
+          { at: at(900), network: 'tcp4', src: '192.168.10.87:39644', dst: 'mirrors.example.cn:80', dstAddr: '202.127.174.52:80', sniffed: 'mirrors.example.cn', outbound: 'direct', policy: 'fixed' },
         ],
       }),
     }))
     await page.goto('/connections')
     await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
-    await expect(page.getByText('存活 TCP 连接')).toBeVisible()
+    // 实时出站分布来自 socket，与日志流水是两个口径
+    await expect(page.getByText('当前出站连接分布')).toBeVisible()
+    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
+    await expect(page.getByText('窗口内按节点')).toBeVisible()
+
     const rows = page.locator('.n-data-table-tbody .n-data-table-tr')
-    // 默认"存活中"视图只收 live 与 orphan
-    await expect(rows).toHaveCount(3)
+    // 默认最近 5 分钟：最旧那条（15 分钟前）应被时间窗挡掉
+    await expect(rows).toHaveCount(5)
     await expect(rows.first()).toContainText('www.youtube.com')
-    await expect(rows.last()).toContainText('存活 · 无日志')
     // 点表头翻转为最早在前
-    await page.locator('.n-data-table-th').filter({ hasText: '活跃时间' }).click()
-    await expect(rows.first()).toContainText('34.107.243.93')
-    await page.locator('.n-data-table-th').filter({ hasText: '活跃时间' }).click()
+    await page.locator('.n-data-table-th').filter({ hasText: '建立时间' }).click()
+    await expect(rows.first()).toContainText('cdn.jsdelivr.net')
+    await page.locator('.n-data-table-th').filter({ hasText: '建立时间' }).click()
     await expect(rows.first()).toContainText('www.youtube.com')
-    // 切到"全部活动"能看到已结束与 UDP 记录
-    await page.locator('.n-radio-button', { hasText: '全部活动' }).click()
+    // 放宽时间窗后能看到更早的记录
+    await page.locator('.filter-bar .n-select').first().click()
+    await clickVisibleOption(page, '全部')
     await expect(rows).toHaveCount(6)
-    await expect(page.getByText('已结束')).toBeVisible()
-    await expect(page.getByText('UDP · 不判定')).toBeVisible()
-    await page.locator('.n-radio-button', { hasText: '存活中' }).click()
-    await capture(page, 'connections.png', 1600, 900)
-    await page.unroute('**/api/v1/connections?*')
+    await expect(page.getByText('mirrors.example.cn')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.n-base-select-menu:visible')).toHaveCount(0)
+    await capture(page, 'connections.png', 1600, 1000)
+    await page.unroute('**/api/v1/connections**')
   })
 
   await test.step('故障诊断中心聚合公开检查并提供操作建议', async () => {

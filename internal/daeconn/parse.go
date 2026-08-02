@@ -1,9 +1,11 @@
 // Package daeconn 从 dae 的公开输出推导连接活动：info 级别的连接建立日志
-// 提供元数据（出站、节点、嗅探域名…），/proc/net 的 socket 表提供存活证据，
-// 两者按四元组对账。不读 dae 内部 eBPF Map——那不是公开接口。
+// 提供每条连接的元数据（出站、节点、嗅探域名…），/proc/net 里 dae 持有的
+// socket 提供它当前扛着多少条出站连接。不读 dae 内部 eBPF Map。
 //
-// dae 只在连接建立时记一行日志，关闭事件是 debug 级别，因此日志侧天然是
-// "活动流水"而非"当前状态"；存活语义完全由 socket 对账补上，且仅对 TCP 成立。
+// 这里刻意不提供"某条连接现在是否还活着"。dae 的 eBPF 数据面把被代理连接的
+// 客户端侧完全留在内核：既没有 userspace socket，也不进 netfilter conntrack，
+// 真机验证过没有任何公开接口能逐条判定。日志因此是"活动流水"而不是"当前状态"，
+// 界面按这个精度呈现。详见 docs/architecture.md 的观测边界一节。
 package daeconn
 
 import (
@@ -22,7 +24,7 @@ import (
 // control/udp.go 的日志块）。这不是上游承诺的稳定契约，所以解析失败的行
 // 一律静默跳过、只计数，绝不让整页报错。
 type Event struct {
-	Timestamp time.Time `json:"firstSeen"`
+	Timestamp time.Time `json:"at"`
 	Network   string    `json:"network"`           // tcp4 / tcp6 / udp4 / udp6
 	Src       string    `json:"src"`               // 客户端 ip:port（msg 左侧）
 	Target    string    `json:"dst"`               // 拨号目标，可能是域名:端口（msg 右侧）
@@ -34,9 +36,10 @@ type Event struct {
 	Pname     string    `json:"pname,omitempty"`
 	Mac       string    `json:"mac,omitempty"`
 	Offloaded bool      `json:"offloaded,omitempty"`
+	// ApproxTime 表示 at 是面板观测到该行的时刻，而不是日志自带的时间戳。
+	ApproxTime bool `json:"approxTime,omitempty"`
 
-	// srcAddr、dstAddr 是归一化后的四元组两端，供对账与去重使用；
-	// 解析不出时为零值，此时该事件不参与 socket 对账。
+	// srcAddr、dstAddr 是归一化后的地址，仅供去重使用；解析不出时为零值。
 	srcAddr netip.AddrPort
 	dstAddr netip.AddrPort
 }
@@ -133,25 +136,14 @@ func parseEvent(timestamp time.Time, raw string) (Event, parseOutcome) {
 	return event, parseOK
 }
 
-// flowKey 是四元组对账键；两端有一端解析不出就返回空串（不可对账）。
-func (e Event) flowKey() string {
-	if !e.srcAddr.IsValid() || !e.dstAddr.IsValid() {
-		return ""
-	}
-	return tupleKey(protocol(e.Network), e.srcAddr, e.dstAddr)
-}
-
 // dedupKey 是流水去重键。同一四元组可以先后承载多条连接，所以要叠加
 // 建立时刻；同一行日志跨两次轮询重复出现时，两个键完全一致。
+//
+// Src 与 Target 来自日志正文、可以含任意字符，用 Quote 分段拼接，避免
+// 内容里的分隔符伪造出与另一条记录相同的键、把它顶掉。
 func (e Event) dedupKey() string {
-	key := e.flowKey()
-	if key == "" {
-		// 四元组不可用时退化到原始字符串。Src 与 Target 来自日志正文、
-		// 可以含任意字符，用 Quote 分段拼接，避免内容里的分隔符伪造出
-		// 与另一条记录相同的键、把它顶掉。
-		key = strconv.Quote(e.Network) + strconv.Quote(e.Src) + strconv.Quote(e.Target)
-	}
-	return key + "|" + e.Timestamp.UTC().Format(time.RFC3339Nano)
+	return strconv.Quote(e.Network) + strconv.Quote(e.Src) + strconv.Quote(e.Target) +
+		"|" + e.Timestamp.UTC().Format(time.RFC3339Nano)
 }
 
 // validNetwork 限定 dae 的四种取值。它同时是 flowKey 的协议前缀来源，
@@ -163,19 +155,6 @@ func validNetwork(value string) bool {
 	default:
 		return false
 	}
-}
-
-// protocol 把 tcp4/tcp6 折叠成 tcp。socket 表按协议族分文件，但对账键
-// 用统一前缀：v4 映射地址在两侧都已 Unmap，族信息不再携带语义。
-func protocol(network string) string {
-	if strings.HasPrefix(network, "udp") {
-		return "udp"
-	}
-	return "tcp"
-}
-
-func tupleKey(proto string, src, dst netip.AddrPort) string {
-	return proto + "|" + src.String() + "|" + dst.String()
 }
 
 // parseAddrPort 解析 "ip:port"／"[v6]:port"，并把 v4 映射地址归一成纯 v4，

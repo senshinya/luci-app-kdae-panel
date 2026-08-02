@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -9,18 +10,29 @@ import (
 	"github.com/tuoro/kdae-panel/internal/host"
 )
 
-// connectionsLogWindow 是每次对账拉取的日志行数，取 host 后端的上限：
+// connectionsLogWindow 是每次拉取的日志行数，取 host 后端的上限：
 // 窗口越大，能从环形缓冲里抢救回来的连接事件越多。
 const connectionsLogWindow = host.MaxLogLines
 
-// connectionsMaxEntries 是单次响应的记录数上限，与存储容量同数量级。
+// connectionsMaxEntries 是单次响应的流水条数上限，与存储容量同数量级。
 const connectionsMaxEntries = 2000
 
+// connectionsMaxGroups 限制分组结果条目数，防止异常配置把响应撑大。
+const connectionsMaxGroups = 100
+
 type connectionsSummary struct {
-	LiveTCP      int `json:"liveTcp"`
-	TCPSockets   int `json:"tcpSockets"`
-	UDPSockets   int `json:"udpSockets"`
+	// OutboundSockets 是 dae 此刻持有的 ESTABLISHED 出站连接数，实时值。
+	OutboundSockets int `json:"outboundSockets"`
+	UDPSockets      int `json:"udpSockets"`
+	// WindowEvents 是窗口内累积的连接建立事件数，历史值。
 	WindowEvents int `json:"windowEvents"`
+	ActiveNodes  int `json:"activeNodes"`
+}
+
+// connectionsGroup 是一组计数。Key 的含义由所在字段决定：出站端点、节点或出站组。
+type connectionsGroup struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
 }
 
 type connectionsResponse struct {
@@ -28,15 +40,19 @@ type connectionsResponse struct {
 	SnapshotOK bool               `json:"snapshotOk"`
 	LogLevel   string             `json:"logLevel,omitempty"`
 	Dropped    int                `json:"dropped,omitempty"`
-	// Truncated 表示有记录未被逐条列出（超过 limit，或入站腿超过快照上限）。
-	// summary 里的计数不受影响，仍是完整的。
-	Truncated bool               `json:"truncated,omitempty"`
-	Summary   connectionsSummary `json:"summary"`
-	Entries   []daeconn.Record   `json:"entries"`
+	Truncated  bool               `json:"truncated,omitempty"`
+	Summary    connectionsSummary `json:"summary"`
+	// Endpoints 是 dae 当前出站连接按远端 ip:port 的分组，来自 socket，实时。
+	Endpoints []connectionsGroup `json:"endpoints"`
+	// Nodes、Groups 是窗口内新建连接按节点、按出站组的分组，来自日志，历史。
+	Nodes   []connectionsGroup `json:"nodes"`
+	Groups  []connectionsGroup `json:"groups"`
+	Entries []daeconn.Event    `json:"entries"`
 }
 
-// registerConnectionRoutes 注册连接活动端点。数据全部来自公开接口：
-// 服务日志（元数据）与 /proc/net（存活证据），不触碰 dae 内部状态。
+// registerConnectionRoutes 注册连接活动端点。数据全部来自公开来源：
+// 服务日志给出每条连接的元数据，/proc/net 给出 dae 当前的出站连接分布。
+// 不提供逐条存活判定——dae 的 eBPF 数据面不暴露客户端侧连接状态。
 func registerConnectionRoutes(router *http.ServeMux, hostService HostService, configuration ConfigurationService) {
 	store := daeconn.NewStore()
 	router.HandleFunc("GET /api/v1/connections", func(writer http.ResponseWriter, request *http.Request) {
@@ -44,7 +60,7 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 			writeAPIError(writer, http.StatusServiceUnavailable, "host_service_unavailable", "主机服务管理尚未初始化")
 			return
 		}
-		limit := connectionsLogWindow
+		limit := connectionsMaxEntries
 		if rawLimit := request.URL.Query().Get("limit"); rawLimit != "" {
 			parsed, err := strconv.Atoi(rawLimit)
 			if err != nil || parsed <= 0 {
@@ -56,13 +72,13 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 			}
 			limit = parsed
 		}
-		// 日志窗口始终拉满：limit 只裁剪响应，不该缩小合并进存储的事件范围。
 		entries, err := hostService.Logs(request.Context(), connectionsLogWindow)
 		if err != nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "logs_unavailable", err.Error())
 			return
 		}
 		events, dropped := daeconn.ParseEntries(entries)
+		merged := store.Merge(events)
 
 		var snapshot daeconn.Snapshot
 		snapshotOK := false
@@ -71,17 +87,14 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 				snapshot, snapshotOK = taken, true
 			}
 		}
-		records := store.Reconcile(events, snapshot, snapshotOK)
 
-		summary := connectionsSummary{TCPSockets: snapshot.TCPSockets, UDPSockets: snapshot.UDPSockets}
-		for _, record := range records {
-			switch record.Status {
-			case daeconn.StatusLive, daeconn.StatusOrphan:
-				summary.LiveTCP++
-			}
-			if record.Status != daeconn.StatusOrphan {
-				summary.WindowEvents++
-			}
+		nodes := countBy(merged, func(event daeconn.Event) string { return event.Dialer })
+		groups := countBy(merged, func(event daeconn.Event) string { return event.Outbound })
+		summary := connectionsSummary{
+			OutboundSockets: snapshot.TCPSockets,
+			UDPSockets:      snapshot.UDPSockets,
+			WindowEvents:    len(merged),
+			ActiveNodes:     len(nodes),
 		}
 
 		logLevel := ""
@@ -98,54 +111,50 @@ func registerConnectionRoutes(router *http.ServeMux, hostService HostService, co
 		if snapshotAt.IsZero() {
 			snapshotAt = time.Now().UTC()
 		}
-		listed, truncated := truncateConnectionRecords(records, limit)
+		listed := merged
+		truncated := snapshot.Truncated
+		if len(listed) > limit {
+			listed, truncated = listed[:limit], true
+		}
 		writeJSON(writer, http.StatusOK, connectionsResponse{
 			SnapshotAt: snapshotAt,
 			SnapshotOK: snapshotOK,
 			LogLevel:   logLevel,
 			Dropped:    dropped,
-			Truncated:  truncated || snapshot.Truncated,
+			Truncated:  truncated,
 			Summary:    summary,
+			Endpoints:  sortGroups(snapshot.Outbound),
+			Nodes:      nodes,
+			Groups:     groups,
 			Entries:    listed,
 		})
 	})
 }
 
-// truncateConnectionRecords 把响应裁剪到 limit 条，存活与孤儿记录优先占用
-// 配额：它们是"存活中"视图的全部内容，按"最近 N 条"一刀切会让那个视图残缺。
-// 但优先不等于无限——存活记录的数量由局域网流量决定，不设上限就等于把响应
-// 大小交给外部控制。records 已按时间倒序，裁剪保持原有顺序。
-// 返回 truncated 表示有记录未被列出，此时 summary 里的计数仍然是完整的。
-func truncateConnectionRecords(records []daeconn.Record, limit int) ([]daeconn.Record, bool) {
-	if len(records) <= limit {
-		return records, false
-	}
-	alive := 0
-	for _, record := range records {
-		if isAliveRecord(record) {
-			alive++
+// countBy 按 key 统计事件数，空 key 跳过。结果按数量倒序，同数按名称。
+func countBy(events []daeconn.Event, key func(daeconn.Event) string) []connectionsGroup {
+	counts := map[string]int{}
+	for _, event := range events {
+		if name := key(event); name != "" {
+			counts[name]++
 		}
 	}
-	// 存活记录本身超额时，只保留最新的 limit 条，其余一并让位。
-	aliveQuota := min(alive, limit)
-	otherQuota := limit - aliveQuota
-	kept := make([]daeconn.Record, 0, limit)
-	for _, record := range records {
-		if isAliveRecord(record) {
-			if aliveQuota > 0 {
-				kept = append(kept, record)
-				aliveQuota--
-			}
-			continue
-		}
-		if otherQuota > 0 {
-			kept = append(kept, record)
-			otherQuota--
-		}
-	}
-	return kept, true
+	return sortGroups(counts)
 }
 
-func isAliveRecord(record daeconn.Record) bool {
-	return record.Status == daeconn.StatusLive || record.Status == daeconn.StatusOrphan
+func sortGroups(counts map[string]int) []connectionsGroup {
+	groups := make([]connectionsGroup, 0, len(counts))
+	for key, count := range counts {
+		groups = append(groups, connectionsGroup{Key: key, Count: count})
+	}
+	sort.Slice(groups, func(left, right int) bool {
+		if groups[left].Count != groups[right].Count {
+			return groups[left].Count > groups[right].Count
+		}
+		return groups[left].Key < groups[right].Key
+	})
+	if len(groups) > connectionsMaxGroups {
+		groups = groups[:connectionsMaxGroups]
+	}
+	return groups
 }

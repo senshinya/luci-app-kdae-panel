@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -19,17 +18,12 @@ import (
 // 给将来的测试留注入缝，生产路径永远是 /proc。
 var procRoot = "/proc"
 
-// interfaceAddrs 同上，注入缝。生产环境即标准库实现。
-var interfaceAddrs = net.InterfaceAddrs
-
 // tcpEstablished 是 /proc/net/tcp 的 st 列里 ESTABLISHED 的值。
 const tcpEstablished = "01"
 
-// maxInboundLegs 限制单次快照记录多少条入站腿。它直接决定响应里孤儿记录的
-// 上限——孤儿数量等于 dae 持有的入站 socket 数，完全由局域网流量决定，没有
-// 这道闸，一台机器开几万条连接就能让面板每 5 秒构造并编码几万条记录。
-// 超出的部分仍计入 TCPSockets 总数，只是不再逐条呈现。
-const maxInboundLegs = 5000
+// maxOutboundEndpoints 限制分组结果的条目数。远端数量由 dae 的节点数决定，
+// 正常只有个位数；设闸是防止异常情况下把响应撑大。
+const maxOutboundEndpoints = 200
 
 // snapshotCacheTTL 是快照的复用窗口。页面每 5 秒轮询一次，多开几个标签页或
 // 连点刷新就会叠加成并发全量扫描，而一次扫描要读完 /proc/net/tcp 并对 dae
@@ -44,34 +38,27 @@ var snapshotCache struct {
 	err      error
 }
 
-// Snapshot 是某一时刻 dae 进程持有的 socket 集合。
+// Snapshot 是某一时刻 dae 进程持有的 socket 概况。
 //
-// dae 是 tproxy 透明代理、不做 NAT，它接受的入站 socket 在内核表里显示为
-// local=原始目的地址、remote=客户端——这两个值恰好就是连接日志四元组的两端，
-// 对账由此成立。区分入站腿与出站腿（dae→代理服务器）靠 local 是否为本机地址：
-// 入站腿的 local 是被欺骗的远端地址，不属于任何本机接口。
+// 只统计 dae 自己发起的出站连接——这是它在 /proc 里唯一可见的连接形态。
+// 客户端一侧不在这里：dae 的 eBPF 数据面把被代理连接的客户端侧完全留在内核，
+// 既不产生 userspace socket，也不进 netfilter conntrack，因此没有任何公开
+// 接口能逐条判断某条客户端连接是否还活着。详见 docs/architecture.md。
 type Snapshot struct {
 	TakenAt time.Time
-	// inbound 键为 tupleKey(tcp, 客户端, 原始目的)，值是两端地址，供孤儿展示。
-	inbound map[string]inboundLeg
-	// TCPSockets 是 dae 持有的 ESTABLISHED TCP socket 总数（含出站腿）。
+	// Outbound 是 dae 当前持有的 ESTABLISHED 出站连接，按远端 ip:port 分组。
+	// 远端通常就是代理节点的地址，所以这张表等价于"每个节点当前扛着多少连接"。
+	Outbound map[string]int
+	// TCPSockets、UDPSockets 是 dae 持有的 socket 总数。
 	TCPSockets int
-	// UDPSockets 是 dae 持有的 UDP socket 总数。
 	UDPSockets int
-	// Truncated 表示入站腿超出 maxInboundLegs、只记录了前一部分。
-	// 计数仍然准确，逐条列出的记录不完整。
+	// Truncated 表示分组条目超过上限、只保留了一部分。计数仍然准确。
 	Truncated bool
-}
-
-type inboundLeg struct {
-	src netip.AddrPort
-	dst netip.AddrPort
 }
 
 // TakeSnapshot 采集 dae 进程（mainPID）当前持有的 socket，结果在
 // snapshotCacheTTL 内复用。mainPID <= 0 表示 dae 未运行，返回空快照——
-// 没有进程就没有存活连接，这不是错误。/proc 读不动才返回 error，
-// 调用方应把存活状态降级为"未知"。
+// 没有进程就没有连接，这不是错误。/proc 读不动才返回 error。
 func TakeSnapshot(mainPID int) (Snapshot, error) {
 	snapshotCache.mu.Lock()
 	defer snapshotCache.mu.Unlock()
@@ -88,17 +75,13 @@ func TakeSnapshot(mainPID int) (Snapshot, error) {
 }
 
 func takeSnapshot(mainPID int) (Snapshot, error) {
-	snapshot := Snapshot{TakenAt: time.Now().UTC(), inbound: map[string]inboundLeg{}}
+	snapshot := Snapshot{TakenAt: time.Now().UTC(), Outbound: map[string]int{}}
 	if mainPID <= 0 {
 		return snapshot, nil
 	}
 	inodes, err := socketInodes(mainPID)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("枚举 dae 进程 socket: %w", err)
-	}
-	local, err := localAddresses()
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("枚举本机接口地址: %w", err)
 	}
 	for _, name := range []string{"tcp", "tcp6"} {
 		rows, err := parseSocketTable(filepath.Join(procRoot, "net", name))
@@ -116,15 +99,12 @@ func takeSnapshot(mainPID int) (Snapshot, error) {
 				continue
 			}
 			snapshot.TCPSockets++
-			if _, isLocal := local[row.local.Addr()]; isLocal {
-				continue // local 是本机地址 ⇒ dae 主动拨出的出站腿
-			}
-			if len(snapshot.inbound) >= maxInboundLegs {
+			endpoint := row.remote.String()
+			if _, known := snapshot.Outbound[endpoint]; !known && len(snapshot.Outbound) >= maxOutboundEndpoints {
 				snapshot.Truncated = true
 				continue
 			}
-			leg := inboundLeg{src: row.remote, dst: row.local}
-			snapshot.inbound[tupleKey("tcp", leg.src, leg.dst)] = leg
+			snapshot.Outbound[endpoint]++
 		}
 	}
 	for _, name := range []string{"udp", "udp6"} {
@@ -142,12 +122,6 @@ func takeSnapshot(mainPID int) (Snapshot, error) {
 		}
 	}
 	return snapshot, nil
-}
-
-// liveTCP 报告某条四元组当前是否存在对应的入站腿。
-func (s Snapshot) liveTCP(key string) bool {
-	_, live := s.inbound[key]
-	return live
 }
 
 // socketInodes 收集 /proc/<pid>/fd 里所有 socket 的 inode。
@@ -169,29 +143,6 @@ func socketInodes(pid int) (map[string]struct{}, error) {
 		}
 	}
 	return inodes, nil
-}
-
-func localAddresses() (map[netip.Addr]struct{}, error) {
-	addresses, err := interfaceAddrs()
-	if err != nil {
-		return nil, err
-	}
-	local := make(map[netip.Addr]struct{}, len(addresses))
-	for _, address := range addresses {
-		var ip net.IP
-		switch value := address.(type) {
-		case *net.IPNet:
-			ip = value.IP
-		case *net.IPAddr:
-			ip = value.IP
-		default:
-			continue
-		}
-		if parsed, ok := netip.AddrFromSlice(ip); ok {
-			local[parsed.Unmap()] = struct{}{}
-		}
-	}
-	return local, nil
 }
 
 type socketRow struct {
@@ -235,7 +186,6 @@ func parseSocketTable(path string) ([]socketRow, error) {
 	return rows, nil
 }
 
-
 // parseHexAddrPort 解析 "0100007F:1F90" 这样的地址列。
 func parseHexAddrPort(value string) (netip.AddrPort, bool) {
 	addressPart, portPart, found := strings.Cut(value, ":")
@@ -252,8 +202,8 @@ func parseHexAddrPort(value string) (netip.AddrPort, bool) {
 	}
 	// 内核把地址按 32 位字用主机字节序打印。按主机序读、按大端写，就还原成
 	// 网络字节序——小端机上等价于逐 4 字节反转，大端机上是空操作。不写死反转
-	// 是因为大端 MIPS 是 OpenWrt 的现实目标，而搞错的症状是"存活判定全错"
-	// 这种不会报错、只会给出错误结论的坏。
+	// 是因为大端 MIPS 是 OpenWrt 的现实目标，而搞错的症状是"地址全错"这种
+	// 不会报错、只会给出错误结论的坏。
 	for offset := 0; offset < len(raw); offset += 4 {
 		binary.BigEndian.PutUint32(raw[offset:offset+4], binary.NativeEndian.Uint32(raw[offset:offset+4]))
 	}

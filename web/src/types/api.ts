@@ -376,15 +376,9 @@ export interface HealthStatus {
   backend?: string
 }
 
-/**
- * GET /api/v1/connections 里单条连接记录的存活判定。
- * live=四元组有对应 socket；closed=socket 已消失；unknown=无法判定
- * （UDP、eBPF 卸载或快照失败）；orphan=socket 存活但建立日志已滚出窗口。
- */
-export type ConnectionStatus = 'live' | 'closed' | 'unknown' | 'orphan'
-
-export interface ConnectionRecord {
-  firstSeen: string
+/** GET /api/v1/connections 流水里的一条连接建立事件。 */
+export interface ConnectionEvent {
+  at: string
   network: string
   src: string
   dst: string
@@ -396,26 +390,38 @@ export interface ConnectionRecord {
   pname?: string
   mac?: string
   offloaded?: boolean
-  status: ConnectionStatus
-  /** firstSeen 是面板首次观测时刻而非日志时间，渲染成 "≥" 前缀。 */
-  approxFirstSeen?: boolean
+  /** at 是面板观测到该行的时刻而非日志自带时间，渲染成 "≥" 前缀。 */
+  approxTime?: boolean
+}
+
+/** 一组计数；key 的含义由所在字段决定（出站端点、节点或出站组）。 */
+export interface ConnectionGroup {
+  key: string
+  count: number
 }
 
 export interface ConnectionsSummary {
-  liveTcp: number
-  tcpSockets: number
+  /** dae 此刻持有的出站连接数，实时值。 */
+  outboundSockets: number
   udpSockets: number
+  /** 窗口内累积的连接建立事件数，历史值。 */
   windowEvents: number
+  activeNodes: number
 }
 
-/** GET /api/v1/connections。entries 已按建立时刻倒序。 */
+/** GET /api/v1/connections。entries 已按时间倒序。 */
 export interface ConnectionsResponse {
   snapshotAt: string
   snapshotOk: boolean
   logLevel?: string
   dropped?: number
-  /** 有记录未被逐条列出（超过 limit 或入站腿超过快照上限）；summary 计数仍完整。 */
+  /** 有事件未被逐条列出；summary 与分组计数仍完整。 */
   truncated?: boolean
   summary: ConnectionsSummary
-  entries: ConnectionRecord[] | null
+  /** dae 当前出站连接按远端分组，来自 socket，实时。 */
+  endpoints: ConnectionGroup[] | null
+  /** 窗口内新建连接按节点、按出站组分组，来自日志，历史。 */
+  nodes: ConnectionGroup[] | null
+  groups: ConnectionGroup[] | null
+  entries: ConnectionEvent[] | null
 }

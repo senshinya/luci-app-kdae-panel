@@ -2441,8 +2441,25 @@ pre,
   line-height: 1.5;
 }
 
+/* 筛选控件压在一行：搜索框吃掉剩余宽度，其余保持固定宽度不换行。 */
 .connections-page .filter-bar {
-  row-gap: 10px;
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.connections-page .filter-bar > .n-select {
+  flex: 0 0 auto;
+}
+
+.connections-page .log-search {
+  flex: 1 1 auto;
+  min-width: 120px;
+  width: auto;
+}
+
+.connections-page .filter-bar > .n-text {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .conn-mobile-destination {
@@ -2457,12 +2474,61 @@ pre,
   text-align: center;
 }
 
+/* 分布条：左标签、中条形、右计数。条形宽度按该组占最大组的比例。 */
+.conn-bars {
+  display: grid;
+  gap: 10px;
+}
+
+.conn-bar {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px auto;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.conn-bar-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.conn-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+
+.conn-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.conn-bar strong {
+  min-width: 28px;
+  color: var(--text-bright);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 767px) {
+  /* 窄屏放弃单行：控件退回上面的网格布局，搜索框独占一行。 */
   .connections-page .filter-bar {
+    flex-wrap: wrap;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .connections-page .filter-bar > .n-radio-group,
+  .connections-page .log-search {
+    width: auto;
+  }
+
   .connections-page .filter-bar > .n-button {
     grid-column: 1 / -1;
     justify-self: start;

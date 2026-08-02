@@ -11,8 +11,6 @@ import {
   NGridItem,
   NIcon,
   NInput,
-  NRadioButton,
-  NRadioGroup,
   NSelect,
   NSkeleton,
   NSpace,
@@ -25,7 +23,7 @@ import {
 } from 'naive-ui'
 import { ArrowDownOutline, ArrowUpOutline, RefreshOutline, SearchOutline } from '@vicons/ionicons5'
 import { getJSON } from '../api/client'
-import type { ConnectionRecord, ConnectionsResponse } from '../types/api'
+import type { ConnectionEvent, ConnectionsResponse } from '../types/api'
 import { formatDateTime, formatElapsedSince } from '../utils/format'
 import { useMobileViewport } from '../composables/useMobileViewport'
 
@@ -35,17 +33,23 @@ const data = ref<ConnectionsResponse | null>(null)
 const loading = ref(true)
 const autoRefresh = ref(true)
 const errorMessage = ref('')
-const view = ref<'live' | 'all'>('live')
+const windowMinutes = ref(5)
 const search = ref('')
 const outbound = ref<string | null>(null)
 const network = ref<string | null>(null)
-const limit = ref(500)
 const sortOrder = ref<'descend' | 'ascend'>('descend')
 const now = ref(Date.now())
 let timer: number | undefined
 let clock: number | undefined
 
-const limitOptions = [100, 200, 500, 1000, 2000].map((value) => ({ label: `${value} 条`, value }))
+// 0 表示不按时间过滤，展示存储里的全部流水。
+const windowOptions = [
+  { label: '最近 1 分钟', value: 1 },
+  { label: '最近 5 分钟', value: 5 },
+  { label: '最近 15 分钟', value: 15 },
+  { label: '最近 1 小时', value: 60 },
+  { label: '全部', value: 0 },
+]
 const networkOptions = [
   { label: '全部协议', value: '' },
   { label: 'TCP', value: 'tcp' },
@@ -57,28 +61,23 @@ const mobileListCap = 100
 
 const entries = computed(() => data.value?.entries ?? [])
 const summary = computed(() => data.value?.summary)
+const endpoints = computed(() => data.value?.endpoints ?? [])
+const nodes = computed(() => data.value?.nodes ?? [])
 const logLevelInsufficient = computed(() => {
   const level = data.value?.logLevel
   return !!level && !['info', 'debug', 'trace'].includes(level)
 })
 
 const outboundOptions = computed(() => {
-  const names = new Set<string>()
-  for (const entry of entries.value) {
-    if (entry.outbound) names.add(entry.outbound)
-  }
-  return [
-    { label: '全部出站', value: '' },
-    ...[...names].sort().map((name) => ({ label: name, value: name })),
-  ]
+  const names = (data.value?.groups ?? []).map((group) => group.key)
+  return [{ label: '全部出站', value: '' }, ...names.map((name) => ({ label: name, value: name }))]
 })
 
 const filteredEntries = computed(() => {
   const query = search.value.trim().toLowerCase()
+  const cutoff = windowMinutes.value > 0 ? now.value - windowMinutes.value * 60_000 : 0
   const rows = entries.value.filter((entry) => {
-    // UDP 没有关闭语义、被 eBPF 卸载的连接未必留有 socket，两类都判不了存活，
-    // 因此"存活中"只收 socket 确定命中的 TCP（含日志已滚掉的孤儿）。
-    if (view.value === 'live' && entry.status !== 'live' && entry.status !== 'orphan') return false
+    if (cutoff && Date.parse(entry.at) < cutoff) return false
     if (network.value && !entry.network.startsWith(network.value)) return false
     if (outbound.value && entry.outbound !== outbound.value) return false
     if (query) {
@@ -89,7 +88,7 @@ const filteredEntries = computed(() => {
   })
   const direction = sortOrder.value === 'descend' ? -1 : 1
   return rows.sort((left, right) => {
-    const delta = Date.parse(left.firstSeen) - Date.parse(right.firstSeen)
+    const delta = Date.parse(left.at) - Date.parse(right.at)
     if (delta !== 0) return delta * direction
     return left.src < right.src ? -1 : 1
   })
@@ -97,77 +96,37 @@ const filteredEntries = computed(() => {
 
 const mobileEntries = computed(() => filteredEntries.value.slice(0, mobileListCap))
 
-function statusMeta(record: ConnectionRecord): { label: string; type: 'success' | 'error' | 'warning' | 'default' } {
-  switch (record.status) {
-    case 'live':
-      return { label: '存活', type: 'success' }
-    case 'orphan':
-      return { label: '存活 · 无日志', type: 'success' }
-    case 'closed':
-      return { label: '已结束', type: 'default' }
-    default:
-      return record.network.startsWith('udp')
-        ? { label: 'UDP · 不判定', type: 'default' }
-        : { label: record.offloaded ? '未知 · 已卸载' : '未知', type: 'warning' }
-  }
-}
-
-function outboundType(record: ConnectionRecord): 'success' | 'error' | 'primary' | 'default' {
-  if (!record.outbound) return 'default'
-  if (record.outbound === 'direct') return 'success'
-  if (record.outbound === 'block') return 'error'
+function outboundType(entry: ConnectionEvent): 'success' | 'error' | 'primary' | 'default' {
+  if (!entry.outbound) return 'default'
+  if (entry.outbound === 'direct') return 'success'
+  if (entry.outbound === 'block') return 'error'
   return 'primary'
 }
 
-function isAlive(record: ConnectionRecord): boolean {
-  return record.status === 'live' || record.status === 'orphan'
+function timeLabel(entry: ConnectionEvent): string {
+  return (entry.approxTime ? '≈ ' : '') + formatDateTime(entry.at)
 }
 
-function firstSeenLabel(record: ConnectionRecord): string {
-  const prefix = record.approxFirstSeen ? '≥ ' : ''
-  return prefix + formatDateTime(record.firstSeen)
+function agoLabel(entry: ConnectionEvent): string {
+  return formatElapsedSince(entry.at, now.value) + '前'
 }
 
-// 起点是近似值时，时长也只能是下界；两处口径必须一致，否则"开始时间带 ≥、
-// 已持续却是精确值"会读成面板知道它活了多久。
-function elapsedLabel(record: ConnectionRecord): string {
-  const prefix = record.approxFirstSeen ? '≥ ' : ''
-  return prefix + formatElapsedSince(record.firstSeen, now.value)
+function destinationTitle(entry: ConnectionEvent): string {
+  return entry.sniffed || entry.dst
 }
 
-function destinationTitle(record: ConnectionRecord): string {
-  if (record.status === 'orphan') return record.dst
-  return record.sniffed || record.dst
+function sourceDetail(entry: ConnectionEvent): string {
+  return [entry.pname, entry.mac].filter(Boolean).join(' · ')
 }
 
-function sourceDetail(record: ConnectionRecord): string {
-  const details = [record.pname, record.mac].filter(Boolean)
-  return details.join(' · ')
-}
-
-const columns = computed<DataTableColumns<ConnectionRecord>>(() => [
+const columns = computed<DataTableColumns<ConnectionEvent>>(() => [
   {
-    title: '状态',
-    key: 'status',
-    width: 116,
-    render: (row) => {
-      const meta = statusMeta(row)
-      return h(NTag, { size: 'small', type: meta.type, bordered: false }, { default: () => meta.label })
-    },
-  },
-  {
-    title: '活跃时间',
-    key: 'firstSeen',
-    width: 210,
+    title: '建立时间',
+    key: 'at',
+    width: 200,
     sorter: true,
     sortOrder: sortOrder.value,
-    render: (row) => {
-      const lines = [h('div', firstSeenLabel(row))]
-      if (isAlive(row)) {
-        lines.push(h('div', { class: 'conn-secondary' }, `已持续 ${elapsedLabel(row)}`))
-      }
-      return lines
-    },
+    render: (row) => [h('div', timeLabel(row)), h('div', { class: 'conn-secondary' }, agoLabel(row))],
   },
   {
     title: '协议',
@@ -202,9 +161,8 @@ const columns = computed<DataTableColumns<ConnectionRecord>>(() => [
   {
     title: '出站',
     key: 'outbound',
-    minWidth: 150,
+    minWidth: 160,
     render: (row) => {
-      if (row.status === 'orphan') return h(NText, { depth: 3 }, { default: () => '未知（日志已滚出）' })
       const lines = [h(NTag, { size: 'small', type: outboundType(row), bordered: false }, { default: () => row.outbound })]
       const detail = [row.dialer, row.policy].filter(Boolean).join(' · ')
       if (detail) lines.push(h('div', { class: 'conn-secondary' }, detail))
@@ -226,7 +184,7 @@ function toggleSort() {
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    data.value = await getJSON<ConnectionsResponse>(`/api/v1/connections?limit=${limit.value}`)
+    data.value = await getJSON<ConnectionsResponse>('/api/v1/connections')
     errorMessage.value = ''
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '读取连接活动失败'
@@ -261,7 +219,7 @@ onBeforeUnmount(() => {
     <div class="page-toolbar">
       <div>
         <h2>连接活动</h2>
-        <NText depth="3">从 dae 连接日志与 socket 快照对账还原的连接状态，不含流量与速率</NText>
+        <NText depth="3">dae 记录的连接建立流水，以及它当前扛着的出站连接分布</NText>
       </div>
       <NSpace align="center">
         <NCheckbox v-model:checked="autoRefresh">每 5 秒刷新</NCheckbox>
@@ -274,57 +232,89 @@ onBeforeUnmount(() => {
     <NAlert v-if="errorMessage" type="error" closable @close="errorMessage = ''">{{ errorMessage }}</NAlert>
     <NAlert v-if="logLevelInsufficient" type="warning">
       当前 dae 日志级别为 {{ data?.logLevel }}，不会输出连接日志。请在配置管理里把 global 的
-      log_level 调整为 info 并重载，连接活动才能被采集；存活的 socket 仍会以"存活 · 无日志"形式列出。
+      log_level 调整为 info 并重载，连接流水才能被采集；出站连接分布不受影响。
     </NAlert>
     <NAlert v-else-if="data && !data.snapshotOk" type="warning">
-      无法读取 dae 的 socket 快照，存活判定暂不可用；下方记录的状态一律显示为"未知"。
-    </NAlert>
-    <NAlert v-else-if="data?.truncated" type="info">
-      连接数量超出单次列出的上限，下方只列出较新的一部分；上方三个计数仍是完整值。
+      无法读取 dae 的 socket 快照，出站连接分布暂不可用；下方流水不受影响。
     </NAlert>
 
     <NGrid responsive="screen" cols="1 s:3" :x-gap="14" :y-gap="14">
       <NGridItem>
         <NCard class="metric-card" size="small">
-          <NText depth="3">存活 TCP 连接</NText>
+          <NText depth="3">当前出站连接</NText>
           <NSkeleton v-if="loading && !data" text style="width: 60%" />
-          <strong v-else class="metric-value">{{ summary?.liveTcp ?? '—' }}</strong>
-          <small>dae 当前持有 {{ summary?.tcpSockets ?? '—' }} 个 TCP socket（含出站腿）</small>
+          <strong v-else class="metric-value">{{ summary?.outboundSockets ?? '—' }}</strong>
+          <small>dae 此刻持有的连接，实时值 · UDP {{ summary?.udpSockets ?? '—' }}</small>
         </NCard>
       </NGridItem>
       <NGridItem>
         <NCard class="metric-card" size="small">
-          <NText depth="3">窗口内连接事件</NText>
+          <NText depth="3">窗口内新建连接</NText>
           <NSkeleton v-if="loading && !data" text style="width: 60%" />
           <strong v-else class="metric-value">{{ summary?.windowEvents ?? '—' }}</strong>
           <small>
-            面板运行期内累积的建立事件
+            面板运行期内累积
             <template v-if="data?.dropped">· {{ data.dropped }} 行未能解析</template>
           </small>
         </NCard>
       </NGridItem>
       <NGridItem>
         <NCard class="metric-card" size="small">
-          <NText depth="3">UDP socket</NText>
+          <NText depth="3">活跃节点</NText>
           <NSkeleton v-if="loading && !data" text style="width: 60%" />
-          <strong v-else class="metric-value">{{ summary?.udpSockets ?? '—' }}</strong>
-          <small>UDP 无关闭语义，不参与存活判定</small>
+          <strong v-else class="metric-value">{{ summary?.activeNodes ?? '—' }}</strong>
+          <small>窗口内被选中过的节点数</small>
+        </NCard>
+      </NGridItem>
+    </NGrid>
+
+    <NGrid responsive="screen" cols="1 l:2" :x-gap="16" :y-gap="16" class="equal-height-grid">
+      <NGridItem>
+        <NCard title="当前出站连接分布" size="small">
+          <template #header-extra><NText depth="3">实时 · 按远端</NText></template>
+          <div v-if="endpoints.length" class="conn-bars">
+            <div v-for="item in endpoints" :key="item.key" class="conn-bar">
+              <span class="mono conn-bar-label">{{ item.key }}</span>
+              <span class="conn-bar-track">
+                <span
+                  class="conn-bar-fill"
+                  :style="{ width: `${Math.round((item.count / endpoints[0].count) * 100)}%` }"
+                />
+              </span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+          <NText v-else depth="3">dae 当前没有出站连接</NText>
+        </NCard>
+      </NGridItem>
+      <NGridItem>
+        <NCard title="窗口内按节点" size="small">
+          <template #header-extra><NText depth="3">历史 · 新建连接数</NText></template>
+          <div v-if="nodes.length" class="conn-bars">
+            <div v-for="item in nodes.slice(0, 8)" :key="item.key" class="conn-bar">
+              <span class="conn-bar-label">{{ item.key }}</span>
+              <span class="conn-bar-track">
+                <span
+                  class="conn-bar-fill"
+                  :style="{ width: `${Math.round((item.count / nodes[0].count) * 100)}%` }"
+                />
+              </span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+          <NText v-else depth="3">窗口内没有连接记录</NText>
         </NCard>
       </NGridItem>
     </NGrid>
 
     <NCard content-style="padding: 0;">
       <div class="filter-bar">
-        <NRadioGroup v-model:value="view" size="small">
-          <NRadioButton value="live">存活中</NRadioButton>
-          <NRadioButton value="all">全部活动</NRadioButton>
-        </NRadioGroup>
+        <NSelect v-model:value="windowMinutes" :options="windowOptions" class="log-select" />
         <NInput v-model:value="search" clearable placeholder="搜索地址、域名、节点或进程" class="log-search">
           <template #prefix><NIcon><SearchOutline /></NIcon></template>
         </NInput>
         <NSelect v-model:value="outbound" clearable :options="outboundOptions" placeholder="全部出站" class="log-select" />
         <NSelect v-model:value="network" clearable :options="networkOptions" placeholder="全部协议" class="log-select" />
-        <NSelect v-model:value="limit" :options="limitOptions" class="log-limit" @update:value="load()" />
         <NButton v-if="mobile" size="small" quaternary @click="toggleSort">
           <template #icon>
             <NIcon><ArrowDownOutline v-if="sortOrder === 'descend'" /><ArrowUpOutline v-else /></NIcon>
@@ -339,48 +329,40 @@ onBeforeUnmount(() => {
         :columns="columns"
         :data="filteredEntries"
         :loading="loading && !data"
-        :row-key="(row: ConnectionRecord) => `${row.network}|${row.src}|${row.dst}|${row.firstSeen}`"
-        :scroll-x="980"
+        :row-key="(row: ConnectionEvent) => `${row.network}|${row.src}|${row.dst}|${row.at}`"
+        :scroll-x="920"
         :bordered="false"
         :pagination="{ pageSize: 50 }"
         @update:sorter="handleSorter"
       >
         <template #empty>
-          <NEmpty
-            class="empty-state"
-            :description="view === 'live' ? '当前没有存活的 TCP 连接' : '窗口内没有连接活动'"
-          />
+          <NEmpty class="empty-state" description="所选时间窗内没有连接记录" />
         </template>
       </NDataTable>
 
       <NSpin v-else :show="loading && !data">
         <div v-if="mobileEntries.length" class="mobile-record-list">
-          <article v-for="record in mobileEntries" :key="`${record.network}|${record.src}|${record.dst}|${record.firstSeen}`" class="mobile-record">
+          <article v-for="entry in mobileEntries" :key="`${entry.network}|${entry.src}|${entry.dst}|${entry.at}`" class="mobile-record">
             <div class="mobile-record-head">
               <div class="mobile-record-title">
-                <NTag size="small" :type="statusMeta(record).type" :bordered="false">{{ statusMeta(record).label }}</NTag>
-                <span class="conn-mobile-destination mono">{{ destinationTitle(record) }}</span>
+                <NTag size="small" :type="outboundType(entry)" :bordered="false">{{ entry.outbound }}</NTag>
+                <span class="conn-mobile-destination mono">{{ destinationTitle(entry) }}</span>
               </div>
-              <NTag size="tiny" :bordered="false">{{ record.network }}</NTag>
+              <NTag size="tiny" :bordered="false">{{ entry.network }}</NTag>
             </div>
-            <p class="mobile-record-description mono">{{ record.src }} → {{ record.dstAddr || record.dst }}</p>
+            <p class="mobile-record-description mono">{{ entry.src }} → {{ entry.dstAddr || entry.dst }}</p>
             <div class="mobile-record-meta">
-              <span v-if="record.status !== 'orphan'">出站<strong>{{ record.outbound }}</strong></span>
-              <span v-if="record.dialer">节点<strong>{{ record.dialer }}</strong></span>
-              <span>开始<strong>{{ firstSeenLabel(record) }}</strong></span>
-              <span v-if="isAlive(record)">已持续<strong>{{ elapsedLabel(record) }}</strong></span>
-              <span v-if="sourceDetail(record)">来源<strong>{{ sourceDetail(record) }}</strong></span>
+              <span v-if="entry.dialer">节点<strong>{{ entry.dialer }}</strong></span>
+              <span>建立<strong>{{ timeLabel(entry) }}</strong></span>
+              <span>{{ agoLabel(entry) }}</span>
+              <span v-if="sourceDetail(entry)">来源<strong>{{ sourceDetail(entry) }}</strong></span>
             </div>
           </article>
           <NText v-if="filteredEntries.length > mobileListCap" depth="3" class="conn-mobile-cap">
             仅显示前 {{ mobileListCap }} 条，可用筛选缩小范围
           </NText>
         </div>
-        <NEmpty
-          v-else
-          class="mobile-empty"
-          :description="view === 'live' ? '当前没有存活的 TCP 连接' : '窗口内没有连接活动'"
-        />
+        <NEmpty v-else class="mobile-empty" description="所选时间窗内没有连接记录" />
       </NSpin>
     </NCard>
   </div>
