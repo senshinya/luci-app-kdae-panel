@@ -140,7 +140,7 @@ function applyTag() {
   if (rewriteEntry(target, line)) tagTarget.value = null
 }
 
-// ---- 节点延迟(面板主机 TCP 直连握手,非 dae 内部健康检查) ----
+// ---- 节点延迟(公网 ICMP、内网 TCP，非 dae 内部健康检查) ----
 const probing = ref(false)
 const latency = ref(new Map<string, LatencyResult>())
 
@@ -191,21 +191,31 @@ function latencyCell(row: NodeRow) {
   const result = latency.value.get(latencyKey(row.info))
   if (!result) return h(NText, { depth: 3 }, { default: () => '未测' })
   if (!result.reachable) {
+    const label = result.method === 'icmp' ? '无法测量' : '不可达'
     return h(NTooltip, null, {
-      trigger: () => h(NTag, { size: 'small', type: 'error', bordered: false }, { default: () => '不可达' }),
+      trigger: () => h(NTag, { size: 'small', type: 'error', bordered: false }, { default: () => label }),
       default: () => result.error || '连接失败',
     })
   }
   const value = result.latencyMs || 0
   const type = value < 100 ? 'success' : value < 300 ? 'warning' : 'error'
-  return h(NTag, { size: 'small', type, bordered: false }, { default: () => `${value.toFixed(value < 10 ? 1 : 0)} ms` })
+  const tag = () => h(NTag, { size: 'small', type, bordered: false }, {
+    default: () => `${value.toFixed(value < 10 ? 1 : 0)} ms`,
+  })
+  return h(NTooltip, null, {
+    trigger: tag,
+    default: () => [
+      result.method === 'icmp' ? 'ICMP 网络延迟（不验证代理端口或协议）' : 'TCP 握手延迟',
+      result.resolvedIp ? ` · ${result.resolvedIp}` : '',
+    ].join(''),
+  })
 }
 
 function latencyLabel(row: NodeRow): string {
   if (!row.info || !probeTarget(row.info)) return '—'
   const result = latency.value.get(latencyKey(row.info))
   if (!result) return '未测'
-  if (!result.reachable) return '不可达'
+  if (!result.reachable) return result.method === 'icmp' ? '无法测量' : '不可达'
   const value = result.latencyMs || 0
   return `${value.toFixed(value < 10 ? 1 : 0)} ms`
 }
@@ -217,6 +227,15 @@ function latencyType(row: NodeRow): 'success' | 'warning' | 'error' | 'default' 
   if (!result.reachable) return 'error'
   const value = result.latencyMs || 0
   return value < 100 ? 'success' : value < 300 ? 'warning' : 'error'
+}
+
+function latencyTitle(row: NodeRow): string {
+  if (!row.info) return ''
+  const result = latency.value.get(latencyKey(row.info))
+  if (!result) return ''
+  if (!result.reachable) return result.error || ''
+  const method = result.method === 'icmp' ? 'ICMP 网络延迟' : 'TCP 握手延迟'
+  return result.resolvedIp ? `${method} · ${result.resolvedIp}` : method
 }
 
 const nodeColumns: DataTableColumns<NodeRow> = [
@@ -257,8 +276,8 @@ const nodeColumns: DataTableColumns<NodeRow> = [
   },
   {
     title: () => h(NTooltip, null, {
-      trigger: () => h('span', { class: 'column-hint' }, '直连延迟'),
-      default: () => '面板主机到该服务器的 TCP 握手耗时，域名目标包含解析时间。这不是 dae 的健康检查结果，也不是 dae 选路所用的延迟；dae 开启 wan_interface 时会劫持本机流量，此时该连接同样由 dae 按路由规则转发。',
+      trigger: () => h('span', { class: 'column-hint' }, '节点入口延迟'),
+      default: () => '公网节点显示三次 ICMP 网络往返中位数，完全避开 dae 的 TCP/UDP 透明转发；它不验证代理端口或协议可用性。内网节点显示三次 TCP 握手中位数。两者都不是 dae 的健康检查延迟。',
     }),
     key: 'latency',
     width: 110,
@@ -283,7 +302,7 @@ const nodeColumns: DataTableColumns<NodeRow> = [
       <NSpace size="small">
         <NTag size="small" :bordered="false">{{ nodes.length }} 个</NTag>
         <NButton size="small" secondary :loading="probing" :disabled="nodes.length === 0" @click="probeLatency">
-          <template #icon><NIcon><FlashOutline /></NIcon></template>测试直连延迟
+          <template #icon><NIcon><FlashOutline /></NIcon></template>测试入口延迟
         </NButton>
         <NButton v-if="anonymousNodes.length" size="small" secondary @click="labelAnonymousNodes">
           <template #icon><NIcon><PricetagOutline /></NIcon></template>补全标签
@@ -319,7 +338,12 @@ const nodeColumns: DataTableColumns<NodeRow> = [
               <span>{{ row.entry.tag || row.info?.name || '未命名' }}</span>
               <NTag size="tiny" type="info" :bordered="false">{{ row.info?.protocol || '未知' }}</NTag>
             </div>
-            <NTag size="small" :type="latencyType(row)" :bordered="false">{{ latencyLabel(row) }}</NTag>
+            <NTag
+              size="small"
+              :type="latencyType(row)"
+              :bordered="false"
+              :title="latencyTitle(row)"
+            >{{ latencyLabel(row) }}</NTag>
           </div>
           <p class="mobile-record-description mono">
             {{ row.info?.host || '无法解析服务器' }}<template v-if="row.info?.port">:{{ row.info.port }}</template>

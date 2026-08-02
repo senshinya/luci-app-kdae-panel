@@ -159,6 +159,8 @@ GitHub JSON 元数据另有 10 分钟进程内缓存；同 URL 的并发请求�
 |---|---|---|
 | `GET` | `/dae/geo` | geo 数据现状、可选来源与正在进行的任务 |
 | `POST` | `/dae/geo` | 更新到指定来源的最新版 |
+| `POST` | `/dae/geo/residuals/cleanup` | 清理不承载唯一旧数据的事务残留 |
+| `POST` | `/dae/geo/residuals/restore` | 恢复正式文件缺失时的旧数据回滚点 |
 | `GET` | `/dae/geo/sources` | 列出管理员保存的自定义来源 |
 | `POST` | `/dae/geo/sources` | 添加自定义来源 |
 | `PUT` | `/dae/geo/sources/{id}` | 修改自定义来源 |
@@ -176,7 +178,9 @@ Geo 数据管理默认开启，由 `KDAE_PANEL_ENABLE_GEO_UPDATE`（OpenWrt 上�
 
 自定义来源请求体包含 `label`、`geoipUrl`、`geoipSha256Url`、`geositeUrl`、`geositeSha256Url`。四条地址都必须是公网 HTTPS；保存时拒绝 userinfo、内网字面地址与 URL 片段，下载首跳和每次重定向会重新解析 DNS，并在实际连接前再次拒绝非公网地址。自定义请求使用独立客户端，不携带 GitHub Token。每个数据文件上限 64 MiB，校验文件上限 64 KiB，没有跳过 SHA-256 的开关。来源保存在权限 `0600` 的 `KDAE_PANEL_GEO_SOURCES_FILE`；当前更新记录正在引用的来源不能直接删除，需先用另一个来源成功更新。
 
-`GET` 返回 `status.sources`（每个来源的标识、展示名、全部信任根仓库与说明）、`status.defaultSource`（界面该预选哪个——用过就是上次那个）、`status.targetDir`（本次会写入哪个目录）、`status.searchPath`（dae 的完整查找顺序）、每个文件的实际路径与大小，以及 `files[].shadowed`——被优先级更高的副本遮蔽、因而不会生效的同名文件。
+`GET` 返回 `status.sources`（每个来源的标识、展示名、全部信任根仓库与说明）、`status.defaultSource`（界面该预选哪个——用过就是上次那个）、`status.searchPath`（dae 的完整查找顺序），以及每个文件的实际路径、大小、`targetPath` 和 `shadowed` 副本。两个文件可能分别在不同目录生效，因此写入位置以各自的 `targetPath` 为准；兼容字段 `status.targetDir` 仅在两者同目录时有值。
+
+异常退出可能留下 `status.residuals`。Geo 专属暂存文件超过一小时才会被认定为残留，可由清理端点删除，下一次更新也会自动清理；固定后缀 `.kdae-panel-previous` 是旧数据回滚点。正式文件缺失时只能调用恢复端点（请求体为 `{ "path": "..." }`），正式文件仍在时才允许清理。两个动作都会重新扫描并验证路径、使用全局控制门，客户端不能借此操作任意文件。
 
 `POST` 立即返回 `202` 与任务快照，进度靠轮询 `GET /dae/geo`，阶段与安装任务一致（`downloading` → `applying` → `done`/`failed`）。同一时刻只允许一个 geo 任务，重复提交返回 `409 geo_update_in_progress`；它与安装任务各有各的任务槽，但落盘阶段共用全局控制门。
 
@@ -211,7 +215,9 @@ dae 只在重载时重新拉取 `subscription` 链接，因此"订阅定时刷�
 
 重载应用的是磁盘上的当前配置，所以之前用 `apply: false` 保存但未应用的改动会随这次刷新一并生效。
 
-订阅内容本身的缓存由 dae 负责：把链接的 scheme 写成带 `-file` 后缀的形式（如 `https-file://`），dae 会将拉取成功的内容保存到 `config_dir/persist.d/<tag>.sub`，并在后续拉取失败时回退使用。面板只负责在配置里维护这一行，不自行下载或缓存订阅内容。
+订阅内容本身的缓存由 dae 负责：把链接的 scheme 写成带 `-file` 后缀的形式（如 `https-file://`），dae 会将拉取成功的内容保存到 `config_dir/persist.d/<tag>.sub`，并在后续拉取失败时回退使用。面板不自行下载或缓存订阅内容，只读解析这些缓存供分组成员选择。
+
+`GET /subscriptions/nodes` 返回现有缓存中的订阅来源和带稳定名称的节点。每个节点只包含 `name`、`protocol`、`host` 与同名匹配数 `matches`，不会返回分享链接、密码或 UUID。缓存缺失时该来源不出现在结果中；单个缓存损坏、超限或不是普通文件时，来源带 `problem`，不会影响其他缓存。单文件上限 8 MiB、来源上限 128 个、节点名称上限 4096 个。
 
 ## 面板自身更新
 
@@ -264,7 +270,7 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/net/latency` | 从面板主机对目标做 TCP 握手延迟探测 |
+| `POST` | `/net/latency` | 探测节点主机延迟：公网使用 ICMP，内网使用 TCP |
 
 请求与响应示例：
 
@@ -279,16 +285,25 @@ procd 下，以下四个接口的实际行为：`GET /panel/update`、`POST /pan
 ```json
 {
   "results": [
-    { "host": "hk.example.com", "port": 443, "reachable": true, "latencyMs": 42.7 }
+    {
+      "host": "hk.example.com",
+      "port": 443,
+      "reachable": true,
+      "latencyMs": 42.7,
+      "resolvedIp": "203.0.113.8",
+      "method": "icmp"
+    }
   ]
 }
 ```
 
-单次最多 64 个目标，单目标超时 4 秒，同一时刻最多 16 个并发拨号（上限属于面板进程，多个并发请求共享）。
+单次最多 64 个目标，单目标总预算 4 秒，同一时刻最多 16 个并发目标（上限属于面板进程，多个并发请求共享）。域名先解析且不计入延迟；`resolvedIp` 是本轮实际选择的地址，`method` 标明结果来自 `tcp` 还是 `icmp`。
 
-`latencyMs` 是从发起拨号到 TCP 连接建立的耗时。目标为域名时它包含名称解析时间，因此冷缓存下的首次结果会偏高。该值反映面板主机到节点服务器的可达性，不等同于 dae 内部按 `tcp_check_url`/`udp_check_dns` 进行的健康检查，也不是 dae 选路时使用的延迟。
+公网地址一律发送三次 ICMP Echo 并返回中位数，不经过 dae 接管的 TCP/UDP 路径；ICMP 不通时明确返回无法测量，不回退到可能经过当前代理的 TCP。这个结果只表示节点主机的网络 RTT，不验证代理端口或协议可用性。内网、回环和链路本地地址则测三次 TCP 握手中位数，它们可能合法地低于 1 ms。两种方式都不包含名称解析时间。
 
-还有一层需要注意：dae 配置 `wan_interface` 时会劫持本机进程发出的流量，只有 dae 自身的连接凭 `so_mark_from_dae` 豁免。面板与 dae 同机运行，因此探测连接同样会进入 dae 的转发平面并按 routing 规则选路，测到的可能是经代理转发的路径而非物理直连。
+内网 TCP 探测 Socket 仍设置 dae 从 v1 系列起保留的 `0x100` 绕行 Mark。公网不使用任何延迟阈值判断：无论当前连接的是日本、美国或其他代理节点，TCP 都不会参与公网延迟结果，因此代理转发路径不会制造“看似合理但仍偏低”的数值。
+
+ICMP ping socket 通常受系统的 `ping_group_range` 控制；发行单元同时保留 `CAP_NET_RAW`，确保不同发行版上行为一致。旧安装通过面板自升级二进制后若看到 ICMP 权限错误，需要重新执行一次一键安装命令以更新 systemd 单元。
 
 单个目标不合法只影响它自己那条结果（`reachable: false` 并带 `error`），不会让整批探测失败；只有请求为空或超过 64 个目标才返回 `400`。目标列表会记入面板日志以供审计。
 

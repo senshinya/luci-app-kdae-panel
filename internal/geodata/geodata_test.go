@@ -196,6 +196,82 @@ func TestUpdateWritesBothFilesAndReloads(t *testing.T) {
 	}
 }
 
+// dae 会分别沿搜索路径查找两个文件；它们可能各自在不同目录生效。
+// 更新必须就地替换每一份，不能再把两者强行搬到第一个文件所在的目录。
+func TestUpdateWritesFilesToSeparateEffectiveDirectories(t *testing.T) {
+	manager, _, _, directory := newTestManager(t)
+	assetDir := filepath.Join(directory, "asset")
+	systemDir := filepath.Join(directory, "system")
+	seedGeo(t, assetDir, upstream.GeoIPName, "old-geoip")
+	seedGeo(t, systemDir, upstream.GeoSiteName, "old-geosite")
+	systemDirs = []string{systemDir}
+	manager.service = &fakeService{
+		environment: map[string]string{LocationAssetEnv: assetDir},
+		activeState: "active",
+		mainPID:     4321,
+	}
+
+	data, err := manager.Download(context.Background(), upstream.GeoSourceLoyalsoldier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Apply(context.Background(), data)
+	if err != nil {
+		t.Fatalf("分目录更新应成功: %v", err)
+	}
+	wants := map[string]string{
+		filepath.Join(assetDir, upstream.GeoIPName):    "new-geoip",
+		filepath.Join(systemDir, upstream.GeoSiteName): "new-geosite",
+	}
+	for path, want := range wants {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil || string(content) != want {
+			t.Fatalf("%s 未原位更新: content=%q err=%v", path, content, readErr)
+		}
+	}
+	if status.TargetDir != "" {
+		t.Fatalf("分目录更新不应伪造公共目录，实际 %q", status.TargetDir)
+	}
+	if _, err := os.Stat(filepath.Join(directory, upstream.GeoIPName)); !os.IsNotExist(err) {
+		t.Fatal("不应在配置目录生成额外的 geoip.dat")
+	}
+	if _, err := os.Stat(filepath.Join(directory, upstream.GeoSiteName)); !os.IsNotExist(err) {
+		t.Fatal("不应在配置目录生成额外的 geosite.dat")
+	}
+}
+
+func TestSeparateDirectoryUpdateRollsBothFilesBack(t *testing.T) {
+	manager, _, reloader, directory := newTestManager(t)
+	first := filepath.Join(directory, "first")
+	second := filepath.Join(directory, "second")
+	seedGeo(t, first, upstream.GeoIPName, "old-geoip")
+	seedGeo(t, second, upstream.GeoSiteName, "old-geosite")
+	systemDirs = []string{second}
+	manager.service = &fakeService{
+		environment: map[string]string{LocationAssetEnv: first},
+		activeState: "active",
+		mainPID:     4321,
+	}
+	reloader.failFirst = true
+
+	data, err := manager.Download(context.Background(), upstream.GeoSourceLoyalsoldier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Apply(context.Background(), data); err == nil {
+		t.Fatal("reload 失败时分目录事务也应失败")
+	}
+	for path, want := range map[string]string{
+		filepath.Join(first, upstream.GeoIPName):    "old-geoip",
+		filepath.Join(second, upstream.GeoSiteName): "old-geosite",
+	} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil || string(content) != want {
+			t.Fatalf("%s 未共同回滚: content=%q err=%v", path, content, readErr)
+		}
+	}
+}
+
 func TestUpdateWhileServiceStoppedWaitsForNextStart(t *testing.T) {
 	manager, _, reloader, directory := newTestManager(t)
 	manager.service = &fakeService{activeState: "failed"}
@@ -353,10 +429,10 @@ func TestCommitFailureKeepsOldDataInPlace(t *testing.T) {
 		seedGeo(t, directory, name, "old-"+name)
 	}
 
-	transaction := &geoTransaction{directory: directory}
+	transaction := &geoTransaction{}
 	defer transaction.cleanup()
 	for _, name := range Names {
-		if err := transaction.stage(name, []byte("new-"+name)); err != nil {
+		if err := transaction.stage(name, filepath.Join(directory, name), []byte("new-"+name)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -394,8 +470,8 @@ func TestFailedRollbackKeepsBackup(t *testing.T) {
 	directory := testDirectory(t)
 	seedGeo(t, directory, upstream.GeoIPName, "old-geoip")
 
-	transaction := &geoTransaction{directory: directory}
-	if err := transaction.stage(upstream.GeoIPName, []byte("new-geoip")); err != nil {
+	transaction := &geoTransaction{}
+	if err := transaction.stage(upstream.GeoIPName, filepath.Join(directory, upstream.GeoIPName), []byte("new-geoip")); err != nil {
 		t.Fatal(err)
 	}
 	final := filepath.Join(directory, upstream.GeoIPName)
@@ -418,13 +494,15 @@ func TestFailedRollbackKeepsBackup(t *testing.T) {
 	}
 }
 
+// Status 已经把"存在回滚点"报成不可更新，事务里仍要再拦一道：真走到这里说明拦截
+// 没生效，而 rename 覆盖回滚点就等于删掉仅存的那份旧数据。
 func TestCommitRefusesToOverwriteRecoveryPoint(t *testing.T) {
 	directory := testDirectory(t)
 	final := seedGeo(t, directory, upstream.GeoIPName, "current-data")
-	backup := seedGeo(t, directory, upstream.GeoIPName+".kdae-panel-previous", "last-known-good")
-	transaction := &geoTransaction{directory: directory}
+	backup := seedGeo(t, directory, upstream.GeoIPName+rollbackSuffix, "last-known-good")
+	transaction := &geoTransaction{}
 	defer transaction.cleanup()
-	if err := transaction.stage(upstream.GeoIPName, []byte("new-data")); err != nil {
+	if err := transaction.stage(upstream.GeoIPName, final, []byte("new-data")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,11 +517,12 @@ func TestCommitRefusesToOverwriteRecoveryPoint(t *testing.T) {
 	}
 }
 
-func TestUpdateRecoversInterruptedBackupBeforeWriting(t *testing.T) {
-	manager, _, reloader, directory := newTestManager(t)
-	reloader.failFirst = true
+// 回滚点意味着上一次事务没结算完，那份旧数据可能是仅存的一份。新的更新必须先被
+// 拦下、由用户决定恢复还是清理，而不是照常写下去把它盖掉。
+func TestUpdateRefusesWhileRollbackPointRemains(t *testing.T) {
+	manager, _, _, directory := newTestManager(t)
 	geoIP := seedGeo(t, directory, upstream.GeoIPName, "unverified-current")
-	seedGeo(t, directory, upstream.GeoIPName+".kdae-panel-previous", "last-known-good")
+	backup := seedGeo(t, directory, upstream.GeoIPName+rollbackSuffix, "last-known-good")
 	geoSite := seedGeo(t, directory, upstream.GeoSiteName, "old-geosite")
 	data := upstream.GeoData{Files: map[string][]byte{
 		upstream.GeoIPName:   []byte("new-geoip"),
@@ -451,46 +530,55 @@ func TestUpdateRecoversInterruptedBackupBeforeWriting(t *testing.T) {
 	}}
 
 	if _, err := manager.Apply(context.Background(), data); err == nil {
-		t.Fatal("reload 失败时更新应回滚")
+		t.Fatal("存在未处理的回滚点时应拒绝更新")
 	}
-	for path, want := range map[string]string{geoIP: "last-known-good", geoSite: "old-geosite"} {
+	for path, want := range map[string]string{
+		geoIP:   "unverified-current",
+		geoSite: "old-geosite",
+		backup:  "last-known-good",
+	} {
 		content, err := os.ReadFile(path)
 		if err != nil || string(content) != want {
-			t.Fatalf("%s 应恢复为 %q: content=%q err=%v", path, want, content, err)
+			t.Fatalf("%s 应保持 %q: content=%q err=%v", path, want, content, err)
 		}
 	}
 }
 
-// 进程若恰好死在“旧文件改名为 recovery、尚未换入新文件”之间，正式文件
-// 不存在，单靠当前有效文件选 TargetDir 会退回配置目录，从此永远扫不到低优先级
-// 目录里的 recovery。Apply 必须先沿完整搜索路径收拢恢复点，再重新选择目标。
-func TestUpdateFindsRecoveryPointWhenFinalFileIsMissing(t *testing.T) {
+// 进程若恰好死在"旧文件改名为回滚点、尚未换入新文件"之间，正式文件不存在。
+// 残留扫描必须走完整条搜索路径：只看当前有效文件会退回配置目录，从此再也扫不到
+// 低优先级目录里的那个回滚点，dae 一重启就因为读不到 geo 起不来。
+func TestResidualScanFindsRollbackPointInLowPriorityDirectory(t *testing.T) {
 	manager, _, reloader, directory := newTestManager(t)
-	reloader.failFirst = true
 	lowPriority := filepath.Join(directory, "system-share-dae")
 	systemDirs = []string{lowPriority}
-	backup := seedGeo(t, lowPriority, upstream.GeoIPName+geoRecoverySuffix, "last-known-good")
-	data := upstream.GeoData{Files: map[string][]byte{
-		upstream.GeoIPName:   []byte("new-geoip"),
-		upstream.GeoSiteName: []byte("new-geosite"),
-	}}
+	backup := seedGeo(t, lowPriority, upstream.GeoIPName+rollbackSuffix, "last-known-good")
 
-	if _, err := manager.Apply(context.Background(), data); err == nil {
-		t.Fatal("reload 失败时更新应回滚")
+	status := manager.Status(context.Background())
+	if status.Updatable {
+		t.Fatalf("低优先级目录里的回滚点同样应拦下更新: %+v", status)
+	}
+	if len(status.Residuals) != 1 || status.Residuals[0].Path != backup || !status.Residuals[0].Restorable {
+		t.Fatalf("应把它列为可恢复的回滚点: %+v", status.Residuals)
+	}
+
+	if _, err := manager.RestoreResidual(context.Background(), backup); err != nil {
+		t.Fatal(err)
 	}
 	content, err := os.ReadFile(filepath.Join(lowPriority, upstream.GeoIPName))
 	if err != nil || string(content) != "last-known-good" {
-		t.Fatalf("缺失 final 的 recovery 也应被找到并恢复: content=%q err=%v", content, err)
-	}
-	if _, err := os.Stat(backup); !os.IsNotExist(err) {
-		t.Fatalf("成功恢复后不应留下 recovery: %v", err)
+		t.Fatalf("旧数据应就地恢复: content=%q err=%v", content, err)
 	}
 	if _, err := os.Stat(filepath.Join(directory, upstream.GeoIPName)); !os.IsNotExist(err) {
-		t.Fatalf("不应绕过 recovery 改写高优先级配置目录: %v", err)
+		t.Fatalf("不应把它恢复到优先级更高的配置目录: %v", err)
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("恢复后应 reload 一次，实际 %d 次", reloader.calls)
 	}
 }
 
-func TestRecoverySearchSkipsSandboxHiddenDirectory(t *testing.T) {
+// systemd 的 ProtectHome 会故意把 dae 可能读取的 root asset 目录隐藏给面板。
+// 扫不到那里是契约的一部分，但不能因此让可见目录里的残留也一并漏掉。
+func TestResidualScanSurvivesUnreadableSandboxDirectory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root 能读任何目录，无法模拟 ProtectHome")
 	}
@@ -504,45 +592,57 @@ func TestRecoverySearchSkipsSandboxHiddenDirectory(t *testing.T) {
 	SandboxHiddenDir = filepath.Join(hiddenParent, ".local", "share", "dae")
 	t.Cleanup(func() { SandboxHiddenDir = previous })
 
-	if err := recoverGeoSearchPath([]string{SandboxHiddenDir, filepath.Join(base, "visible")}, Names); err != nil {
-		t.Fatalf("ProtectHome 预期遮挡的目录不应阻断可见目录中的更新: %v", err)
+	visible := filepath.Join(base, "visible")
+	backup := seedGeo(t, visible, upstream.GeoIPName+rollbackSuffix, "last-known-good")
+	residuals := findResiduals([]string{SandboxHiddenDir, visible})
+	if len(residuals) != 1 || residuals[0].Path != backup {
+		t.Fatalf("不可读的沙箱目录不应吞掉可见目录里的残留: %+v", residuals)
 	}
 }
 
-func TestUpdateRecoveryCanRetryAfterBlockerRemoved(t *testing.T) {
+// 恢复被异常占用的正式路径挡住时，回滚点必须原样留着并给出准确路径，
+// 让用户清掉障碍后还能重试——顺手删掉它等于把仅存的旧数据也扔了。
+func TestResidualRestoreCanRetryAfterBlockerRemoved(t *testing.T) {
 	manager, _, _, directory := newTestManager(t)
 	final := filepath.Join(directory, upstream.GeoIPName)
-	backup := seedGeo(t, directory, upstream.GeoIPName+".kdae-panel-previous", "last-known-good")
+	backup := seedGeo(t, directory, upstream.GeoIPName+rollbackSuffix, "last-known-good")
 	if err := os.MkdirAll(filepath.Join(final, "blocker"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	seedGeo(t, directory, upstream.GeoSiteName, "old-geosite")
-	data := upstream.GeoData{Files: map[string][]byte{
-		upstream.GeoIPName:   []byte("new-geoip"),
-		upstream.GeoSiteName: []byte("new-geosite"),
-	}}
 
-	if _, err := manager.Apply(context.Background(), data); err == nil {
-		t.Fatal("final 被异常目录占用时应拒绝恢复")
+	if _, err := manager.RestoreResidual(context.Background(), backup); err == nil {
+		t.Fatal("正式路径被目录占用时应拒绝恢复")
 	}
 	content, err := os.ReadFile(backup)
 	if err != nil || string(content) != "last-known-good" {
-		t.Fatalf("失败时 recovery 文件必须保持不变: content=%q err=%v", content, err)
+		t.Fatalf("失败时回滚点必须保持不变: content=%q err=%v", content, err)
 	}
+
 	if err := os.RemoveAll(final); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Apply(context.Background(), data); err != nil {
-		t.Fatalf("解除阻塞后下一次更新应成功: %v", err)
+	if _, err := manager.RestoreResidual(context.Background(), backup); err != nil {
+		t.Fatalf("解除阻塞后应能恢复: %v", err)
+	}
+	if content, err := os.ReadFile(final); err != nil || string(content) != "last-known-good" {
+		t.Fatalf("旧数据应回到正式位置: content=%q err=%v", content, err)
 	}
 	if _, err := os.Stat(backup); !os.IsNotExist(err) {
-		t.Fatalf("成功结算后不应留下 recovery 文件: %v", err)
+		t.Fatalf("恢复成功后不应留下回滚点: %v", err)
 	}
 }
 
 func TestUpdateRemovesBackupAfterSuccess(t *testing.T) {
 	manager, _, _, directory := newTestManager(t)
 	seedGeo(t, directory, upstream.GeoIPName, "old-geoip")
+	staleTemp := filepath.Join(directory, geoTempPrefix+"abandoned")
+	if err := os.WriteFile(staleTemp, []byte("never-active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * geoTempStaleAfter)
+	if err := os.Chtimes(staleTemp, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := manager.Download(context.Background(), upstream.GeoSourceLoyalsoldier)
 	if err != nil {
@@ -551,7 +651,7 @@ func TestUpdateRemovesBackupAfterSuccess(t *testing.T) {
 	if _, err := manager.Apply(context.Background(), data); err != nil {
 		t.Fatal(err)
 	}
-	leftovers, globErr := filepath.Glob(filepath.Join(directory, "*"+geoRecoverySuffix))
+	leftovers, globErr := filepath.Glob(filepath.Join(directory, "*"+rollbackSuffix))
 	if globErr != nil || len(leftovers) != 0 {
 		t.Fatalf("成功后不应留下回滚点: paths=%v err=%v", leftovers, globErr)
 	}
@@ -559,6 +659,75 @@ func TestUpdateRemovesBackupAfterSuccess(t *testing.T) {
 	staged, _ := filepath.Glob(filepath.Join(directory, ".kdae-panel-*"))
 	if len(staged) != 0 {
 		t.Fatalf("不应留下暂存文件: %v", staged)
+	}
+}
+
+func TestResidualCleanupPreservesOnlyRecoverableBackup(t *testing.T) {
+	manager, _, reloader, directory := newTestManager(t)
+	geoIP := seedGeo(t, directory, upstream.GeoIPName, "current-geoip")
+	geoIPBackup := geoIP + rollbackSuffix
+	if err := os.WriteFile(geoIPBackup, []byte("old-geoip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	geoSiteBackup := filepath.Join(directory, upstream.GeoSiteName) + rollbackSuffix
+	if err := os.WriteFile(geoSiteBackup, []byte("old-geosite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	temporary := filepath.Join(directory, geoTempPrefix+"abandoned")
+	if err := os.WriteFile(temporary, []byte("new-but-unused"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * geoTempStaleAfter)
+	if err := os.Chtimes(temporary, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	status := manager.Status(context.Background())
+	if status.Updatable || len(status.Residuals) != 3 {
+		t.Fatalf("回滚点应阻止继续更新并列出全部残留: %+v", status)
+	}
+	status, err := manager.CleanupResiduals(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(geoIPBackup); !os.IsNotExist(err) {
+		t.Fatal("正式文件存在时，用户确认清理后应删除旧回滚点")
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatal("Geo 专属暂存文件应被清理")
+	}
+	if _, err := os.Stat(geoSiteBackup); err != nil {
+		t.Fatalf("正式文件缺失时必须保留唯一旧数据: %v", err)
+	}
+	if len(status.Residuals) != 1 || !status.Residuals[0].Restorable {
+		t.Fatalf("清理后应只剩可恢复的回滚点: %+v", status.Residuals)
+	}
+
+	status, err = manager.RestoreResidual(context.Background(), geoSiteBackup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(directory, upstream.GeoSiteName))
+	if err != nil || string(content) != "old-geosite" {
+		t.Fatalf("旧 geosite 应恢复到正式位置: content=%q err=%v", content, err)
+	}
+	if len(status.Residuals) != 0 || !status.Updatable {
+		t.Fatalf("全部处理后应恢复可更新状态: %+v", status)
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("运行中的 dae 应在恢复后 reload，实际 %d 次", reloader.calls)
+	}
+}
+
+func TestFreshGeoTemporaryFileIsNotTreatedAsResidual(t *testing.T) {
+	manager, _, _, directory := newTestManager(t)
+	path := filepath.Join(directory, geoTempPrefix+"still-in-use")
+	if err := os.WriteFile(path, []byte("staging"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.Status(context.Background())
+	if len(status.Residuals) != 0 {
+		t.Fatalf("一小时内的暂存文件可能属于另一个面板进程，不应列为可清理残留: %+v", status.Residuals)
 	}
 }
 
@@ -734,71 +903,58 @@ func TestStatusReportsShadowedCopies(t *testing.T) {
 // 就地更新实际生效的那一份，而不是无脑写死某个目录：dae-installer 把 geo 装在
 // /usr/local/share/dae，改往配置目录写会生成一份优先级更高的副本，从此用户跑
 // 上游更新脚本毫无效果且没有任何提示。
-func TestTargetDirFollowsEffectiveFile(t *testing.T) {
+func TestTargetPathsFollowEachEffectiveFile(t *testing.T) {
 	directory := testDirectory(t)
-	system := filepath.Join(directory, "usr-local-share-dae")
-	seedGeo(t, system, upstream.GeoIPName, "installed-by-dae-installer")
+	first := filepath.Join(directory, "first")
+	second := filepath.Join(directory, "second")
+	seedGeo(t, first, upstream.GeoIPName, "installed-by-dae-installer")
+	seedGeo(t, second, upstream.GeoSiteName, "installed-by-another-tool")
 
-	search := []string{filepath.Join(directory, "etc-dae"), system}
-	files := locate(search, Names)
-	target := targetDir(search, files, filepath.Join(directory, "etc-dae"))
-	if target != system {
-		t.Fatalf("应就地更新 %s，实际选了 %s", system, target)
+	files := locate([]string{first, second}, Names)
+	assignTargets(files, filepath.Join(directory, "etc-dae"))
+	if files[0].TargetPath != filepath.Join(first, upstream.GeoIPName) ||
+		files[1].TargetPath != filepath.Join(second, upstream.GeoSiteName) {
+		t.Fatalf("两个文件应各自在生效位置更新: %+v", files)
+	}
+	if commonTargetDir(files) != "" {
+		t.Fatalf("分目录时不应报告公共目标目录: %+v", files)
 	}
 }
 
-func TestTargetDirFallsBackToConfigDir(t *testing.T) {
+func TestMissingTargetsFallBackToConfigDir(t *testing.T) {
 	directory := testDirectory(t)
 	configDir := filepath.Join(directory, "etc-dae")
-	search := []string{configDir, filepath.Join(directory, "system")}
-	files := locate(search, Names)
-	if target := targetDir(search, files, configDir); target != configDir {
-		t.Fatalf("都不存在时应退回配置目录，实际 %s", target)
+	files := locate([]string{configDir, filepath.Join(directory, "system")}, Names)
+	assignTargets(files, configDir)
+	for _, file := range files {
+		if file.TargetPath != filepath.Join(configDir, file.Name) {
+			t.Fatalf("缺失文件应退回配置目录: %+v", file)
+		}
 	}
 }
 
-func TestTargetDirUsesHighestPriorityEffectiveDirectory(t *testing.T) {
-	directory := testDirectory(t)
-	high := filepath.Join(directory, "high")
-	low := filepath.Join(directory, "low")
-	seedGeo(t, low, upstream.GeoIPName, "low-geoip")
-	seedGeo(t, high, upstream.GeoSiteName, "high-geosite")
-	search := []string{high, low}
-
-	files := locate(search, Names)
-	if target := targetDir(search, files, filepath.Join(directory, "fallback")); target != high {
-		t.Fatalf("分居两处时应选最高优先级目录 %s，实际 %s", high, target)
-	}
-}
-
-func TestTargetDirDoesNotDependOnFileNameOrder(t *testing.T) {
+// 就地更新时"写下去的那份就是生效的那份"通常自动成立，但搜索路径上冒出一份优先级
+// 更高的副本就不成立了——此时接口报成功而 dae 读的是别的数据，只能整个回滚。
+func TestVerifyEffectiveFilesRequiresEachFileAtItsTarget(t *testing.T) {
 	directory := testDirectory(t)
 	high := filepath.Join(directory, "high")
 	low := filepath.Join(directory, "low")
 	seedGeo(t, high, upstream.GeoIPName, "high-geoip")
 	seedGeo(t, low, upstream.GeoSiteName, "low-geosite")
 	search := []string{high, low}
-
-	files := locate(search, []string{upstream.GeoSiteName, upstream.GeoIPName})
-	if target := targetDir(search, files, filepath.Join(directory, "fallback")); target != high {
-		t.Fatalf("颠倒文件名顺序后仍应选 %s，实际 %s", high, target)
+	targets := map[string]string{
+		upstream.GeoIPName:   filepath.Join(high, upstream.GeoIPName),
+		upstream.GeoSiteName: filepath.Join(low, upstream.GeoSiteName),
 	}
-}
 
-func TestVerifyEffectiveFilesRequiresBothFilesInTarget(t *testing.T) {
-	directory := testDirectory(t)
-	high := filepath.Join(directory, "high")
-	low := filepath.Join(directory, "low")
-	seedGeo(t, high, upstream.GeoIPName, "high-geoip")
-	seedGeo(t, low, upstream.GeoSiteName, "low-geosite")
-	search := []string{high, low}
-
-	if err := verifyEffectiveFiles(search, high); err == nil || !strings.Contains(err.Error(), upstream.GeoSiteName) {
-		t.Fatalf("geosite 仍从低优先级目录生效时应拒绝结算，实际 %v", err)
+	if err := verifyEffectiveFiles(search, targets); err != nil {
+		t.Fatalf("两个文件都从各自的目标位置生效时应通过: %v", err)
 	}
-	seedGeo(t, high, upstream.GeoSiteName, "high-geosite")
-	if err := verifyEffectiveFiles(search, high); err != nil {
-		t.Fatalf("两个文件都从目标目录生效时应通过: %v", err)
+	// 优先级更高的目录里冒出一份 geosite，dae 从此读它而不是刚写的那份。
+	seedGeo(t, high, upstream.GeoSiteName, "shadowing-geosite")
+	if err := verifyEffectiveFiles(search, targets); err == nil ||
+		!strings.Contains(err.Error(), upstream.GeoSiteName) {
+		t.Fatalf("被更高优先级副本遮蔽时应拒绝结算，实际 %v", err)
 	}
 }
 

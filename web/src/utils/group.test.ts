@@ -16,6 +16,9 @@ describe('分组资源过滤', () => {
     expect(parseGroupFilter('!subtag(sub_a, sub-b)')).toMatchObject({
       kind: 'subscriptions', values: ['sub_a', 'sub-b'], exclude: true,
     })
+    expect(parseGroupFilter("subtag(main) && name('香港 01', sg_02)")).toMatchObject({
+      kind: 'subscriptionNodes', source: 'main', values: ['香港 01', 'sg_02'], exclude: false,
+    })
   })
 
   it('关键词、正则和复杂表达式不会被误判为资源多选', () => {
@@ -34,6 +37,11 @@ describe('分组资源过滤', () => {
       values: ['sub_a', 'sub-b'],
       exclude: true,
     })).toBe('!subtag(sub_a, sub-b)')
+    expect(serializeGroupFilter({
+      ...createGroupFilter('subscriptionNodes'),
+      source: 'main',
+      values: ['香港 01', '香港 01', 'sg_02'],
+    })).toBe("subtag(main) && name('香港 01', sg_02)")
   })
 
   it('空选择和无法由 dae 字符串表示的名称会被拒绝', () => {
@@ -42,11 +50,15 @@ describe('分组资源过滤', () => {
       ...createGroupFilter('nodes'),
       values: [`a'b"c`],
     })).toBeNull()
+    expect(serializeGroupFilter({
+      ...createGroupFilter('subscriptionNodes'), values: ['香港 01'],
+    })).toBeNull()
   })
 
   it('卡片摘要对资源过滤使用可读标签', () => {
     expect(describeGroupFilter('name(node1, node2)')).toBe('节点：node1、node2')
     expect(describeGroupFilter('subtag(sub_a)')).toBe('订阅：sub_a')
+    expect(describeGroupFilter("subtag(main) && name('香港 01')")).toBe('订阅 main：香港 01')
   })
 
   it('把导入节点并入已有节点过滤，同时保留其他分组与条件', () => {
@@ -87,6 +99,11 @@ describe('分组资源过滤', () => {
     expect(knownFixedCandidateCount([{
       ...createGroupFilter('nodes'), values: ['a', 'b', 'a'],
     }], 9, false)).toBe(2)
+    expect(knownFixedCandidateCount([{
+      ...createGroupFilter('nodes'), values: ['a'],
+    }, {
+      ...createGroupFilter('subscriptionNodes'), source: 'main', values: ['a', 'b'],
+    }], 9, true)).toBe(3)
     expect(knownFixedCandidateCount([createGroupFilter('subscriptions')], 2, false)).toBeNull()
     expect(knownFixedCandidateCount([{
       ...createGroupFilter('nodes'), values: ['a'], exclude: true,

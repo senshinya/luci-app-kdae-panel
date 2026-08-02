@@ -14,9 +14,6 @@ import (
 	"github.com/tuoro/kdae-panel/internal/upstream"
 )
 
-// geoRecoverySuffix 是被顶掉的旧文件改名后的后缀，也是崩溃后唯一的恢复线索。
-const geoRecoverySuffix = ".kdae-panel-previous"
-
 // Download 取回并校验指定来源最新的 geo 数据。
 // 这一步耗时最长且不触碰任何共享状态，因此调用方可以不持有控制锁先做完。
 func (m *Manager) Download(ctx context.Context, source upstream.GeoSource) (upstream.GeoData, error) {
@@ -46,7 +43,9 @@ func (m *Manager) Download(ctx context.Context, source upstream.GeoSource) (upst
 func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, error) {
 	service := m.inspectService(ctx)
 	status := m.status(service)
-	if service.inspectErr != nil {
+	// 状态查询失败与"存在待处理的回滚点"都在这里被拦下：前者说明目标目录只能靠猜，
+	// 后者说明磁盘上还留着仅存的一份旧数据，覆盖它等于把它删掉。
+	if !status.Updatable {
 		return Status{}, errors.New(status.Problem)
 	}
 	if len(data.Files) == 0 {
@@ -55,28 +54,30 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 	if err := validateGeoFiles(data.Files); err != nil {
 		return Status{}, err
 	}
-	if err := recoverGeoSearchPath(status.SearchPath, Names); err != nil {
-		return Status{}, err
+
+	if err := cleanupTemporaryResiduals(status.Residuals); err != nil {
+		return Status{}, fmt.Errorf("清理上次异常退出遗留的 Geo 暂存文件: %w", err)
 	}
-	// recovery 可能让此前缺失的正式文件重新出现，目标目录必须基于恢复后的
-	// 有效文件重算；沿用恢复前的 fallback 会把 recovery 永久遗落在低优先级目录。
-	status = m.status(service)
-	if !status.Updatable {
-		return Status{}, errors.New(status.Problem)
+	targets := make(map[string]string, len(status.Files))
+	for _, file := range status.Files {
+		targets[file.Name] = file.TargetPath
 	}
-	transaction := &geoTransaction{directory: status.TargetDir}
+	transaction := &geoTransaction{}
 	defer transaction.cleanup()
 
 	for _, name := range Names {
-		content := data.Files[name]
-		if err := transaction.stage(name, content); err != nil {
+		target := targets[name]
+		if target == "" {
+			return Status{}, fmt.Errorf("无法确定 %s 的写入位置", name)
+		}
+		if err := transaction.stage(name, target, data.Files[name]); err != nil {
 			return Status{}, err
 		}
 	}
 	if err := transaction.commit(); err != nil {
 		return Status{}, err
 	}
-	if err := verifyEffectiveFiles(status.SearchPath, status.TargetDir); err != nil {
+	if err := verifyEffectiveFiles(status.SearchPath, targets); err != nil {
 		return Status{}, transaction.abort(fmt.Errorf("提交后的 geo 文件未按预期生效: %w", err))
 	}
 
@@ -99,41 +100,21 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 		m.logger.Warn("记录 geo 更新状态失败", "error", stateErr)
 	}
 	m.logger.Info("已更新 geo 数据",
-		"source", state.Source, "tag", state.Tag, "directory", status.TargetDir,
+		"source", state.Source, "tag", state.Tag, "targets", targets,
 		"reloaded", reloaded)
 
 	updated := m.Status(ctx)
 	if cleanupErr != nil {
 		m.logger.Warn("geo 数据已生效，但旧回滚点未能删除", "error", cleanupErr)
 		updated.Warnings = append(updated.Warnings, fmt.Sprintf(
-			"geo 数据已更新并生效，但旧回滚点未能删除，磁盘上暂时多一份旧副本；下次更新会先把它放回再覆盖为新数据（%v）", cleanupErr))
+			"geo 数据已更新并生效，但旧回滚点未能删除，磁盘上暂时多一份旧副本；"+
+				"它会挡住下一次更新，请在 Geo 页面确认当前文件正常后清理残留（%v）", cleanupErr))
 	}
 	if stateErr != nil {
 		updated.Warnings = append(updated.Warnings,
 			fmt.Sprintf("geo 数据已更新并生效，但更新记录写入失败（%v）", stateErr))
 	}
 	return updated, nil
-}
-
-func recoverGeoSearchPath(searchPath, names []string) error {
-	visited := make([]string, 0, len(searchPath))
-	for _, directory := range searchPath {
-		directory = filepath.Clean(directory)
-		if slices.Contains(visited, directory) {
-			continue
-		}
-		visited = append(visited, directory)
-		// systemd 的 ProtectHome 会故意把 dae 可能读取的 root asset 目录
-		// 隐藏给面板。这里无法创建过面板 recovery，跳过是契约的一部分；
-		// 其他目录的权限错误仍必须上报，不能把真实故障一概吞掉。
-		if directory == filepath.Clean(SandboxHiddenDir) && SandboxHidesHome() {
-			continue
-		}
-		if err := recoverGeoBackups(directory, names); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // rollbackAppliedGeo 处理“新文件已经被 dae 读取，但事务不能结算”的共同分支。
@@ -173,57 +154,18 @@ func validateGeoFiles(files map[string][]byte) error {
 	return nil
 }
 
-// recoverGeoBackups 在新事务开始前放回上一次被中断留下的回滚点。
+// verifyEffectiveFiles 确认刚写下去的那两份就是 dae 会读到的那两份。
 //
-// 只有一种状态需要恢复：进程死在"旧文件已改名、新文件还没换入"之间，此时正式
-// 文件根本不存在，dae 一重启就会因为读不到 geo 而起不来。reload 之后残留的回滚点
-// 长得一模一样，也会被这里放回去——那只是让 dae 短暂退回上一版规则集，而紧接着
-// 的这次更新马上就会覆盖它。为了区分这两者去维护一套持久化的提交标记，代价远大
-// 于它买到的东西：geo 随时可以从上游重新下载并自校验。
-//
-// 先把全部路径检查完再动手，避免一个异常目录让恢复做到一半才停；真正替换时若仍
-// 遇到 I/O 故障，下一次调用会重新扫描剩余 recovery 文件并继续。
-func recoverGeoBackups(directory string, names []string) error {
-	type recovery struct{ name, final, backup string }
-	actions := make([]recovery, 0, len(names))
-	for _, name := range names {
-		final := filepath.Join(directory, name)
-		backup := final + geoRecoverySuffix
-		backupInfo, err := os.Lstat(backup)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return fmt.Errorf("检查 %s recovery 文件: %w", name, err)
-			}
-			continue
-		}
-		if !backupInfo.Mode().IsRegular() {
-			return fmt.Errorf("%s recovery 路径 %s 不是普通文件，拒绝覆盖", name, backup)
-		}
-		finalInfo, err := os.Lstat(final)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("检查 %s 当前文件: %w", name, err)
-		}
-		if err == nil && !finalInfo.Mode().IsRegular() {
-			return fmt.Errorf("%s 当前路径 %s 不是普通文件；修正后可重新更新，recovery 文件保留在 %s",
-				name, final, backup)
-		}
-		actions = append(actions, recovery{name: name, final: final, backup: backup})
-	}
-	for _, action := range actions {
-		if err := atomicfile.Replace(action.backup, action.final); err != nil {
-			return fmt.Errorf("恢复上次中断留下的 %s: %w", action.name, err)
-		}
-	}
-	return nil
-}
-
-func verifyEffectiveFiles(searchPath []string, target string) error {
+// 每个文件都就地更新，正常情况下这必然成立；不成立说明搜索路径上冒出了一份优先级
+// 更高的副本，此时接口报成功而 dae 读的是别的数据，只能整个回滚。
+func verifyEffectiveFiles(searchPath []string, targets map[string]string) error {
 	for _, file := range locate(searchPath, Names) {
 		if !file.Present {
 			return fmt.Errorf("%s 不存在", file.Name)
 		}
-		if filepath.Clean(filepath.Dir(file.Path)) != filepath.Clean(target) {
-			return fmt.Errorf("%s 实际从 %s 生效，而不是目标目录 %s", file.Name, file.Path, target)
+		if filepath.Clean(file.Path) != filepath.Clean(targets[file.Name]) {
+			return fmt.Errorf("%s 实际从 %s 生效，而不是目标位置 %s",
+				file.Name, file.Path, targets[file.Name])
 		}
 	}
 	return nil
@@ -262,13 +204,13 @@ func repositoriesOf(release upstream.GeoRelease) []string {
 // 分开换是不行的：geoip 和 geosite 来自同一次发布，只换掉其中一个会让 dae
 // 拿着两个不同版本的规则集跑，而这种不一致既不会报错也无从察觉。
 type geoTransaction struct {
-	directory string
-	staged    []stagedFile
-	cleanups  []func()
+	staged   []stagedFile
+	cleanups []func()
 }
 
 type stagedFile struct {
-	name string
+	name  string
+	final string
 	// temp 是待启用的新文件；backup 是被顶掉的旧文件改名后的位置，旧文件不存在时为空。
 	temp   string
 	backup string
@@ -276,13 +218,13 @@ type stagedFile struct {
 	replaced bool
 }
 
-func (t *geoTransaction) stage(name string, content []byte) error {
-	path, cleanup, err := atomicfile.Stage(t.directory, content, geoMode)
+func (t *geoTransaction) stage(name, final string, content []byte) error {
+	path, cleanup, err := atomicfile.StagePattern(filepath.Dir(final), geoTempPattern, content, geoMode)
 	if err != nil {
 		return fmt.Errorf("暂存 %s: %w", name, err)
 	}
 	t.cleanups = append(t.cleanups, cleanup)
-	t.staged = append(t.staged, stagedFile{name: name, temp: path})
+	t.staged = append(t.staged, stagedFile{name: name, final: final, temp: path})
 	return nil
 }
 
@@ -290,10 +232,10 @@ func (t *geoTransaction) stage(name string, content []byte) error {
 func (t *geoTransaction) commit() error {
 	for index := range t.staged {
 		file := &t.staged[index]
-		final := filepath.Join(t.directory, file.name)
-		backup := final + geoRecoverySuffix
-		// 上一次留下的回滚点是仅存的一份旧数据。Apply 开头已经沿搜索路径恢复过
-		// 一轮，这里再拦一道：真撞上就说明恢复没生效，覆盖它等于把旧数据删掉。
+		final := file.final
+		backup := final + rollbackSuffix
+		// 上一次留下的回滚点是仅存的一份旧数据。Status 已经把"存在回滚点"报成不可
+		// 更新，这里再拦一道：真撞上就说明拦截没生效，覆盖它等于把旧数据删掉。
 		if _, err := os.Lstat(backup); err == nil {
 			return t.abort(fmt.Errorf("%s 的回滚点 %s 已存在，拒绝覆盖", file.name, backup))
 		} else if !os.IsNotExist(err) {
@@ -327,8 +269,7 @@ func (t *geoTransaction) commit() error {
 // 这是必须让用户看见的信息，不能像原先那样吞掉。
 func (t *geoTransaction) abort(cause error) error {
 	if err := t.rollback(); err != nil {
-		return fmt.Errorf("%w；且旧数据未能还原（回滚点保留在 %s 下的 *%s）：%v",
-			cause, t.directory, geoRecoverySuffix, err)
+		return fmt.Errorf("%w；且旧数据未能还原（*%s 回滚点已保留）：%v", cause, rollbackSuffix, err)
 	}
 	return cause
 }
@@ -342,7 +283,7 @@ func (t *geoTransaction) rollback() error {
 	var failures []error
 	for index := range t.staged {
 		file := &t.staged[index]
-		final := filepath.Join(t.directory, file.name)
+		final := file.final
 
 		if file.backup == "" {
 			// 本来就没有这个文件，退回原样就是删掉新写的那份。

@@ -51,6 +51,7 @@ async function mockInstalledGeoForScreenshot(route: import('@playwright/test').R
     ...file,
     present: true,
     path: `/etc/dae/${file.name}`,
+    targetPath: `/etc/dae/${file.name}`,
     size: file.name === 'geoip.dat' ? 24_371_200 : 47_923_712,
     modTime: '2026-08-01T08:00:00Z',
     shadowed: [],
@@ -112,7 +113,7 @@ async function expectColumnsAligned(locator: import('@playwright/test').Locator)
 // 这是唯一同时压到路由守卫、CSRF、配置事务与 dae 校验桩的测试，
 // 步骤之间共享账号与磁盘状态，因此收在一个用例里按序执行。
 test('首次初始化到编排保存的完整链路', async ({ page }) => {
-  test.setTimeout(UPDATE_SCREENSHOTS ? 120_000 : 90_000)
+  test.setTimeout(UPDATE_SCREENSHOTS ? 150_000 : 120_000)
   await test.step('通过一次性链接初始化管理员', async () => {
     await page.goto('/setup#bootstrap=e2e-bootstrap')
     await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg')
@@ -200,6 +201,50 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(cleanupRow).toHaveCount(0)
     await expect(cleanupManager.getByText('尚未添加自定义来源')).toBeVisible()
     await cleanupManager.locator('.n-base-close').click()
+
+    const residualRoute = async (route: import('@playwright/test').Route) => {
+      if (route.request().method() !== 'GET') return route.continue()
+      const response = await route.fetch()
+      const body = await response.json()
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          status: {
+            ...body.status,
+            updatable: false,
+            problem: '发现上次 Geo 更新遗留的回滚点',
+            residuals: [
+              {
+                path: '/etc/dae/geosite.dat.kdae-panel-previous',
+                kind: 'rollback',
+                size: 47_923_712,
+                modTime: '2026-08-01T07:00:00Z',
+                targetPath: '/etc/dae/geosite.dat',
+                restorable: true,
+                deletable: false,
+              },
+              {
+                path: '/etc/dae/.kdae-panel-geo-abandoned-transaction-file-with-a-long-name',
+                kind: 'temporary',
+                size: 24_371_200,
+                modTime: '2026-08-01T06:00:00Z',
+                restorable: false,
+                deletable: true,
+              },
+            ],
+          },
+        },
+      })
+    }
+    await page.route('**/api/v1/dae/geo', residualRoute)
+    await page.reload()
+    await expect(page.getByRole('button', { name: '恢复缺失文件' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '清理安全残留' })).toBeVisible()
+    await page.setViewportSize({ width: 390, height: 844 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await page.unroute('**/api/v1/dae/geo', residualRoute)
+    await page.setViewportSize({ width: 1600, height: 900 })
   })
 
   await test.step('导入节点并保存重载，改动落到磁盘', async () => {
@@ -337,7 +382,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(subscriptionRow).toBeVisible()
     await subscriptionRow.getByRole('button', { name: '编辑' }).click()
     const subscriptionModal = page.locator('.n-modal', { hasText: '编辑订阅' })
-    await subscriptionModal.getByPlaceholder('https://example.com/subscription').fill('https://example.com/e2e-updated')
+    await subscriptionModal.getByPlaceholder('https://example.com/subscription').fill('https-file://example.com/e2e-updated')
     await subscriptionModal.getByRole('button', { name: '确定' }).click()
     await expect(subscriptionRow).toContainText('e2e-updated')
 
@@ -347,11 +392,17 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await groupModal.getByRole('button', { name: '选择节点' }).click()
     await groupModal.getByTestId('group-node-picker').locator('.n-base-selection').click()
     await clickVisibleOption(page, 'E2E-01')
-    await groupModal.getByRole('button', { name: '选择订阅' }).click()
+    await groupModal.getByRole('button', { name: '订阅节点' }).click()
+    await groupModal.getByTestId('group-subscription-node-source').locator('.n-base-selection').click()
+    await clickVisibleOption(page, 'e2e_sub')
+    await groupModal.getByTestId('group-subscription-node-picker').locator('.n-base-selection').click()
+    await clickVisibleOption(page, 'SUB-HK')
+    await groupModal.getByRole('button', { name: '整份订阅' }).click()
     await groupModal.getByTestId('group-subscription-picker').locator('.n-base-selection').click()
     await clickVisibleOption(page, 'e2e_sub')
     await groupModal.getByRole('button', { name: '应用到编排' }).click()
     await expect(groupItem).toContainText('节点：E2E-01')
+    await expect(groupItem).toContainText('订阅 e2e_sub：SUB-HK')
     await expect(groupItem).toContainText('订阅：e2e_sub')
 
     const routing = page.getByTestId('routing-card')
@@ -392,9 +443,10 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     const saved = readFileSync(configPath, 'utf8')
     expect(saved).toContain(NODE_LINK)
     expect(saved).toContain(`E2E-01: '${NODE_LINK}'`)
-    expect(saved).toContain("e2e_sub: 'https://example.com/e2e-updated'")
+    expect(saved).toContain("e2e_sub: 'https-file://example.com/e2e-updated'")
     expect(saved).toContain('filter: name(E2E-01)')
     expect(saved).toContain('filter: subtag(e2e_sub)')
+    expect(saved).toContain('filter: subtag(e2e_sub) && name(SUB-HK)')
     expect(saved).toContain('domain(geosite:gfw) -> proxy')
     expect(saved).toContain('log_level: debug')
     expect(saved).toContain("lan_interface: 'ens2'")
@@ -482,6 +534,45 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.locator('tr', { hasText: 'E2E 批量配置' })).toBeVisible()
     await capture(page, 'backups.png', 1600, 900)
 
+    await page.setViewportSize({ width: 390, height: 844 })
+    const mobileBackupList = page.getByTestId('mobile-backup-list')
+    const mobileSelection = page.getByTestId('mobile-backup-selection')
+    await expect(mobileBackupList).toBeVisible()
+    await expect(mobileSelection).toBeVisible()
+
+    const toolbarButtons = page.locator('.backup-toolbar-actions .n-button')
+    await expect(toolbarButtons).toHaveCount(3)
+    const toolbarTops = await toolbarButtons.evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top))
+    expect(Math.max(...toolbarTops) - Math.min(...toolbarTops)).toBeLessThanOrEqual(1)
+
+    const selectAll = mobileSelection.getByRole('checkbox', { name: '全选', exact: true })
+    await selectAll.check()
+    const mobileBackupCheckboxes = mobileBackupList.getByRole('checkbox')
+    const mobileBackupCount = await mobileBackupCheckboxes.count()
+    expect(mobileBackupCount).toBeGreaterThan(0)
+    for (let index = 0; index < mobileBackupCount; index += 1) {
+      await expect(mobileBackupCheckboxes.nth(index)).toBeChecked()
+    }
+    await expect(mobileSelection).toHaveText(/已选 (\d+) \/ 共 \1 项/)
+    await selectAll.uncheck()
+
+    const firstMobileActions = mobileBackupList.locator('.backup-mobile-actions').first()
+    const actionButtons = firstMobileActions.locator('.n-button')
+    await expect(actionButtons).toHaveCount(5)
+    const actionTops = await actionButtons.evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top))
+    expect(Math.max(...actionTops) - Math.min(...actionTops)).toBeLessThanOrEqual(1)
+    await expect(firstMobileActions.getByRole('button', { name: /编辑/ })).toBeVisible()
+    await expect(firstMobileActions.getByRole('button', { name: /删除/ })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+
+    await page.setViewportSize({ width: 320, height: 720 })
+    const narrowActionTops = await actionButtons.evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top))
+    expect(Math.max(...narrowActionTops) - Math.min(...narrowActionTops)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+
+    await page.setViewportSize({ width: 1600, height: 900 })
+    await expect(page.locator('tr', { hasText: 'E2E 已命名配置' })).toBeVisible()
+
     await renamedRow.getByRole('button', { name: '恢复' }).click()
     const diffModal = page.locator('.n-modal', { hasText: '配置差异 · E2E 已命名配置' })
     await expect(diffModal.getByText('这份存档与当前配置内容相同，无需恢复。')).toBeVisible()
@@ -491,7 +582,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     // 先让当前配置与存档产生差异，再验证“预览 -> 恢复”的完整事务入口。
     await page.goto('/config')
     const configEditor = page.locator('.config-editor textarea')
-    await configEditor.fill((await configEditor.inputValue()).replace('log_level: debug', 'log_level: info'))
+    await configEditor.fill(`${(await configEditor.inputValue()).trimEnd()}\n\n# E2E 恢复差异\n`)
     await page.locator('.page-toolbar').getByRole('button', { name: '保存并重载' }).click()
     await page.locator('.n-dialog').getByRole('button', { name: '保存并重载' }).click()
     await expect(page.locator('.n-message').getByText('配置已保存并完成无损重载')).toBeVisible()
@@ -915,6 +1006,16 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.goto('/diagnostics')
     await expect(page.getByRole('heading', { name: '故障诊断', level: 2 })).toBeVisible()
     await expect(page.locator('.diagnostic-item')).toHaveCount(6)
+    const diagnosticsPageBox = await page.locator('.diagnostics-page').boundingBox()
+    const finalDiagnosticBox = await page.locator('.diagnostic-item').last().boundingBox()
+    const fullLogsButton = page.getByRole('button', { name: '查看完整运行日志' })
+    const fullLogsButtonBox = await fullLogsButton.boundingBox()
+    expect(diagnosticsPageBox).not.toBeNull()
+    expect(finalDiagnosticBox).not.toBeNull()
+    expect(fullLogsButtonBox).not.toBeNull()
+    expect(Math.abs(fullLogsButtonBox!.x - diagnosticsPageBox!.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(fullLogsButtonBox!.width - diagnosticsPageBox!.width)).toBeLessThanOrEqual(1)
+    expect(fullLogsButtonBox!.y - finalDiagnosticBox!.y - finalDiagnosticBox!.height).toBeGreaterThanOrEqual(8)
     overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
     await page.unroute('**/api/v1/diagnostics/report')

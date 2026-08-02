@@ -62,6 +62,13 @@ func Write(path string, content []byte, mode os.FileMode) error {
 // 临时名由 os.CreateTemp 生成而非固定后缀：固定名字会让两个并发写者
 // 踩同一个文件，后者的内容可能被前者的清理删掉。
 func Stage(directory string, content []byte, mode os.FileMode) (string, func(), error) {
+	return StagePattern(directory, ".kdae-panel-*", content, mode)
+}
+
+// StagePattern 与 Stage 相同，但允许调用方使用专属的临时文件前缀。
+// 只有能明确归属的异常残留才可以安全清理，不能把配置、Geo 和二进制暂存文件
+// 全都混在同一个通配符下。
+func StagePattern(directory, pattern string, content []byte, mode os.FileMode) (string, func(), error) {
 	noop := func() {}
 	if mode.Perm() == 0 {
 		mode = 0o600
@@ -69,7 +76,7 @@ func Stage(directory string, content []byte, mode os.FileMode) (string, func(), 
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", noop, fmt.Errorf("创建目录 %s: %w", directory, err)
 	}
-	file, err := os.CreateTemp(directory, ".kdae-panel-*")
+	file, err := os.CreateTemp(directory, pattern)
 	if err != nil {
 		return "", noop, fmt.Errorf("创建暂存文件: %w", err)
 	}

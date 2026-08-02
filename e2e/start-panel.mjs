@@ -27,6 +27,12 @@ for (const name of ['kdae-panel', 'systemctl', 'dae', 'journalctl']) {
 const work = join(here, '.work')
 rmSync(work, { recursive: true, force: true })
 mkdirSync(join(work, 'backups'), { recursive: true })
+mkdirSync(join(work, 'persist.d'), { recursive: true })
+writeFileSync(
+  join(work, 'persist.d', 'e2e_sub.sub'),
+  Buffer.from('vless://00000000-0000-4000-8000-000000000002@sub.example.com:443#SUB-HK\n').toString('base64'),
+  { mode: 0o600 },
+)
 
 // 最小可校验配置：测试从"几乎为空"起步，导入节点走的正是真实的编排链路
 writeFileSync(join(work, 'config.dae'), `global {

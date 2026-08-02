@@ -15,11 +15,20 @@ import {
   useDialog,
   useMessage,
 } from 'naive-ui'
-import { AddOutline, CloudDownloadOutline, CreateOutline, LinkOutline, TimerOutline, TrashOutline } from '@vicons/ionicons5'
+import {
+  AddOutline,
+  CloudDownloadOutline,
+  CreateOutline,
+  LinkOutline,
+  ReturnUpBackOutline,
+  TimerOutline,
+  TrashOutline,
+} from '@vicons/ionicons5'
 import { APIError, deleteJSON, getJSON, postJSON, putJSON } from '../../api/client'
 import type {
   CustomGeoSource,
   CustomGeoSourceInput,
+  GeoResidual,
   GeoSource,
   GeoStatus,
   InstallJob,
@@ -40,6 +49,10 @@ const geoDisabled = ref(false)
 const geoError = ref('')
 const geoSource = ref<GeoSource | null>(null)
 const geoBusy = computed(() => geoJob.value?.phase === 'downloading' || geoJob.value?.phase === 'applying')
+const residualBusy = ref(false)
+const safeResidualCount = computed(() =>
+  (geoStatus.value?.residuals || []).filter((item) => item.deletable).length,
+)
 const activeGeoSource = computed(
   () => geoStatus.value?.sources.find((item) => item.source === geoSource.value) || null,
 )
@@ -47,6 +60,12 @@ const geoSourceOptions = computed(() => (geoStatus.value?.sources || []).map((it
   label: item.custom ? `${item.label}（自定义）` : item.label,
   value: item.source,
 })))
+const geoTargetSummary = computed(() => {
+  const files = geoStatus.value?.files || []
+  const directories = [...new Set(files.map((file) => file.targetPath.replace(/[\\/][^\\/]+$/, '')))]
+  if (directories.length === 1) return directories[0]
+  return files.map((file) => `${file.name} 写入 ${file.targetPath}`).join('；')
+})
 
 const geoPolling = useJobPolling({
   refresh: () => loadGeo(),
@@ -97,7 +116,7 @@ function confirmUpdateGeo() {
   dialog.warning({
     title: `更新 geo 数据（${chosen?.label || geoSource.value}）`,
     content: `面板会从 ${repositories} 下载 geoip.dat 与 geosite.dat，逐个比对 sha256，`
-      + `写入 ${geoStatus.value?.targetDir}。${activation}`
+      + `写入 ${geoTargetSummary.value}。${activation}`
       + (switching
         ? '⚠ 这次会切换到另一套规则集：geosite: 开头的路由规则所匹配的域名集合会随之改变，'
           + (serviceState === 'inactive'
@@ -129,6 +148,56 @@ async function updateGeo() {
       await loadGeo()
       if (geoBusy.value) geoPolling.start()
     }
+  }
+}
+
+function confirmCleanupResiduals() {
+  dialog.warning({
+    title: '清理 Geo 事务残留',
+    content: `将删除 ${safeResidualCount.value} 个不再承载唯一旧数据的文件。正式文件缺失时的回滚点会保留，不会被清理。`,
+    positiveText: '确认清理',
+    negativeText: '取消',
+    onPositiveClick: cleanupResiduals,
+  })
+}
+
+async function cleanupResiduals() {
+  residualBusy.value = true
+  try {
+    const payload = await postJSON<{ status: GeoStatus }>('/api/v1/dae/geo/residuals/cleanup')
+    geoStatus.value = payload.status
+    message.success('Geo 事务残留已清理')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '清理 Geo 事务残留失败')
+    await loadGeo()
+  } finally {
+    residualBusy.value = false
+  }
+}
+
+function confirmRestoreResidual(residual: GeoResidual) {
+  dialog.warning({
+    title: '恢复旧 Geo 文件',
+    content: `正式文件 ${residual.targetPath} 当前缺失。面板会把保留的旧数据恢复到原位；dae 正在运行时会随后 reload。`,
+    positiveText: '恢复旧文件',
+    negativeText: '取消',
+    onPositiveClick: () => restoreResidual(residual),
+  })
+}
+
+async function restoreResidual(residual: GeoResidual) {
+  residualBusy.value = true
+  try {
+    const payload = await postJSON<{ status: GeoStatus }>('/api/v1/dae/geo/residuals/restore', {
+      path: residual.path,
+    })
+    geoStatus.value = payload.status
+    message.success('旧 Geo 文件已恢复')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '恢复旧 Geo 文件失败')
+    await loadGeo()
+  } finally {
+    residualBusy.value = false
   }
 }
 
@@ -358,6 +427,55 @@ onMounted(async () => {
     >
       {{ warning }}
     </NAlert>
+    <NAlert
+      v-if="geoStatus?.residuals?.length"
+      :type="geoStatus.residuals.some((item) => item.kind === 'rollback') ? 'error' : 'warning'"
+      :bordered="false"
+      class="card-alert"
+    >
+      <div class="geo-residual-head">
+        <div>
+          <strong>发现未完成的 Geo 文件事务</strong>
+          <div class="geo-residual-copy">请先恢复唯一旧数据，或确认当前正式文件正常后清理残留。</div>
+        </div>
+        <NButton
+          v-if="safeResidualCount > 0"
+          size="small"
+          secondary
+          :loading="residualBusy"
+          :disabled="geoBusy"
+          @click="confirmCleanupResiduals"
+        >
+          <template #icon><NIcon><TrashOutline /></NIcon></template>
+          清理安全残留
+        </NButton>
+      </div>
+      <div class="geo-residual-list">
+        <div v-for="residual in geoStatus.residuals" :key="residual.path" class="geo-residual-row">
+          <div class="geo-residual-info">
+            <div>
+              <NTag size="small" :type="residual.kind === 'rollback' ? 'error' : 'warning'" :bordered="false">
+                {{ residual.kind === 'rollback' ? '回滚点' : '暂存文件' }}
+              </NTag>
+              <span>{{ formatBytes(residual.size) }} · {{ formatDateTime(residual.modTime) }}</span>
+            </div>
+            <div class="mono geo-path">{{ residual.path }}</div>
+          </div>
+          <NButton
+            v-if="residual.restorable"
+            size="small"
+            secondary
+            :loading="residualBusy"
+            :disabled="geoBusy"
+            @click="confirmRestoreResidual(residual)"
+          >
+            <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>
+            恢复缺失文件
+          </NButton>
+          <NText v-else-if="!residual.deletable" depth="3">需要在主机上人工检查</NText>
+        </div>
+      </div>
+    </NAlert>
 
     <dl v-if="geoStatus" class="details-list">
       <div v-for="file in geoStatus.files" :key="file.name">
@@ -369,6 +487,9 @@ onMounted(async () => {
             <div class="mono geo-path">{{ file.path }}</div>
           </template>
           <NText v-else depth="3">未安装</NText>
+          <div v-if="file.targetPath !== file.path" class="geo-target-path">
+            下次写入：<span class="mono">{{ file.targetPath }}</span>
+          </div>
         </dd>
       </div>
       <div>

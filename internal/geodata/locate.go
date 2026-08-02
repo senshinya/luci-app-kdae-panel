@@ -118,8 +118,8 @@ type serviceSnapshot struct {
 //
 // systemd 的 Environment 来自 `systemctl show` 读到的单元声明，DAE_LOCATION_ASSET
 // 可以是任意目录（dae-installer 装出来的就常指向 /usr/local/share/dae）。读不到它，
-// 那个目录压根不在搜索顺序里，targetDir 退回配置目录——优先级更低，更新静默不生效
-// 而接口报成功。
+// 那个目录压根不在搜索顺序里，locate 便找不到那两份文件，assignTargets 于是让它们
+// 退回配置目录——优先级更低，更新静默不生效而接口报成功。
 //
 // procd 上这条不成立：dae.init 与面板 config_load 同一份 UCI，
 // DAE_LOCATION_ASSET 恒等于 dirname(dae_config)，也就是搜索顺序里本来就有的那一项，
@@ -198,23 +198,37 @@ func locate(searchPath []string, names []string) []File {
 	return files
 }
 
-// targetDir 选出本次更新要写入的目录。
+// assignTargets 逐文件选出本次更新的落盘位置。
 //
 // 规则是"就地更新实际生效的那一份"，而不是无脑写死某个目录：dae-installer 把
 // geo 装在 /usr/local/share/dae，若面板改往配置目录写，会生成一份优先级更高的
 // 副本，从此用户跑上游更新脚本将毫无效果且没有任何提示。
 //
-// 两个文件都不存在时才退回配置目录——它在搜索顺序里优先级最高（仅次于
+// 某个文件不存在时才让该文件退回配置目录——它在搜索顺序里优先级最高（仅次于
 // DAE_LOCATION_ASSET），且本来就在面板的 ReadWritePaths 里，不必放宽沙箱。
-func targetDir(searchPath []string, files []File, fallback string) string {
-	for _, directory := range searchPath {
-		for _, file := range files {
-			if file.Present && filepath.Clean(filepath.Dir(file.Path)) == filepath.Clean(directory) {
-				return directory
-			}
+func assignTargets(files []File, fallback string) {
+	for index := range files {
+		if files[index].Present {
+			files[index].TargetPath = files[index].Path
+		} else {
+			files[index].TargetPath = filepath.Join(fallback, files[index].Name)
 		}
 	}
-	return fallback
+}
+
+func commonTargetDir(files []File) string {
+	var common string
+	for _, file := range files {
+		directory := filepath.Dir(file.TargetPath)
+		if common == "" {
+			common = directory
+			continue
+		}
+		if directory != common {
+			return ""
+		}
+	}
+	return common
 }
 
 // Status 汇报 geo 数据的现状与可更新性。
@@ -227,14 +241,17 @@ func (m *Manager) Status(ctx context.Context) Status {
 func (m *Manager) status(service serviceSnapshot) Status {
 	search := SearchPath(m.configPath, service.status.Environment)
 	files := locate(search, Names)
-	target := targetDir(search, files, filepath.Dir(m.configPath))
+	configDir := filepath.Dir(m.configPath)
+	assignTargets(files, configDir)
+	residuals := findResiduals(search)
 
 	status := Status{
 		Sources:       m.fetcher.Sources(),
 		DefaultSource: upstream.GeoSourceLoyalsoldier,
-		TargetDir:     target,
+		TargetDir:     commonTargetDir(files),
 		SearchPath:    search,
 		Files:         files,
+		Residuals:     residuals,
 		ServiceState:  service.state,
 	}
 	if service.problem != "" {
@@ -259,12 +276,29 @@ func (m *Manager) status(service serviceSnapshot) Status {
 		return status
 	}
 
-	if err := atomicfile.Writable(target); err != nil {
-		status.Problem = unwritableProblem(m.backend, target, err)
-		return status
+	for _, residual := range residuals {
+		if residual.Kind == ResidualRollback {
+			status.Problem = "发现上次 Geo 更新遗留的回滚点；请先恢复缺失的正式文件，或确认当前文件正常后清理回滚点"
+			return status
+		}
+	}
+	checked := make(map[string]bool)
+	for _, file := range files {
+		target := filepath.Dir(file.TargetPath)
+		if checked[target] {
+			continue
+		}
+		checked[target] = true
+		if err := atomicfile.Writable(target); err != nil {
+			status.Problem = unwritableProblem(m.backend, target, err)
+			return status
+		}
 	}
 	status.Updatable = true
-	status.Warnings = append(status.Warnings, warnings(files, target, filepath.Dir(m.configPath))...)
+	status.Warnings = append(status.Warnings, warnings(files, configDir)...)
+	if slices.ContainsFunc(residuals, func(item Residual) bool { return item.Kind == ResidualTemporary }) {
+		status.Warnings = append(status.Warnings, "发现异常退出遗留的 Geo 暂存文件；它们不会生效，可直接清理，下一次更新也会自动清理")
+	}
 	return status
 }
 
@@ -284,7 +318,7 @@ func unwritableProblem(backend host.Backend, target string, err error) string {
 }
 
 // warnings 说明那些"更新会成功、但结果可能出乎意料"的情况。
-func warnings(files []File, target, configDir string) []string {
+func warnings(files []File, configDir string) []string {
 	var result []string
 	for _, file := range files {
 		if len(file.Shadowed) > 0 {
@@ -292,18 +326,9 @@ func warnings(files []File, target, configDir string) []string {
 				"%s 同时存在于多个目录，dae 只读 %s；%v 里的副本不会生效，可以删掉",
 				file.Name, file.Path, file.Shadowed))
 		}
-		if file.Present && filepath.Dir(file.Path) != target {
+		if !file.Present {
 			result = append(result, fmt.Sprintf(
-				"%s 目前在 %s，本次更新会写到优先级更高的 %s；此后它以新位置为准",
-				file.Name, file.Path, target))
-		}
-	}
-	if target == configDir {
-		for _, file := range files {
-			if !file.Present {
-				result = append(result, fmt.Sprintf(
-					"%s 尚未安装，将写入 %s（dae 搜索顺序里优先级最高的可写目录）", file.Name, configDir))
-			}
+				"%s 尚未安装，将写入 %s（dae 搜索顺序里优先级最高的可写目录）", file.Name, configDir))
 		}
 	}
 	return result

@@ -1,16 +1,17 @@
 import { isQuotable, isValidTag, parseGroups, quote, setGroupFilter, unquote } from './daeconf'
 
-export type GroupFilterKind = 'nodes' | 'subscriptions' | 'nameKeyword' | 'nameRegex' | 'raw'
+export type GroupFilterKind = 'nodes' | 'subscriptionNodes' | 'subscriptions' | 'nameKeyword' | 'nameRegex' | 'raw'
 
 export interface GroupFilterDraft {
   kind: GroupFilterKind
   value: string
   values: string[]
+  source: string
   exclude: boolean
 }
 
 export function createGroupFilter(kind: GroupFilterKind): GroupFilterDraft {
-  return { kind, value: '', values: [], exclude: false }
+  return { kind, value: '', values: [], source: '', exclude: false }
 }
 
 /**
@@ -61,11 +62,20 @@ export function parseGroupFilter(value: string): GroupFilterDraft {
   const exclude = trimmed.startsWith('!')
   const expression = exclude ? trimmed.slice(1).trim() : trimmed
 
+  const subscriptionNodes = /^subtag\((.*?)\)\s*&&\s*name\((.*)\)$/.exec(expression)
+  if (subscriptionNodes && !exclude) {
+    const sources = parseArguments(subscriptionNodes[1])
+    const values = parseArguments(subscriptionNodes[2])
+    if (sources?.length === 1 && isValidTag(sources[0]) && values) {
+      return { kind: 'subscriptionNodes', value: '', values, source: sources[0], exclude: false }
+    }
+  }
+
   const subscription = /^subtag\((.*)\)$/.exec(expression)
   if (subscription) {
     const values = parseArguments(subscription[1])
     if (values && values.every(isValidTag)) {
-      return { kind: 'subscriptions', value: '', values, exclude }
+      return { kind: 'subscriptions', value: '', values, source: '', exclude }
     }
   }
 
@@ -75,6 +85,7 @@ export function parseGroupFilter(value: string): GroupFilterDraft {
       kind: nameMatcher[1] === 'keyword' ? 'nameKeyword' : 'nameRegex',
       value: nameMatcher[3],
       values: [],
+      source: '',
       exclude,
     }
   }
@@ -82,10 +93,10 @@ export function parseGroupFilter(value: string): GroupFilterDraft {
   const nodes = /^name\((.*)\)$/.exec(expression)
   if (nodes) {
     const values = parseArguments(nodes[1])
-    if (values) return { kind: 'nodes', value: '', values, exclude }
+    if (values) return { kind: 'nodes', value: '', values, source: '', exclude }
   }
 
-  return { kind: 'raw', value: trimmed, values: [], exclude: false }
+  return { kind: 'raw', value: trimmed, values: [], source: '', exclude: false }
 }
 
 function uniqueValues(values: string[]): string[] {
@@ -100,6 +111,11 @@ export function serializeGroupFilter(filter: GroupFilterDraft): string | null {
     const values = uniqueValues(filter.values)
     if (values.length === 0 || values.some((value) => !isQuotable(value))) return null
     expression = `name(${values.map((value) => isValidTag(value) ? value : quote(value)).join(', ')})`
+  } else if (filter.kind === 'subscriptionNodes') {
+    const values = uniqueValues(filter.values)
+    if (!isValidTag(filter.source) || filter.exclude || values.length === 0
+      || values.some((value) => !isQuotable(value))) return null
+    expression = `subtag(${filter.source}) && name(${values.map((value) => isValidTag(value) ? value : quote(value)).join(', ')})`
   } else if (filter.kind === 'subscriptions') {
     const values = uniqueValues(filter.values)
     if (values.length === 0 || values.some((value) => !isValidTag(value))) return null
@@ -115,6 +131,7 @@ export function serializeGroupFilter(filter: GroupFilterDraft): string | null {
 export function describeGroupFilter(value: string): string {
   const parsed = parseGroupFilter(value)
   if (parsed.kind === 'nodes') return `${parsed.exclude ? '排除节点' : '节点'}：${parsed.values.join('、')}`
+  if (parsed.kind === 'subscriptionNodes') return `订阅 ${parsed.source}：${parsed.values.join('、')}`
   if (parsed.kind === 'subscriptions') return `${parsed.exclude ? '排除订阅' : '订阅'}：${parsed.values.join('、')}`
   return value
 }
@@ -146,7 +163,7 @@ export function includeNodesInGroups(text: string, groupNames: string[], nodeTag
 }
 
 /**
- * 只在候选数量可由当前配置精确得出时返回数字；订阅、关键词和高级表达式均返回 null。
+ * 只在候选数量可由当前配置精确得出时返回数字；整份订阅、关键词和高级表达式均返回 null。
  * fixed(n) 的 n 是从 0 开始的索引。
  */
 export function knownFixedCandidateCount(
@@ -155,6 +172,12 @@ export function knownFixedCandidateCount(
   hasSubscriptions: boolean,
 ): number | null {
   if (filters.length === 0) return hasSubscriptions ? null : unfilteredNodeCount
-  if (filters.some((filter) => filter.kind !== 'nodes' || filter.exclude)) return null
-  return new Set(filters.flatMap((filter) => filter.values.map((value) => value.trim()).filter(Boolean))).size
+  if (filters.some((filter) => !['nodes', 'subscriptionNodes'].includes(filter.kind) || filter.exclude)) return null
+  const candidates = new Set<string>()
+  for (const filter of filters) {
+    for (const value of filter.values.map((item) => item.trim()).filter(Boolean)) {
+      candidates.add(filter.kind === 'nodes' ? `node:${value}` : `subscription:${filter.source}:${value}`)
+    }
+  }
+  return candidates.size
 }

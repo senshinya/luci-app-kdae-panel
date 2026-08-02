@@ -27,6 +27,9 @@ const previewLoading = ref('')
 const preview = ref<ConfigBackupPreview | null>(null)
 const selectedIDs = computed(() => new Set(checkedRowKeys.value.map(String)))
 const selectedCount = computed(() => selectedIDs.value.size)
+const allBackupsSelected = computed(() => backups.value.length > 0
+  && backups.value.every((backup) => selectedIDs.value.has(backup.id)))
+const someBackupsSelected = computed(() => selectedCount.value > 0 && !allBackupsSelected.value)
 const interactionBusy = computed(() => Boolean(
   loading.value || saving.value || restoring.value || deleting.value
   || batchDeleting.value || previewLoading.value || exporting.value,
@@ -165,6 +168,10 @@ function setBackupSelected(id: string, checked: boolean) {
   if (checked) selected.add(id)
   else selected.delete(id)
   checkedRowKeys.value = [...selected]
+}
+
+function setAllBackupsSelected(checked: boolean) {
+  checkedRowKeys.value = checked ? backups.value.map((backup) => backup.id) : []
 }
 
 async function openPreview(backup: ConfigBackup) {
@@ -308,7 +315,7 @@ onMounted(() => void load())
         <h2>配置历史</h2>
         <NText depth="3">保存当前配置或查看自动历史；恢复操作同样受并发摘要保护</NText>
       </div>
-      <NSpace>
+      <NSpace class="backup-toolbar-actions" :wrap="false">
         <NButton
           type="error"
           secondary
@@ -322,8 +329,17 @@ onMounted(() => void load())
         <NButton type="primary" secondary :disabled="interactionBusy" @click="openEditor()">
           <template #icon><NIcon><CreateOutline /></NIcon></template>保存当前配置
         </NButton>
-        <NButton secondary :loading="loading" :disabled="interactionBusy" @click="load">
-          <template #icon><NIcon><RefreshOutline /></NIcon></template>刷新
+        <NButton
+          class="backup-refresh-action"
+          secondary
+          title="刷新配置存档"
+          aria-label="刷新配置存档"
+          :loading="loading"
+          :disabled="interactionBusy"
+          @click="load"
+        >
+          <template #icon><NIcon><RefreshOutline /></NIcon></template>
+          <span class="backup-refresh-label">刷新</span>
         </NButton>
       </NSpace>
     </div>
@@ -340,63 +356,94 @@ onMounted(() => void load())
         @update:checked-row-keys="checkedRowKeys = $event"
       />
       <NSpin v-else :show="loading">
-        <div v-if="backups.length" class="mobile-record-list" data-testid="mobile-backup-list">
-          <article v-for="backup in backups" :key="backup.id" class="mobile-record">
-            <div class="mobile-record-head">
-              <NCheckbox
-                :checked="selectedIDs.has(backup.id)"
-                :disabled="interactionBusy"
-                :aria-label="`选择${backup.name || '自动备份'}`"
-                @update:checked="setBackupSelected(backup.id, $event)"
-              />
-              <div class="mobile-record-title">{{ backup.name || '自动备份' }}</div>
-              <NTag size="small" :bordered="false">{{ shortHash(backup.hash) }}</NTag>
-            </div>
-            <p v-if="backup.note" class="mobile-record-description">{{ backup.note }}</p>
-            <div class="mobile-record-meta">
-              <span>创建<strong>{{ formatDateTime(backup.createdAt) }}</strong></span>
-              <span>大小<strong>{{ formatBytes(backup.size) }}</strong></span>
-            </div>
-            <div class="mobile-action-row">
-              <NButton
-                secondary
-                type="primary"
-                :loading="restoring === backup.id"
-                :disabled="interactionBusy"
-                @click="openPreview(backup)"
-              >
-                <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复
-              </NButton>
-              <NButton
-                secondary
-                :loading="previewLoading === backup.id"
-                :disabled="interactionBusy"
-                @click="openPreview(backup)"
-              >
-                <template #icon><NIcon><GitCompareOutline /></NIcon></template>对比
-              </NButton>
-              <NButton
-                secondary
-                :loading="exporting === backup.id"
-                :disabled="interactionBusy"
-                @click="exportBackup(backup)"
-              >
-                <template #icon><NIcon><DownloadOutline /></NIcon></template>导出
-              </NButton>
-              <NButton secondary :disabled="interactionBusy" @click="openEditor(backup)">
-                <template #icon><NIcon><PencilOutline /></NIcon></template>编辑
-              </NButton>
-              <NButton
-                secondary
-                type="error"
-                :loading="deleting === backup.id"
-                :disabled="interactionBusy"
-                @click="confirmDelete(backup)"
-              >
-                <template #icon><NIcon><TrashOutline /></NIcon></template>删除
-              </NButton>
-            </div>
-          </article>
+        <div v-if="backups.length" class="mobile-backup-content">
+          <div class="mobile-backup-selection" data-testid="mobile-backup-selection">
+            <NCheckbox
+              :checked="allBackupsSelected"
+              :indeterminate="someBackupsSelected"
+              :disabled="interactionBusy"
+              @update:checked="setAllBackupsSelected"
+            >
+              全选
+            </NCheckbox>
+            <NText depth="3">已选 {{ selectedCount }} / 共 {{ backups.length }} 项</NText>
+          </div>
+          <div class="mobile-record-list" data-testid="mobile-backup-list">
+            <article v-for="backup in backups" :key="backup.id" class="mobile-record">
+              <div class="mobile-record-head">
+                <NCheckbox
+                  :checked="selectedIDs.has(backup.id)"
+                  :disabled="interactionBusy"
+                  :aria-label="`选择${backup.name || '自动备份'}`"
+                  @update:checked="setBackupSelected(backup.id, $event)"
+                />
+                <div class="mobile-record-title">{{ backup.name || '自动备份' }}</div>
+                <NTag size="small" :bordered="false">{{ shortHash(backup.hash) }}</NTag>
+              </div>
+              <p v-if="backup.note" class="mobile-record-description">{{ backup.note }}</p>
+              <div class="mobile-record-meta">
+                <span>创建<strong>{{ formatDateTime(backup.createdAt) }}</strong></span>
+                <span>大小<strong>{{ formatBytes(backup.size) }}</strong></span>
+              </div>
+              <div class="mobile-action-row backup-mobile-actions">
+                <NButton
+                  class="backup-action-text"
+                  size="small"
+                  secondary
+                  type="primary"
+                  :loading="restoring === backup.id"
+                  :disabled="interactionBusy"
+                  @click="openPreview(backup)"
+                >
+                  <template #icon><NIcon><ReturnUpBackOutline /></NIcon></template>恢复
+                </NButton>
+                <NButton
+                  class="backup-action-text"
+                  size="small"
+                  secondary
+                  :loading="previewLoading === backup.id"
+                  :disabled="interactionBusy"
+                  @click="openPreview(backup)"
+                >
+                  <template #icon><NIcon><GitCompareOutline /></NIcon></template>对比
+                </NButton>
+                <NButton
+                  class="backup-action-text"
+                  size="small"
+                  secondary
+                  :loading="exporting === backup.id"
+                  :disabled="interactionBusy"
+                  @click="exportBackup(backup)"
+                >
+                  <template #icon><NIcon><DownloadOutline /></NIcon></template>导出
+                </NButton>
+                <NButton
+                  class="backup-action-icon"
+                  size="small"
+                  secondary
+                  title="编辑配置存档"
+                  :aria-label="`编辑${backup.name || '自动备份'}`"
+                  :disabled="interactionBusy"
+                  @click="openEditor(backup)"
+                >
+                  <template #icon><NIcon><PencilOutline /></NIcon></template>
+                </NButton>
+                <NButton
+                  class="backup-action-icon"
+                  size="small"
+                  secondary
+                  type="error"
+                  title="删除配置存档"
+                  :aria-label="`删除${backup.name || '自动备份'}`"
+                  :loading="deleting === backup.id"
+                  :disabled="interactionBusy"
+                  @click="confirmDelete(backup)"
+                >
+                  <template #icon><NIcon><TrashOutline /></NIcon></template>
+                </NButton>
+              </div>
+            </article>
+          </div>
         </div>
         <NEmpty v-else description="还没有配置存档" class="mobile-empty" />
       </NSpin>

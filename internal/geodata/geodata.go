@@ -71,6 +71,29 @@ type File struct {
 	// Shadowed 列出被 Path 遮蔽掉的同名文件。dae 只读优先级最高的那一份，
 	// 其余的既占磁盘又容易让人以为"更新了却没生效"。
 	Shadowed []string `json:"shadowed,omitempty"`
+	// TargetPath 是下一次更新这个文件时的落盘位置。两个 Geo 文件可能由 dae
+	// 从不同目录读取，因此不能再用一个公共目录代替。
+	TargetPath string `json:"targetPath"`
+}
+
+type ResidualKind string
+
+const (
+	ResidualTemporary ResidualKind = "temporary"
+	ResidualRollback  ResidualKind = "rollback"
+)
+
+// Residual 是异常退出后遗留的 Geo 事务文件。
+type Residual struct {
+	Path       string       `json:"path"`
+	Kind       ResidualKind `json:"kind"`
+	Size       int64        `json:"size"`
+	ModTime    time.Time    `json:"modTime"`
+	TargetPath string       `json:"targetPath,omitempty"`
+	// Restorable 表示正式文件缺失，回滚点是可直接恢复的旧数据。
+	Restorable bool `json:"restorable"`
+	// Deletable 表示它不承载唯一旧数据，可在用户确认后安全清理。
+	Deletable bool `json:"deletable"`
 }
 
 // Status 是 geo 数据的现状与可更新性。
@@ -79,11 +102,12 @@ type Status struct {
 	Sources []upstream.GeoSourceInfo `json:"sources"`
 	// DefaultSource 是界面该预选的来源：用过就沿用上次那个，否则用内置默认。
 	DefaultSource upstream.GeoSource `json:"defaultSource"`
-	// TargetDir 是本次更新会写入的目录，即 dae 实际读取的那个目录。
+	// TargetDir 为兼容旧客户端保留；两个文件同目录时返回该目录，分目录时为空。
 	TargetDir string `json:"targetDir"`
 	// SearchPath 是 dae 查找 geo 的完整顺序，便于用户理解为什么写这里。
-	SearchPath []string `json:"searchPath"`
-	Files      []File   `json:"files"`
+	SearchPath []string   `json:"searchPath"`
+	Files      []File     `json:"files"`
+	Residuals  []Residual `json:"residuals,omitempty"`
 	// Updatable 为假表示还不能更新，Problem 说明原因。
 	Updatable bool   `json:"updatable"`
 	Problem   string `json:"problem,omitempty"`
@@ -113,6 +137,12 @@ type Manager struct {
 	// backend 只影响"目录不可写"该怎么建议用户去修。两套 init 系统下这件事
 	// 的成因完全不同，给错方向的指引比不给更浪费用户时间。
 	backend host.Backend
+}
+
+// ResidualManager 是 GeoService 可选的异常事务恢复能力。
+type ResidualManager interface {
+	CleanupResiduals(ctx context.Context) (Status, error)
+	RestoreResidual(ctx context.Context, path string) (Status, error)
 }
 
 type Options struct {

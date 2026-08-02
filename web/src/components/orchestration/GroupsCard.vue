@@ -20,8 +20,11 @@ import {
   type SelectOption,
 } from 'naive-ui'
 import { AddOutline, CreateOutline, TrashOutline } from '@vicons/ionicons5'
+import { getJSON } from '../../api/client'
+import type { SubscriptionNodeSource } from '../../types/api'
 import {
   addGroup,
+  isQuotable,
   isValidTag,
   parseGroups,
   readSection,
@@ -40,6 +43,7 @@ import {
   type GroupFilterKind,
 } from '../../utils/group'
 import { parseNodeLink } from '../../utils/nodelink'
+import { parseScheme } from '../../utils/subscription'
 import SectionEditorModal from './SectionEditorModal.vue'
 
 const content = defineModel<string>({ required: true })
@@ -99,8 +103,9 @@ function changeFixedIndex(group: Group, index: number | null) {
 }
 
 const FILTER_KIND_OPTIONS = [
-  { label: '指定节点', value: 'nodes' },
-  { label: '指定订阅', value: 'subscriptions' },
+  { label: '指定本地节点', value: 'nodes' },
+  { label: '指定订阅节点', value: 'subscriptionNodes' },
+  { label: '指定整份订阅', value: 'subscriptions' },
   { label: '节点名称关键词', value: 'nameKeyword' },
   { label: '节点名称正则', value: 'nameRegex' },
   { label: '高级表达式', value: 'raw' },
@@ -134,6 +139,65 @@ const nodeOptions = computed<ResourceOption[]>(() => {
   return options
 })
 
+const subscriptionNodeSources = ref<SubscriptionNodeSource[]>([])
+const subscriptionNodesLoading = ref(false)
+const subscriptionNodesLoaded = ref(false)
+const subscriptionNodesError = ref('')
+const persistentSubscriptionTags = computed(() => new Set(
+  readSection(content.value, 'subscription').entries
+    .filter((entry) => entry.tag && parseScheme(entry.value)?.persistent)
+    .map((entry) => entry.tag!),
+))
+const subscriptionNodeSourceMap = computed(() => new Map(
+  subscriptionNodeSources.value
+    .filter((source) => persistentSubscriptionTags.value.has(source.tag))
+    .map((source) => [source.tag, source]),
+))
+
+async function loadSubscriptionNodes() {
+  if (subscriptionNodesLoading.value) return
+  subscriptionNodesLoading.value = true
+  try {
+    const response = await getJSON<{ sources: SubscriptionNodeSource[] }>('/api/v1/subscriptions/nodes')
+    subscriptionNodeSources.value = response.sources
+    subscriptionNodesError.value = ''
+  } catch (error) {
+    subscriptionNodeSources.value = []
+    subscriptionNodesError.value = error instanceof Error ? error.message : '读取订阅节点缓存失败'
+  } finally {
+    subscriptionNodesLoaded.value = true
+    subscriptionNodesLoading.value = false
+  }
+}
+
+function subscriptionNodeOptions(tag: string): ResourceOption[] {
+  const source = subscriptionNodeSourceMap.value.get(tag)
+  if (!source || source.problem) return []
+  return source.nodes.map((node) => ({
+    label: node.name,
+    value: node.name,
+    description: [node.protocol, node.host, node.matches > 1 ? `${node.matches} 个同名节点` : ''].filter(Boolean).join(' · '),
+    disabled: !isQuotable(node.name),
+  }))
+}
+
+function subscriptionNodeStatus(tag: string): string {
+  if (subscriptionNodesLoading.value) return '正在读取 dae 订阅缓存…'
+  if (subscriptionNodesError.value) return subscriptionNodesError.value
+  if (tag === '') return '先选择节点来源'
+  const source = subscriptionNodeSourceMap.value.get(tag)
+  if (!source) return '该订阅暂无缓存；请开启离线缓存并成功刷新一次'
+  if (source.problem) return source.problem
+  if (source.nodes.length === 0) return '缓存中没有带稳定名称的节点'
+  const suffix = source.skipped ? `；另有 ${source.skipped} 个无名称节点未列出` : ''
+  return `${source.nodes.length} 个可选名称${suffix}`
+}
+
+function changeSubscriptionNodeSource(filter: GroupFilterDraft, source: string) {
+  filter.source = source
+  filter.values = []
+}
+
 function renderResourceLabel(option: SelectOption) {
   const label = typeof option.label === 'string' ? option.label : String(option.value || '')
   const description = typeof option.description === 'string' ? option.description : ''
@@ -155,6 +219,17 @@ const unknownNodeNames = computed(() => {
     .flatMap((filter) => filter.values)
     .filter((value) => !explicit.has(value)))]
 })
+const unknownSubscriptionNodes = computed(() => {
+  if (!subscriptionNodesLoaded.value || subscriptionNodesError.value) return []
+  const unknown: string[] = []
+  for (const filter of groupFilters.value.filter((candidate) => candidate.kind === 'subscriptionNodes')) {
+    const known = new Set(subscriptionNodeOptions(filter.source).map((option) => option.value))
+    for (const name of filter.values) {
+      if (!known.has(name)) unknown.push(`${filter.source || '未知订阅'} / ${name}`)
+    }
+  }
+  return [...new Set(unknown)]
+})
 
 function openGroupEditor(groupIndex: number) {
   const group = groups.value[groupIndex]
@@ -172,6 +247,7 @@ function openGroupEditor(groupIndex: number) {
   groupFixedIndex.value = policy.index
   groupFilters.value = group.filters.map((filter) => parseGroupFilter(filter.value))
   groupEditVisible.value = true
+  void loadSubscriptionNodes()
 }
 
 function addFilter(kind: GroupFilterKind) {
@@ -238,6 +314,10 @@ function validFixedIndex(group: Group, index: number): boolean {
 function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
   const explicit = new Set(nodeOptions.value.map((option) => option.value))
   if (filters.some((filter) => filter.kind === 'nodes' && filter.values.some((value) => !explicit.has(value)))) {
+    return null
+  }
+  if (filters.some((filter) => filter.kind === 'subscriptionNodes'
+    && filter.values.some((value) => !subscriptionNodeOptions(filter.source).some((option) => option.value === value)))) {
     return null
   }
   return knownFixedCandidateCount(
@@ -337,10 +417,14 @@ function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
   <NModal v-model:show="groupEditVisible" preset="card" title="编辑分组" class="orchestrate-group-modal" :mask-closable="false" data-testid="group-editor-modal">
     <NSpace vertical size="small">
       <NAlert type="info" :bordered="false">
-        可直接选择本地节点或订阅；多条过滤之间是“或”关系。订阅内部节点由 dae 拉取，面板按订阅整体加入。
+        可选择本地节点、订阅中的指定节点或整份订阅；多条过滤之间是“或”关系。
+        订阅节点来自 dae 的离线缓存，不会复制进 node 节。
       </NAlert>
       <NAlert v-if="unknownNodeNames.length" type="warning" :bordered="false">
         {{ unknownNodeNames.join('、') }} 不对应显式本地标签，可能是订阅节点名称或旧配置名称；面板会原样保留，但无法保证它与 dae 实际解析出的名称一致。
+      </NAlert>
+      <NAlert v-if="unknownSubscriptionNodes.length" type="warning" :bordered="false">
+        {{ unknownSubscriptionNodes.join('、') }} 当前不在订阅缓存中；过滤原文会保留，但可能已经失效。
       </NAlert>
     </NSpace>
     <div class="group-editor-policy">
@@ -353,15 +437,18 @@ function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
         <div>
           <strong>分组成员</strong>
           <NText depth="3" class="group-resource-hint">
-            本地节点只使用显式标签，避免分享链接备注与 dae 运行时名称不一致；未打标签的订阅也无法由 subtag 稳定引用。
+            本地节点使用显式标签；订阅节点先选择来源，再按 dae 缓存中的节点名称选择。
           </NText>
         </div>
         <NSpace size="small" class="group-filter-actions">
           <NButton size="small" dashed :disabled="nodeOptions.length === 0" @click="addFilter('nodes')">
             <template #icon><NIcon><AddOutline /></NIcon></template>选择节点
           </NButton>
+          <NButton size="small" dashed :disabled="subscriptionOptions.length === 0" @click="addFilter('subscriptionNodes')">
+            <template #icon><NIcon><AddOutline /></NIcon></template>订阅节点
+          </NButton>
           <NButton size="small" dashed :disabled="subscriptionOptions.length === 0" @click="addFilter('subscriptions')">
-            <template #icon><NIcon><AddOutline /></NIcon></template>选择订阅
+            <template #icon><NIcon><AddOutline /></NIcon></template>整份订阅
           </NButton>
           <NButton size="small" quaternary @click="addFilter('nameKeyword')">
             <template #icon><NIcon><AddOutline /></NIcon></template>高级条件
@@ -385,6 +472,35 @@ function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
           placeholder="选择本地节点"
           data-testid="group-node-picker"
         />
+        <div v-else-if="filter.kind === 'subscriptionNodes'" class="group-subscription-node-picker">
+          <NSelect
+            :value="filter.source"
+            :options="subscriptionOptions"
+            :loading="subscriptionNodesLoading"
+            filterable
+            clearable
+            placeholder="节点来源"
+            data-testid="group-subscription-node-source"
+            @update:value="(value: string | null) => changeSubscriptionNodeSource(filter, value || '')"
+          />
+          <NSelect
+            v-model:value="filter.values"
+            :options="subscriptionNodeOptions(filter.source)"
+            :render-label="renderResourceLabel"
+            :disabled="filter.source === '' || subscriptionNodeOptions(filter.source).length === 0"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            :virtual-scroll="false"
+            :consistent-menu-width="false"
+            placeholder="选择该订阅中的节点"
+            data-testid="group-subscription-node-picker"
+          />
+          <NText depth="3" class="group-subscription-node-status">
+            {{ subscriptionNodeStatus(filter.source) }}
+          </NText>
+        </div>
         <NSelect
           v-else-if="filter.kind === 'subscriptions'"
           v-model:value="filter.values"
@@ -407,7 +523,7 @@ function fixedCandidateCount(filters: GroupFilterDraft[]): number | null {
           :placeholder="filter.kind === 'raw' ? 'subtag(my_sub) && !name(keyword: 过期)' : '匹配内容'"
           spellcheck="false"
         />
-        <label v-if="filter.kind !== 'raw'" class="filter-exclude">
+        <label v-if="filter.kind !== 'raw' && filter.kind !== 'subscriptionNodes'" class="filter-exclude">
           <NSwitch v-model:value="filter.exclude" size="small" />
           <span>排除</span>
         </label>

@@ -30,6 +30,7 @@ import (
 	"github.com/tuoro/kdae-panel/internal/netprobe"
 	"github.com/tuoro/kdae-panel/internal/panelupdate"
 	"github.com/tuoro/kdae-panel/internal/schedule"
+	"github.com/tuoro/kdae-panel/internal/subscriptioncache"
 	"github.com/tuoro/kdae-panel/internal/upstream"
 	"github.com/tuoro/kdae-panel/internal/webui"
 )
@@ -62,18 +63,23 @@ type ConfigurationService interface {
 }
 
 type Dependencies struct {
-	Dae            DaeService
-	Configuration  ConfigurationService
-	Host           HostService
-	Authentication AuthenticationService
-	Probe          ProbeService
-	Schedule       ScheduleService
-	GeoSchedule    ScheduleService
-	Install        InstallService
-	Geo            GeoService
-	PanelRelease   PanelReleaseChecker
-	PanelUpdate    PanelUpdateService
-	GitHub         GitHubCredentialService
+	Dae               DaeService
+	Configuration     ConfigurationService
+	Host              HostService
+	Authentication    AuthenticationService
+	Probe             ProbeService
+	Schedule          ScheduleService
+	GeoSchedule       ScheduleService
+	Install           InstallService
+	Geo               GeoService
+	PanelRelease      PanelReleaseChecker
+	PanelUpdate       PanelUpdateService
+	GitHub            GitHubCredentialService
+	SubscriptionNodes SubscriptionNodeService
+}
+
+type SubscriptionNodeService interface {
+	List(ctx context.Context) ([]subscriptioncache.Source, error)
 }
 
 type AuthenticationService interface {
@@ -149,6 +155,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		Probe:          netprobe.New(),
 		GitHub:         githubCredentials,
 	}
+	subscriptionNodes, err := subscriptioncache.New(cfg.DaeConfigPath)
+	if err != nil {
+		_ = authStore.Close()
+		return nil, fmt.Errorf("初始化订阅节点缓存: %w", err)
+	}
+	dependencies.SubscriptionNodes = subscriptionNodes
 	if cfg.EnableDaeInstall {
 		installer, err := daeinstall.New(daeinstall.Options{
 			BinaryPath:     cfg.DaeBinary,
@@ -367,6 +379,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	registerConfigurationRoutes(router, dependencies.Configuration, operations)
 	registerServiceRoutes(router, dependencies.Dae, dependencies.Host, operations)
 	registerProbeRoutes(router, dependencies.Probe, logger)
+	registerSubscriptionNodeRoutes(router, dependencies.SubscriptionNodes)
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)
 	registerScheduleRoutes(router, "/api/v1/schedule/geo", geoScheduleService)
 	registerUpstreamRoutes(router, dependencies.Install, operations, logger, backend)

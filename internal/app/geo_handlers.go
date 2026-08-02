@@ -19,6 +19,7 @@ type GeoService interface {
 	Status(ctx context.Context) geodata.Status
 	Download(ctx context.Context, source upstream.GeoSource) (upstream.GeoData, error)
 	Apply(ctx context.Context, data upstream.GeoData) (geodata.Status, error)
+	geodata.ResidualManager
 }
 
 type GeoSourceService interface {
@@ -30,6 +31,10 @@ type GeoSourceService interface {
 
 type geoRequest struct {
 	Source string `json:"source"`
+}
+
+type geoResidualRequest struct {
+	Path string `json:"path"`
 }
 
 // geoUpdateTimeout 覆盖下载与落盘的总时长。
@@ -128,6 +133,7 @@ func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSo
 		}
 		for _, pattern := range []string{
 			"GET /api/v1/dae/geo", "POST /api/v1/dae/geo",
+			"POST /api/v1/dae/geo/residuals/cleanup", "POST /api/v1/dae/geo/residuals/restore",
 			"GET /api/v1/dae/geo/sources", "POST /api/v1/dae/geo/sources",
 			"PUT /api/v1/dae/geo/sources/{id}", "DELETE /api/v1/dae/geo/sources/{id}",
 		} {
@@ -169,7 +175,50 @@ func registerGeoRoutes(router *http.ServeMux, updater *geoUpdater, sources GeoSo
 		writeJSON(writer, http.StatusAccepted, map[string]any{"job": updater.jobs.snapshot()})
 	})
 
+	registerGeoResidualRoutes(router, updater)
+
 	registerGeoSourceRoutes(router, updater, sources)
+}
+
+func registerGeoResidualRoutes(router *http.ServeMux, updater *geoUpdater) {
+	busy := func(writer http.ResponseWriter) bool {
+		job := updater.jobs.snapshot()
+		if job.Phase != PhaseDownloading && job.Phase != PhaseApplying {
+			return false
+		}
+		writeAPIError(writer, http.StatusConflict, "geo_update_in_progress", "geo 更新进行中，暂时不能处理事务残留")
+		return true
+	}
+	run := func(writer http.ResponseWriter, request *http.Request,
+		action func(context.Context) (geodata.Status, error)) {
+		if busy(writer) || !acquireOperation(writer, updater.operations) {
+			return
+		}
+		defer updater.operations.Unlock()
+		status, err := action(request.Context())
+		if err != nil {
+			writeAPIError(writer, http.StatusConflict, "geo_residual_unresolved", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"status": status})
+	}
+
+	router.HandleFunc("POST /api/v1/dae/geo/residuals/cleanup", func(writer http.ResponseWriter, request *http.Request) {
+		run(writer, request, updater.service.CleanupResiduals)
+	})
+	router.HandleFunc("POST /api/v1/dae/geo/residuals/restore", func(writer http.ResponseWriter, request *http.Request) {
+		var payload geoResidualRequest
+		if !decodeBody(writer, request, &payload, 16<<10, false) {
+			return
+		}
+		if strings.TrimSpace(payload.Path) == "" {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_geo_residual", "回滚点路径不能为空")
+			return
+		}
+		run(writer, request, func(ctx context.Context) (geodata.Status, error) {
+			return updater.service.RestoreResidual(ctx, payload.Path)
+		})
+	})
 }
 
 func geoSourceAvailable(status geodata.Status, source upstream.GeoSource) bool {
