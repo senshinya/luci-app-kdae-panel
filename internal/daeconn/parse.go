@@ -43,10 +43,11 @@ const connectionMarker = " <-> "
 // 但不符合当前格式的行，便于在上游日志格式变化时暴露兼容性问题。
 func Parse(lines []LogLine) (events []Event, dropped int) {
 	for _, line := range lines {
-		if !strings.Contains(line.Message, connectionMarker) {
+		fields, ok := logfmt.Parse(line.Message)
+		if !ok || !connectionCandidate(fields) {
 			continue
 		}
-		event, outcome := parseEvent(line.Timestamp, line.Message)
+		event, outcome := parseEvent(line.Timestamp, fields)
 		switch outcome {
 		case parseOK:
 			events = append(events, event)
@@ -57,6 +58,16 @@ func Parse(lines []LogLine) (events []Event, dropped int) {
 	return events, dropped
 }
 
+func connectionCandidate(fields map[string]string) bool {
+	if !strings.Contains(fields["msg"], connectionMarker) {
+		return false
+	}
+	// kdae 还会用 <-> 描述 Netkit 设备对。只有同时带连接元数据的日志才进入
+	// 严格校验，普通接口生命周期日志既不是连接，也不应制造格式变化告警。
+	return fields["network"] != "" || fields["outbound"] != "" || fields["dialer"] != "" ||
+		fields["ip"] != "" || fields["sniffed"] != ""
+}
+
 type parseOutcome uint8
 
 const (
@@ -65,11 +76,7 @@ const (
 	parseSkipped
 )
 
-func parseEvent(timestamp time.Time, message string) (Event, parseOutcome) {
-	fields, ok := logfmt.Parse(message)
-	if !ok {
-		return Event{}, parseFailed
-	}
+func parseEvent(timestamp time.Time, fields map[string]string) (Event, parseOutcome) {
 	// dae 会为复用的 UDP 会话输出 debug 行；只接收连接建立时的 info 行，
 	// 否则一条 UDP 流会反复制造新记录。
 	if fields["level"] != "info" {

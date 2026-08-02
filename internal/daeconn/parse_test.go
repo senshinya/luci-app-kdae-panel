@@ -36,6 +36,7 @@ func TestParseSkipsDebugAndCountsMalformedConnectionLines(t *testing.T) {
 	lines := []LogLine{
 		{Message: `level=debug msg="192.0.2.1:1 <-> example.com:53" network=udp4 outbound=proxy`},
 		{Message: `level=info msg="192.0.2.1:1 <-> example.com:443" network=tcp4`},
+		{Message: `level=info msg="Successfully created Netkit device pair dae0 <-> dae0-peer"`},
 		{Message: `level=info msg="普通日志"`},
 	}
 	events, dropped := Parse(lines)

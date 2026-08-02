@@ -13,8 +13,8 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
     viewport: { width: 1600, height: 900 },
-    // 本地可用 E2E_BROWSER_CHANNEL=msedge 复用系统浏览器，CI 装 chromium
-    channel: process.env.E2E_BROWSER_CHANNEL || undefined,
+    // Windows 默认复用系统 Edge，Linux CI 继续使用流水线安装的 Chromium。
+    channel: process.env.E2E_BROWSER_CHANNEL || (process.platform === 'win32' ? 'msedge' : undefined),
   },
   webServer: {
     command: 'node start-panel.mjs',

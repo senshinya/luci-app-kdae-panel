@@ -332,7 +332,7 @@ ICMP ping socket 通常受系统的 `ping_group_range` 控制；发行单元同�
 | `POST` | `/service/actions/reload` | 运行中按服务后端记录的主进程号执行 `dae reload`；未运行则返回延后状态 |
 | `POST` | `/service/actions/suspend` | 执行 `dae suspend` |
 | `GET` | `/logs?limit=200` | 最近 1–500 条服务日志（systemd 后端读 journald，procd 后端读 `logread`） |
-| `GET` | `/connections?limit=500&window=15` | 连接建立流水、历史分布与 dae 当前出站端点；条数 1–2000，时间窗 1–1440 分钟 |
+| `GET` | `/connections?limit=500&window=15` | 连接建立流水、历史分布、当前日志级别与 dae 出站端点；条数 1–2000，时间窗 1–1440 分钟 |
 
 所有动作名和参数都由服务端白名单决定。URL、请求体和查询参数都不能注入额外命令参数。
 
@@ -360,7 +360,7 @@ JSON 里），因为那台机器上真的没有这个数：
 | `summary.udpSockets` | `/proc/net/udp{,6}` | dae 当前持有的 UDP socket 总数 |
 | `summary.windowEvents` / `windowClients` / `windowTargets` | 面板内存 | 所选时间窗内保留的事件、客户端和目标数 |
 
-`logsOk` 与 `snapshotOk` 分别表示两个来源是否可用；任一来源失败不会抹掉另一边的数据。日志事件在内存中最多保留 2000 条、最长 24 小时，面板重启后从当前日志窗口重新积累。分布在明细条数裁剪前计算，每个维度最多返回前 200 项，超限时 `facetLimited=true`。`truncated=true` 表示部分明细或端点不完整，页面计数只能基于面板当前保留或扫描到的数据。解析器拒绝未知协议与残缺连接行，只接收 `info` 事件，并在 `dropped` 中报告疑似上游格式变化。
+`logsOk` 与 `snapshotOk` 分别表示两个来源是否可用；任一来源失败不会抹掉另一边的数据。`logLevel` 来自当前配置的 `global.log_level`，字段省略时按 dae 默认值 `info` 返回，无法可靠读取时省略。`warn` 或 `error` 不会产生连接建立流水，页面会保留实时 socket 快照并提供经配置事务切换到 `info` 的入口。日志事件在内存中最多保留 2000 条、最长 24 小时，面板重启后从当前日志窗口重新积累。分布在明细条数裁剪前计算，每个维度最多返回前 200 项，超限时 `facetLimited=true`。`truncated=true` 表示部分明细或端点不完整，页面计数只能基于面板当前保留或扫描到的数据。解析器拒绝未知协议与残缺连接行，只接收 `info` 事件；只有同时包含 `<->` 与连接元数据的候选行解析失败才计入 `dropped`，Netkit 设备对等普通生命周期日志不会制造误报。
 
 `endpoints` 是远端地址分布，不是节点名称映射：同一节点可能解析成多个地址，直连流量也可能完全留在 eBPF 数据面而不产生 dae userspace socket。dae 没有公开逐条连接状态接口，因此 API 不提供 `live`、`closed` 一类猜测值。端点只读取服务后端的日志（journald 或 `logread`）与 Linux procfs，不读取 dae/kdae 内部 eBPF Map；与其他管理接口一样只允许已登录管理员访问。
 

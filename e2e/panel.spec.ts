@@ -910,6 +910,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
         snapshotAt: at(0),
         snapshotOk: true,
         logsOk: true,
+        logLevel: 'info',
         summary: { outboundTcp: 32, udpSockets: 1, windowEvents: 205, windowClients: 4, windowTargets: 8 },
         facets: {
           targets: [
@@ -1021,10 +1022,37 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.locator('.connection-facet-mobile').click()
     await expect(page.locator('.n-drawer').getByText('活动分布')).toBeVisible()
     await expect(page.locator('.n-drawer').getByText('api.github.com')).toBeVisible()
+    const drawerModes = page.locator('.connection-facet-drawer-modes button')
+    await expect(drawerModes).toHaveCount(4)
+    const modeBoxes = await drawerModes.evaluateAll((buttons) => buttons.map((button) => {
+      const box = button.getBoundingClientRect()
+      return { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width) }
+    }))
+    expect(modeBoxes[0].y).toBe(modeBoxes[1].y)
+    expect(modeBoxes[2].y).toBe(modeBoxes[3].y)
+    expect(modeBoxes[2].y).toBeGreaterThan(modeBoxes[0].y)
+    expect(Math.max(...modeBoxes.map(({ width }) => width)) - Math.min(...modeBoxes.map(({ width }) => width))).toBeLessThanOrEqual(1)
     await page.keyboard.press('Escape')
     await page.getByRole('button', { name: '实时端点 4' }).click()
     await expect(page.locator('.n-drawer').getByText('144.34.225.42:30128')).toBeVisible()
     await page.keyboard.press('Escape')
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+    await page.unroute('**/api/v1/connections?*')
+    await page.route('**/api/v1/connections?*', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        snapshotAt: at(0), snapshotOk: true, logsOk: true, logLevel: 'warn',
+        summary: { outboundTcp: 2, udpSockets: 0, windowEvents: 0, windowClients: 0, windowTargets: 0 },
+        facets: { targets: [], clients: [], nodes: [], groups: [] },
+        endpoints: [{ address: '203.0.113.8:443', count: 2 }],
+        entries: [],
+      }),
+    }))
+    await page.goto('/connections')
+    await expect(page.getByText('当前 dae 输出级别为')).toBeVisible()
+    await expect(page.getByRole('button', { name: '切换为 info' })).toBeVisible()
+    await expect(page.getByText('当前日志级别不记录连接建立流水')).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     await page.setViewportSize({ width: 1600, height: 900 })
     await page.unroute('**/api/v1/connections?*')
@@ -1046,8 +1074,16 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     }))
     await page.goto('/logs')
     await expect(page.getByRole('heading', { name: 'journald 日志', level: 2 })).toBeVisible()
+    await expect(page.locator('.log-level-control')).toContainText('dae 输出级别')
+    await expect(page.locator('.log-select .n-base-selection')).toContainText('显示全部记录')
     await expect(page.locator('.log-row')).toHaveCount(8)
     await expect(page.locator('.log-row').first()).toContainText('[Reload] Finished')
+    await page.locator('.log-output-select .n-base-selection').click()
+    await clickVisibleOption(page, '信息 · info')
+    await page.getByRole('button', { name: '应用并重载' }).click()
+    await page.locator('.n-dialog').getByRole('button', { name: '保存并重载' }).click()
+    await expect(page.locator('.log-level-status')).toContainText('info')
+    expect(readFileSync(configPath, 'utf8')).toContain('log_level: info')
     await capture(page, 'logs.png', 1600, 900)
     await page.unroute('**/api/v1/logs?*')
   })

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tuoro/kdae-panel/internal/daeconfig"
 	"github.com/tuoro/kdae-panel/internal/daeconn"
 	"github.com/tuoro/kdae-panel/internal/host"
 )
@@ -52,6 +53,7 @@ type connectionsResponse struct {
 	SnapshotAt   time.Time            `json:"snapshotAt"`
 	SnapshotOK   bool                 `json:"snapshotOk"`
 	LogsOK       bool                 `json:"logsOk"`
+	LogLevel     string               `json:"logLevel,omitempty"`
 	Dropped      int                  `json:"dropped,omitempty"`
 	Truncated    bool                 `json:"truncated,omitempty"`
 	FacetLimited bool                 `json:"facetLimited,omitempty"`
@@ -62,16 +64,24 @@ type connectionsResponse struct {
 }
 
 type connectionTracker struct {
-	host        HostService
-	snapshotter daeconn.Snapshotter
-	store       *daeconn.Store
+	host          HostService
+	configuration ConfigurationService
+	snapshotter   daeconn.Snapshotter
+	store         *daeconn.Store
 }
 
-func registerConnectionRoutes(router *http.ServeMux, hostService HostService, snapshotter daeconn.Snapshotter) {
+func registerConnectionRoutes(
+	router *http.ServeMux,
+	hostService HostService,
+	configuration ConfigurationService,
+	snapshotter daeconn.Snapshotter,
+) {
 	if snapshotter == nil {
 		snapshotter = daeconn.NewProcSnapshotter()
 	}
-	tracker := &connectionTracker{host: hostService, snapshotter: snapshotter, store: daeconn.NewStore()}
+	tracker := &connectionTracker{
+		host: hostService, configuration: configuration, snapshotter: snapshotter, store: daeconn.NewStore(),
+	}
 	router.HandleFunc("GET /api/v1/connections", tracker.handle)
 }
 
@@ -120,10 +130,17 @@ func (tracker *connectionTracker) handle(writer http.ResponseWriter, request *ht
 	if snapshotAt.IsZero() {
 		snapshotAt = now
 	}
+	logLevel := ""
+	if tracker.configuration != nil {
+		if document, configErr := tracker.configuration.Read(request.Context()); configErr == nil {
+			logLevel = daeconfig.LogLevel(document.Content)
+		}
+	}
 	writeJSON(writer, http.StatusOK, connectionsResponse{
 		SnapshotAt:   snapshotAt,
 		SnapshotOK:   snapshotOK,
 		LogsOK:       logErr == nil,
+		LogLevel:     logLevel,
 		Dropped:      dropped,
 		Truncated:    storeTruncated || snapshot.Truncated || responseTruncated,
 		FacetLimited: facetLimited,

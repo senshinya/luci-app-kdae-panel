@@ -17,6 +17,7 @@ import {
   NSpin,
   NSwitch,
   NText,
+  useDialog,
   useMessage,
   type DataTableColumns,
   type DataTableSortState,
@@ -33,14 +34,17 @@ import { getJSON } from '../api/client'
 import { useMobileViewport } from '../composables/useMobileViewport'
 import type { ConnectionEvent, ConnectionFacet, ConnectionFacets, ConnectionsResponse } from '../types/api'
 import { formatDateTime, formatElapsedSince } from '../utils/format'
+import { updateDaeLogLevel } from '../utils/loglevel'
 
 const message = useMessage()
+const dialog = useDialog()
 const mobile = useMobileViewport()
 const data = ref<ConnectionsResponse | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 const autoRefresh = ref(true)
 const errorMessage = ref('')
+const logLevelSaving = ref(false)
 const search = ref('')
 const outbound = ref<string | null>(null)
 const network = ref<string | null>(null)
@@ -120,6 +124,14 @@ const filteredEntries = computed(() => {
 
 const mobileEntries = computed(() => filteredEntries.value.slice(0, mobileListCap))
 const endpointMaximum = computed(() => data.value?.endpoints[0]?.count ?? 1)
+const historySuppressed = computed(() => data.value?.logLevel === 'warn' || data.value?.logLevel === 'error')
+const emptyDescription = computed(() => {
+  if (historySuppressed.value) return '当前日志级别不记录连接建立流水'
+  if (data.value?.snapshotOk && ((summary.value?.outboundTcp ?? 0) > 0 || (summary.value?.udpSockets ?? 0) > 0)) {
+    return '所选时段没有新建连接；现有连接可能更早建立或正在复用'
+  }
+  return '所选时段没有新的连接建立日志'
+})
 
 function destinationTitle(event: ConnectionEvent): string {
   return event.sniffed || event.dst
@@ -281,6 +293,32 @@ async function load(silent = false) {
   }
 }
 
+async function enableConnectionHistory() {
+  logLevelSaving.value = true
+  try {
+    const result = await updateDaeLogLevel('info')
+    if (data.value) data.value.logLevel = 'info'
+    message.success(result.deferred
+      ? '日志级别已保存，dae 下次启动后开始记录连接流水'
+      : '日志级别已切换为 info，新的连接会出现在流水中')
+    await load(true)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '更新 dae 日志级别失败')
+  } finally {
+    logLevelSaving.value = false
+  }
+}
+
+function confirmConnectionHistory() {
+  dialog.warning({
+    title: '启用连接建立流水',
+    content: '这会把 global.log_level 切换为 info，保存前校验配置并在成功后重载 dae。',
+    positiveText: '切换为 info',
+    negativeText: '取消',
+    onPositiveClick: enableConnectionHistory,
+  })
+}
+
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible' && autoRefresh.value) void load(true)
 }
@@ -321,6 +359,12 @@ onBeforeUnmount(() => {
     <NAlert v-if="data?.truncated" type="info">部分连接明细或端点已截断；页面计数基于面板当前保留或扫描到的数据。</NAlert>
     <NAlert v-if="data?.facetLimited" type="info">分布维度过多，每个维度仅返回连接数最高的 200 项。</NAlert>
     <NAlert v-if="data?.dropped" type="warning">有 {{ data.dropped }} 条疑似连接日志无法解析，dae 的日志格式可能已经变化。</NAlert>
+    <NAlert v-if="historySuppressed" type="warning">
+      <div class="connection-log-level-alert">
+        <span>当前 dae 输出级别为 <code>{{ data?.logLevel }}</code>，不会产生连接建立流水；实时 socket 统计仍可使用。</span>
+        <NButton size="small" secondary :loading="logLevelSaving" @click="confirmConnectionHistory">切换为 info</NButton>
+      </div>
+    </NAlert>
 
     <section class="connection-pulse" aria-label="连接摘要">
       <div class="connection-pulse-primary">
@@ -440,7 +484,7 @@ onBeforeUnmount(() => {
             :pagination="{ pageSize: 50 }"
             @update:sorter="handleSorter"
           >
-            <template #empty><NEmpty class="empty-state" description="所选时段内没有连接记录" /></template>
+            <template #empty><NEmpty class="empty-state" :description="emptyDescription" /></template>
           </NDataTable>
 
           <NSpin v-else :show="loading">
@@ -474,7 +518,7 @@ onBeforeUnmount(() => {
                 移动端仅显示前 {{ mobileListCap }} 条，可用筛选缩小范围
               </NText>
             </div>
-            <NEmpty v-else class="mobile-empty" description="所选时段内没有连接记录" />
+            <NEmpty v-else class="mobile-empty" :description="emptyDescription" />
           </NSpin>
         </div>
       </div>
@@ -486,16 +530,19 @@ onBeforeUnmount(() => {
       height="78vh"
     >
       <NDrawerContent title="活动分布" closable :native-scrollbar="false">
-        <NRadioGroup
-          :value="facetDimension"
-          size="small"
-          class="connection-facet-drawer-modes"
-          @update:value="changeFacetDimension"
-        >
-          <NRadioButton v-for="option in facetOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </NRadioButton>
-        </NRadioGroup>
+        <div class="connection-facet-drawer-modes" role="group" aria-label="活动分布维度">
+          <button
+            v-for="option in facetOptions"
+            :key="option.value"
+            type="button"
+            :class="{ active: facetDimension === option.value }"
+            :aria-pressed="facetDimension === option.value"
+            @click="changeFacetDimension(option.value)"
+          >
+            <span>{{ option.label }}</span>
+            <strong>{{ data?.facets[option.value].length ?? 0 }}</strong>
+          </button>
+        </div>
         <NText depth="3" class="connection-drawer-description">选择一项后会筛选下方连接流水</NText>
         <div v-if="facetItems.length" class="connection-facet-drawer-list">
           <button

@@ -13,6 +13,7 @@ import {
   NSpin,
   NTag,
   NText,
+  useDialog,
   useMessage,
 } from 'naive-ui'
 import { RefreshOutline, SearchOutline } from '@vicons/ionicons5'
@@ -20,8 +21,15 @@ import { getJSON } from '../api/client'
 import type { LogEntry } from '../types/api'
 import { formatDateTime } from '../utils/format'
 import { useBackendStore } from '../stores/backend'
+import {
+  DAE_LOG_LEVEL_OPTIONS,
+  loadDaeLogLevel,
+  updateDaeLogLevel,
+  type DaeLogLevel,
+} from '../utils/loglevel'
 
 const message = useMessage()
+const dialog = useDialog()
 // procd 部署读的是 logread 的系统日志缓冲区，既没有 journald 也没有 systemd
 // 单元；标题照抄 systemd 那套，用户会去找一个本机不存在的东西。
 const backend = useBackendStore()
@@ -35,15 +43,19 @@ const storedLevel = window.sessionStorage.getItem(levelStorageKey)
 const level = ref<string | null>(storedLevel && levelValues.has(storedLevel) ? storedLevel : null)
 const limit = ref(200)
 const errorMessage = ref('')
+const outputLevel = ref<DaeLogLevel | null>(null)
+const outputLevelDraft = ref<DaeLogLevel>('info')
+const outputLevelLoading = ref(true)
+const outputLevelSaving = ref(false)
 let timer: number | undefined
 
 const levelOptions = [
-  { label: '全部级别', value: '' },
-  { label: '错误', value: 'error' },
-  { label: '警告', value: 'warning' },
-  { label: '信息', value: 'info' },
-  { label: '调试', value: 'debug' },
-  { label: '跟踪', value: 'trace' },
+  { label: '显示全部记录', value: '' },
+  { label: '仅错误 · error', value: 'error' },
+  { label: '仅警告 · warning', value: 'warning' },
+  { label: '仅信息 · info', value: 'info' },
+  { label: '仅调试 · debug', value: 'debug' },
+  { label: '仅跟踪 · trace', value: 'trace' },
 ]
 
 const limitOptions = [100, 200, 300, 500].map((value) => ({ label: `${value} 条`, value }))
@@ -83,6 +95,47 @@ async function load(silent = false) {
   }
 }
 
+async function loadOutputLevel() {
+  outputLevelLoading.value = true
+  try {
+    outputLevel.value = await loadDaeLogLevel()
+    if (outputLevel.value) outputLevelDraft.value = outputLevel.value
+  } catch (error) {
+    outputLevel.value = null
+    message.error(error instanceof Error ? error.message : '读取 dae 输出级别失败')
+  } finally {
+    outputLevelLoading.value = false
+  }
+}
+
+async function applyOutputLevel() {
+  outputLevelSaving.value = true
+  try {
+    const result = await updateDaeLogLevel(outputLevelDraft.value)
+    outputLevel.value = outputLevelDraft.value
+    message.success(result.deferred
+      ? '输出级别已保存，dae 下次启动时生效'
+      : result.changed ? '输出级别已保存并重载 dae' : '输出级别没有变化')
+    await load(true)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '更新 dae 输出级别失败')
+    await loadOutputLevel()
+  } finally {
+    outputLevelSaving.value = false
+  }
+}
+
+function confirmOutputLevel() {
+  if (outputLevelDraft.value === outputLevel.value) return
+  dialog.warning({
+    title: '修改 dae 输出级别',
+    content: `将输出级别切换为 ${outputLevelDraft.value}，保存前会校验配置，成功后重载 dae。`,
+    positiveText: '保存并重载',
+    negativeText: '取消',
+    onPositiveClick: applyOutputLevel,
+  })
+}
+
 function schedule() {
   window.clearInterval(timer)
   timer = window.setInterval(() => {
@@ -93,6 +146,7 @@ function schedule() {
 onMounted(() => {
   void backend.ensure()
   void load()
+  void loadOutputLevel()
   schedule()
 })
 onBeforeUnmount(() => window.clearInterval(timer))
@@ -117,12 +171,36 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
     <NAlert v-if="errorMessage" type="error" closable @close="errorMessage = ''">{{ errorMessage }}</NAlert>
 
+    <section class="log-level-control" aria-label="dae 输出级别">
+      <div class="log-level-status">
+        <NText strong>dae 输出级别</NText>
+        <NTag size="small" :type="outputLevel ? 'info' : 'warning'" :bordered="false">
+          {{ outputLevelLoading ? '读取中' : outputLevel || '无法识别' }}
+        </NTag>
+      </div>
+      <div class="log-level-actions">
+        <NSelect
+          v-model:value="outputLevelDraft"
+          :options="DAE_LOG_LEVEL_OPTIONS"
+          :disabled="outputLevelLoading || outputLevelSaving"
+          aria-label="选择 dae 输出级别"
+          class="log-output-select"
+        />
+        <NButton
+          secondary
+          :loading="outputLevelSaving"
+          :disabled="outputLevelLoading || outputLevelDraft === outputLevel"
+          @click="confirmOutputLevel"
+        >应用并重载</NButton>
+      </div>
+    </section>
+
     <NCard class="logs-card" content-style="padding: 0;">
       <div class="filter-bar">
         <NInput v-model:value="search" clearable placeholder="搜索日志内容" class="log-search">
           <template #prefix><NIcon><SearchOutline /></NIcon></template>
         </NInput>
-        <NSelect v-model:value="level" clearable :options="levelOptions" placeholder="全部级别" class="log-select" />
+        <NSelect v-model:value="level" clearable :options="levelOptions" placeholder="显示全部记录" aria-label="日志显示级别" class="log-select" />
         <NSelect v-model:value="limit" :options="limitOptions" class="log-limit" @update:value="load()" />
         <NText depth="3">最新在前 · 显示 {{ filteredEntries.length }} / {{ entries.length }}</NText>
       </div>

@@ -775,6 +775,43 @@ pre,
   width: 110px;
 }
 
+.log-level-control,
+.log-level-status,
+.log-level-actions {
+  display: flex;
+  align-items: center;
+}
+
+.log-level-control {
+  min-height: 58px;
+  padding: 10px 14px;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+.log-level-status,
+.log-level-actions {
+  gap: 10px;
+}
+
+.log-output-select {
+  width: 170px;
+}
+
+.connection-log-level-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.connection-log-level-alert > span {
+  min-width: 0;
+}
+
 .connection-refresh-controls,
 .connection-auto-refresh {
   display: flex;
@@ -1108,11 +1145,48 @@ pre,
   width: 100%;
   margin-bottom: 18px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.connection-facet-drawer-modes .n-radio-button {
-  width: 100%;
+.connection-facet-drawer-modes button {
+  min-width: 0;
+  min-height: 42px;
+  padding: 8px 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.connection-facet-drawer-modes button:hover,
+.connection-facet-drawer-modes button:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text-bright);
+}
+
+.connection-facet-drawer-modes button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.connection-facet-drawer-modes button.active {
+  color: var(--text-bright);
+  background: var(--accent-wash);
+  border-color: var(--accent-soft);
+}
+
+.connection-facet-drawer-modes button strong {
+  color: var(--accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .connection-facet-drawer-list {
@@ -1133,7 +1207,7 @@ pre,
 
 .connections-table {
   --n-td-color-sorting: var(--bg-raised) !important;
-  --n-th-color-sorting: var(--bg-subtle) !important;
+  --n-th-color-sorting: var(--accent-wash) !important;
 }
 
 .connections-table .n-data-table-td {
@@ -2703,6 +2777,33 @@ pre,
   .log-select,
   .log-limit {
     width: auto;
+  }
+
+  .log-level-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .log-level-status {
+    justify-content: space-between;
+  }
+
+  .log-level-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .log-output-select {
+    width: auto;
+  }
+
+  .connection-log-level-alert {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .connection-log-level-alert .n-button {
+    width: 100%;
   }
 
   .filter-bar > .n-text {

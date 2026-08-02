@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/auth"
+	"github.com/tuoro/kdae-panel/internal/configstore"
 	"github.com/tuoro/kdae-panel/internal/daeconn"
 	"github.com/tuoro/kdae-panel/internal/host"
 )
@@ -50,9 +51,10 @@ func TestConnectionsEndpoint(t *testing.T) {
 		Endpoints:   map[string]int{"203.0.113.9:443": 1, "203.0.113.8:443": 3},
 	}}
 	application, err := NewWithDependencies(Config{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Dependencies{
-		Dae:         stubDaeService{},
-		Host:        hostService,
-		Connections: snapshotter,
+		Dae:           stubDaeService{},
+		Host:          hostService,
+		Configuration: stubConfigurationService{document: configstore.Document{Content: "global { log_level: warn }"}},
+		Connections:   snapshotter,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +70,7 @@ func TestConnectionsEndpoint(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if snapshotter.pid != 42 || !response.SnapshotOK || !response.LogsOK || response.Summary.OutboundTCP != 2 ||
+	if snapshotter.pid != 42 || !response.SnapshotOK || !response.LogsOK || response.LogLevel != "warn" || response.Summary.OutboundTCP != 2 ||
 		response.Summary.UDPSockets != 1 || response.Summary.WindowEvents != 2 ||
 		response.Summary.WindowClients != 1 || response.Summary.WindowTargets != 1 {
 		t.Fatalf("响应概况异常: %+v, pid=%d", response, snapshotter.pid)
