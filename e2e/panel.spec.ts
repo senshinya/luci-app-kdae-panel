@@ -862,6 +862,49 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/logs?*')
   })
 
+  await test.step('连接活动页对账存活状态并支持按活跃时间排序', async () => {
+    const reference = Date.now()
+    const at = (secondsAgo: number) => new Date(reference - secondsAgo * 1000).toISOString()
+    await page.route('**/api/v1/connections?*', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        snapshotAt: at(0),
+        snapshotOk: true,
+        logLevel: 'info',
+        summary: { liveTcp: 3, tcpSockets: 5, udpSockets: 2, windowEvents: 5 },
+        entries: [
+          { firstSeen: at(42), network: 'tcp4', src: '192.168.10.24:52144', dst: 'www.youtube.com:443', dstAddr: '142.250.66.78:443', sniffed: 'www.youtube.com', outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01', status: 'live' },
+          { firstSeen: at(96), network: 'udp4', src: '192.168.10.31:50012', dst: 'stun.example.com:3478', dstAddr: '203.0.113.40:3478', outbound: 'proxy', dialer: 'demo-sg', status: 'unknown' },
+          { firstSeen: at(133), network: 'tcp4', src: '192.168.10.24:52102', dst: 'api.github.com:443', dstAddr: '20.205.243.168:443', sniffed: 'api.github.com', outbound: 'proxy', dialer: 'demo-us', policy: 'min_moving_avg', mac: 'aa:bb:cc:dd:ee:01', status: 'closed' },
+          { firstSeen: at(214), network: 'tcp4', src: '192.168.10.60:41208', dst: 'www.bilibili.com:443', dstAddr: '119.3.70.188:443', sniffed: 'www.bilibili.com', outbound: 'direct', policy: 'fixed', mac: 'aa:bb:cc:dd:ee:02', status: 'live' },
+          { firstSeen: at(390), network: 'tcp4', src: '192.168.10.24:51830', dst: 'cdn.jsdelivr.net:443', dstAddr: '104.16.85.20:443', sniffed: 'cdn.jsdelivr.net', outbound: 'proxy', dialer: 'demo-sg', offloaded: true, status: 'unknown' },
+          { firstSeen: at(1740), network: 'tcp', src: '192.168.10.87:39644', dst: '34.107.243.93:443', dstAddr: '34.107.243.93:443', outbound: '', status: 'orphan', approxFirstSeen: true },
+        ],
+      }),
+    }))
+    await page.goto('/connections')
+    await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
+    await expect(page.getByText('存活 TCP 连接')).toBeVisible()
+    const rows = page.locator('.n-data-table-tbody .n-data-table-tr')
+    // 默认"存活中"视图只收 live 与 orphan
+    await expect(rows).toHaveCount(3)
+    await expect(rows.first()).toContainText('www.youtube.com')
+    await expect(rows.last()).toContainText('存活 · 无日志')
+    // 点表头翻转为最早在前
+    await page.locator('.n-data-table-th').filter({ hasText: '活跃时间' }).click()
+    await expect(rows.first()).toContainText('34.107.243.93')
+    await page.locator('.n-data-table-th').filter({ hasText: '活跃时间' }).click()
+    await expect(rows.first()).toContainText('www.youtube.com')
+    // 切到"全部活动"能看到已结束与 UDP 记录
+    await page.locator('.n-radio-button', { hasText: '全部活动' }).click()
+    await expect(rows).toHaveCount(6)
+    await expect(page.getByText('已结束')).toBeVisible()
+    await expect(page.getByText('UDP · 不判定')).toBeVisible()
+    await page.locator('.n-radio-button', { hasText: '存活中' }).click()
+    await capture(page, 'connections.png', 1600, 900)
+    await page.unroute('**/api/v1/connections?*')
+  })
+
   await test.step('故障诊断中心聚合公开检查并提供操作建议', async () => {
     await page.route('**/api/v1/diagnostics/report', (route) => route.fulfill({
       contentType: 'application/json',

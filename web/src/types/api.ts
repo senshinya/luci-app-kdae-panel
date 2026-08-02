@@ -375,3 +375,47 @@ export interface HealthStatus {
   version?: string
   backend?: string
 }
+
+/**
+ * GET /api/v1/connections 里单条连接记录的存活判定。
+ * live=四元组有对应 socket；closed=socket 已消失；unknown=无法判定
+ * （UDP、eBPF 卸载或快照失败）；orphan=socket 存活但建立日志已滚出窗口。
+ */
+export type ConnectionStatus = 'live' | 'closed' | 'unknown' | 'orphan'
+
+export interface ConnectionRecord {
+  firstSeen: string
+  network: string
+  src: string
+  dst: string
+  dstAddr?: string
+  sniffed?: string
+  outbound: string
+  dialer?: string
+  policy?: string
+  pname?: string
+  mac?: string
+  offloaded?: boolean
+  status: ConnectionStatus
+  /** firstSeen 是面板首次观测时刻而非日志时间，渲染成 "≥" 前缀。 */
+  approxFirstSeen?: boolean
+}
+
+export interface ConnectionsSummary {
+  liveTcp: number
+  tcpSockets: number
+  udpSockets: number
+  windowEvents: number
+}
+
+/** GET /api/v1/connections。entries 已按建立时刻倒序。 */
+export interface ConnectionsResponse {
+  snapshotAt: string
+  snapshotOk: boolean
+  logLevel?: string
+  dropped?: number
+  /** 有记录未被逐条列出（超过 limit 或入站腿超过快照上限）；summary 计数仍完整。 */
+  truncated?: boolean
+  summary: ConnectionsSummary
+  entries: ConnectionRecord[] | null
+}

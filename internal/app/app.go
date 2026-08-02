@@ -378,6 +378,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	})
 	registerConfigurationRoutes(router, dependencies.Configuration, operations)
 	registerServiceRoutes(router, dependencies.Dae, dependencies.Host, operations)
+	registerConnectionRoutes(router, dependencies.Host, dependencies.Configuration)
 	registerProbeRoutes(router, dependencies.Probe, logger)
 	registerSubscriptionNodeRoutes(router, dependencies.SubscriptionNodes)
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/command"
+	"github.com/tuoro/kdae-panel/internal/logfmt"
 )
 
 // initDirectory 是 procd 读取服务定义的目录。做成变量是给测试留的缝。
@@ -418,6 +419,7 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	// dae 自己输出 logfmt。把 level/msg 提到结构化字段上，日志页的级别筛选
 	// 才对 dae 的日志同样有效，而不是只对 procd 的封装层有效。
 	if priority, level, text, ok := parseLogfmt(entry.Message); ok {
+		entry.Raw = entry.Message
 		entry.Level = level
 		entry.Priority = priority
 		entry.Message = text
@@ -527,36 +529,12 @@ func logreadLevel(prefix string) (int, string, bool) {
 // parseLogfmt 从 dae 的 `level=… msg="…"` 里取出级别与正文，级别已归一。
 // 两者缺一、或级别名不认识，就当作不是 logfmt，保留原始整行。
 func parseLogfmt(message string) (int, string, string, bool) {
-	var level, text string
-	var foundLevel, foundText bool
-	rest := strings.TrimSpace(message)
-	for rest != "" {
-		name, remainder, found := strings.Cut(rest, "=")
-		if !found {
-			break
-		}
-		name = strings.TrimSpace(name)
-		if strings.ContainsAny(name, " \t") {
-			break
-		}
-		var value string
-		if strings.HasPrefix(remainder, `"`) {
-			quoted, tail, closed := strings.Cut(remainder[1:], `"`)
-			if !closed {
-				break
-			}
-			value, rest = quoted, strings.TrimSpace(tail)
-		} else {
-			value, rest, _ = strings.Cut(remainder, " ")
-			rest = strings.TrimSpace(rest)
-		}
-		switch name {
-		case "level":
-			level, foundLevel = value, true
-		case "msg":
-			text, foundText = value, true
-		}
+	fields, ok := logfmt.Parse(message)
+	if !ok {
+		return 0, "", "", false
 	}
+	level, foundLevel := fields["level"]
+	text, foundText := fields["msg"]
 	if !foundLevel || !foundText {
 		return 0, "", "", false
 	}

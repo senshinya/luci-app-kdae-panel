@@ -2430,3 +2430,41 @@ pre,
     flex-direction: column;
   }
 }
+
+/* ---- 连接活动页 ---- */
+
+/* 表格单元里的第二行：进程/MAC、持续时长、真实目的地址等次要信息。 */
+.conn-secondary {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.connections-page .filter-bar {
+  row-gap: 10px;
+}
+
+.conn-mobile-destination {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conn-mobile-cap {
+  display: block;
+  padding: 12px 14px;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 767px) {
+  .connections-page .filter-bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .connections-page .filter-bar > .n-radio-group,
+  .connections-page .filter-bar > .n-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
