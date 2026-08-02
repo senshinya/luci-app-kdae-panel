@@ -71,6 +71,14 @@ textarea {
   background: transparent;
 }
 
+/* 桌面端把外壳钉死在一屏内：侧边栏不再跟着页面滚走，滚动全部交给右侧内容区自己的
+   滚动容器。移动端没有 sider，继续用文档滚动——100vh 在移动浏览器上会随地址栏抖。 */
+@media (min-width: 768px) {
+  .app-shell {
+    height: 100vh;
+  }
+}
+
 .brand {
   height: 82px;
   display: flex;

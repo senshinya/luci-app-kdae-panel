@@ -18,14 +18,15 @@ const UPDATE_SCREENSHOTS = process.env.UPDATE_README_SCREENSHOTS === 'true'
 async function capture(page: import('@playwright/test').Page, name: string, width: number, height: number) {
   if (!UPDATE_SCREENSHOTS) return
   await page.setViewportSize({ width, height })
-  await page.evaluate(() => window.scrollTo(0, 0))
-  const content = page.locator('.app-content > .n-layout-scroll-container')
-  if (await content.count()) {
-    await content.evaluate((element) => {
+  // 桌面布局把外壳钉在一屏内，滚的是布局自己的容器而不是文档；具体哪一层在滚
+  // 取决于内容高度，逐个归零最省心。
+  await page.evaluate(() => {
+    window.scrollTo(0, 0)
+    document.querySelectorAll('.n-layout-scroll-container').forEach((element) => {
       element.scrollTop = 0
       element.scrollLeft = 0
     })
-  }
+  })
   await expect(page.locator('.n-message:visible')).toHaveCount(0, { timeout: 6_000 })
   await page.screenshot({
     path: join(here, '..', 'docs', 'screenshots', name),
