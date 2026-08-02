@@ -99,13 +99,42 @@ jobs:
             upload_luci: false
 
     steps:
-      # fetch-depth: 0 不能删：下面的「计算软件包版本」用 git rev-list --count HEAD
-      # 作为单调递增的构建号，浅克隆下它恒等于 1，每次 push 的版本号就都一样了。
-      # 面板版本还要用 git describe 找出所基于的 tag，浅克隆下一个 tag 都取不到，
-      # scripts/panel-version.sh 会直接失败。
+      # fetch-depth: 0 不能删：scripts/panel-version.sh 要在可达 tag 里挑版本号最高的那个，
+      # 再用 git rev-list --count 数出领先它多少个提交作为单调递增的构建号。浅克隆下一个
+      # tag 都取不到，脚本会直接失败（这是有意的：默默退回一个没有 tag 的版本号，
+      # 产出的包会被 opkg 判成降级，而 LuCI 的软件包页面没有入口能强装）。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      # 包的 control/元数据里只有包名和版本这两样能被 opkg 与 apk 看见。两次 Release 附上
+      # 同名同版本的包，opkg 会打印 "installed in root is up to date"、退出码 0、什么都不做，
+      # 用户以为升级成功却还跑着旧二进制——而 procd 部署刻意没有面板自升级，软件包是唯一
+      # 通道。因此版本必须随发布走。
+      #
+      # 三种格式（面板 semver、ipk、apk）都由 scripts/panel-version.sh 一处算出：两处各写
+      # 各的正是上一次形状漂移的成因，而症状只在用户的路由器上看得见。规则连同它的理由
+      # 写在脚本里，并由 internal/app 的 TestPanelBinaryVersionsAreComparable 与
+      # TestPackageVersionsInstallOverEachOther 钉住——后者按 dpkg 与 apk-tools 各自的
+      # 比较规则断言"后构建的包一定装得到先构建的包上面"。版本号不合约定时脚本自己退非零。
+      #
+      # 这一步必须排在构建前端之前：包版本拒绝从脏工作区生成（版本号里没有位置如实表达
+      # "这不是某个提交的内容"），而 npm run build 会写进 internal/webui/dist。
+      - name: 计算软件包版本
+        run: |
+          # 发布路径有两条：release.yml 调用时把 tag 从 inputs.version 传进来；
+          # 手工在网页上建 release 时走 release 事件，tag 在 GITHUB_REF_NAME 里。
+          release_ref="${{ inputs.version }}"
+          if [ -z "${release_ref}" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            release_ref="${GITHUB_REF_NAME}"
+          fi
+          version="$(sh scripts/panel-version.sh --format=${{ matrix.format }} "${release_ref}")"
+          echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "软件包版本 ${version}"
+
+          binary_version="$(sh scripts/panel-version.sh "${release_ref}")"
+          echo "KDAE_PANEL_BINARY_VERSION=${binary_version}" >> "${GITHUB_ENV}"
+          echo "面板版本 ${binary_version}"
 
       # 与 ci.yml 钉同一个版本：两条流水线用不同 Go 编出来的二进制会有差异，
       # 而 ci.yml 已经用 git diff --exit-code 锁死了嵌入资源，版本漂移只会制造噪声。
@@ -123,74 +152,6 @@ jobs:
         run: |
           npm ci --prefix web
           npm run build --prefix web
-
-      # 包的 control/元数据里只有包名和版本这两样能被 opkg 与 apk 看见。两次 Release 附上
-      # 同名同版本的包，opkg 会打印 "installed in root is up to date"、退出码 0、什么都不做，
-      # 用户以为升级成功却还跑着旧二进制——而 procd 部署刻意没有面板自升级，软件包是唯一
-      # 通道。因此版本必须随发布走。
-      #
-      # 非 release 触发（push/pull_request/workflow_dispatch）时 GITHUB_REF_NAME 是分支名
-      # 或 "123/merge"，不是版本号，退回 0.0.1 打头的构建版本：它排在任何正式版本之前
-      # （比到第二段就是 0 < 8），手动构建的产物因此不会盖住正式发布。
-      #
-      # 用 0.0.1 而不是 0.0.0，是为了盖过历史上那批 0.0.0+<纯短哈希> 的产物。数字打头的
-      # 字符串首个非数字块是空的，而空排在任何字母之前，所以 0.0.0+124.abcdefg 反倒小于
-      # 0.0.0+fe515cb——不抬这一位的话，装第一个新方案的包仍会被判成降级，而 LuCI 的软件包
-      # 页面没有任何入口能传 --force-downgrade。
-      #
-      # 后缀里必须先放 commit 数，不能只放短哈希。opkg 用的是 dpkg 那套比较规则，字母排在
-      # 数字之前：fe515cb 和 f961b58 比到第二位是 e vs 9，字母优先，于是 fe515cb 反而"更大"。
-      # 两次 push 谁算升级完全取决于哈希长什么样，装的时候会撞上 "Not downgrading package …"。
-      # commit 数是单调的，数字段又按数值比较，这才让「后一次 push 的包一定算升级」成立。
-      #
-      # 两种包格式的版本语法不同，非 release 构建必须分叉：apk 的版本语法是
-      # digit{.digit}...{letter}{_suf{#}}...{~hash}{-r#}（apk-tools src/version.c），"+" 不在
-      # 其中。改用 _git<commit数>~<短哈希>：_git 是后置后缀，0.0.1_git124 排在 0.0.1 之后但
-      # 仍远低于任何 0.8.x；commit 数落在 _suf{#} 的数字段上，按数值比较，单调性照旧成立。
-      # release 事件下两种格式拿到的是同一个纯 tag 版本号，不分叉。
-      - name: 计算软件包版本
-        run: |
-          # 发布路径有两条：release.yml 调用时把 tag 从 inputs.version 传进来；
-          # 手工在网页上建 release 时走 release 事件，tag 在 GITHUB_REF_NAME 里。
-          release_ref="${{ inputs.version }}"
-          if [ -z "${release_ref}" ] && [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            release_ref="${GITHUB_REF_NAME}"
-          fi
-          if [ -n "${release_ref}" ]; then
-            version="${release_ref#v}"
-            # 预发布 tag（v1.0.0-rc1）的后缀两种格式都不能原样用：
-            # opkg 按 dpkg 规则比较，1.0.0-rc1 排在 1.0.0 之后，装过 RC 的机器再装正式版
-            # 会被判成降级（而 LuCI 软件包页没有 --force-downgrade 的入口）；dpkg 里表示
-            # "排在前面"的记号是 ~。
-            # apk 的文法里 - 只能引出 -r<数字> 修订号，1.0.0-rc1 是非法版本，mkpkg 会拒绝；
-            # 它认的是 _rc1 这种后缀，同样排在 1.0.0 之前。
-            # 因此预发布 tag 的后缀要写成 apk 认识的形式且不含点：rc1、beta2，不要 rc.1。
-            case "${version}" in
-              *-*)
-                if [ "${{ matrix.format }}" = "apk" ]; then
-                  version="${version%%-*}_${version#*-}"
-                else
-                  version="${version%%-*}~${version#*-}"
-                fi
-                ;;
-            esac
-          elif [ "${{ matrix.format }}" = "apk" ]; then
-            version="0.0.1_git$(git rev-list --count HEAD)~$(git rev-parse --short HEAD)"
-          else
-            version="0.0.1+$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
-          fi
-          echo "KDAE_PANEL_VERSION=${version}" >> "${GITHUB_ENV}"
-          echo "软件包版本 ${version}"
-
-          # 编进二进制的版本号必须单独算，不能复用上面那个：ipk 的 0.0.1+124.abcdef 与
-          # apk 的 0.0.1_git124~abcdef 都不是 semver，两种格式还不一样，编出来的二进制
-          # 会因打包格式而异。规则连同它的理由写在 scripts/panel-version.sh 里，
-          # 与 Makefile 共用一份实现（形状漂移过一次，症状只在用户的路由器上看得见），
-          # 并由 internal/app 的 TestPanelBinaryVersionsAreComparable 钉住。
-          # 非 semver 时脚本自己退非零，这一步跟着失败。
-          binary_version="$(sh scripts/panel-version.sh "${release_ref}")"
-          echo "KDAE_PANEL_BINARY_VERSION=${binary_version}" >> "${GITHUB_ENV}"
-          echo "面板版本 ${binary_version}"
 
       # 纯 Go 依赖（modernc sqlite），CGO_ENABLED=0 出来的静态二进制在 musl 上直接可跑。
       # 不在 SDK 里从源码编译：本项目要求 Go 1.25，24.10 feed 里的 golang 到不了。
