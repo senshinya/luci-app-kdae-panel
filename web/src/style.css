@@ -71,11 +71,27 @@ textarea {
   background: transparent;
 }
 
-/* 桌面端把外壳钉死在一屏内：侧边栏不再跟着页面滚走，滚动全部交给右侧内容区自己的
-   滚动容器。移动端没有 sider，继续用文档滚动——100vh 在移动浏览器上会随地址栏抖。 */
+/* 桌面端把外壳钉死在一屏内：侧边栏和顶栏都不再跟着页面滚走，滚动收敛到 .app-content
+   自己的滚动容器里。移动端没有 sider，继续用文档滚动——100vh 在移动浏览器上会随
+   地址栏抖。 */
 @media (min-width: 768px) {
   .app-shell {
     height: 100vh;
+  }
+
+  .app-main {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app-main > .app-header {
+    flex: 0 0 auto;
+  }
+
+  /* n-layout 自带 flex: auto，这里只需解开 min-height：默认的 auto 会让内容区
+     撑到自然高度，滚动又会跑回外层去 */
+  .app-main > .app-content {
+    min-height: 0;
   }
 }
 

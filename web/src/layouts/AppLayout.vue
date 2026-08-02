@@ -177,7 +177,9 @@ onBeforeUnmount(() => {
       </NDrawerContent>
     </NDrawer>
 
-    <NLayout>
+    <!-- content-class 落到 naive-ui 自己的滚动容器上：桌面端要在这一层把顶栏钉住，
+         把滚动交给下面的 .app-content，否则唯一能挂样式的就是 naive-ui 的内部类名 -->
+    <NLayout content-class="app-main">
       <NLayoutHeader bordered class="app-header">
         <div class="app-header-leading">
           <NButton
