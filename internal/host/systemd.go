@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/command"
+	"github.com/tuoro/kdae-panel/internal/logfmt"
 )
 
 const (
 	defaultTimeout = 30 * time.Second
 	actionTimeout  = 150 * time.Second
-	maxLogLines    = 500
+	// MaxLogLines 是单次 journald 查询允许返回的最大行数。
+	MaxLogLines = 500
 )
 
 type systemdManager struct {
@@ -242,8 +244,8 @@ func (m *systemdManager) Logs(ctx context.Context, limit int) ([]LogEntry, error
 	if limit <= 0 {
 		limit = 200
 	}
-	if limit > maxLogLines {
-		limit = maxLogLines
+	if limit > MaxLogLines {
+		limit = MaxLogLines
 	}
 	result, err := m.run(
 		ctx,
@@ -315,15 +317,10 @@ func parseJournal(output string) ([]LogEntry, error) {
 // dae 把日志写到标准输出时，journald 通常会把所有行都记成 info；只看 PRIORITY
 // 会把真实的 debug / warning / error 全部误判，前端按级别筛选也就失去意义。
 func logLevel(message string, journalPriority int) (int, string) {
-	const prefix = "level="
-	trimmed := strings.TrimSpace(message)
-	if strings.HasPrefix(trimmed, prefix) {
-		fields := strings.Fields(trimmed[len(prefix):])
-		if len(fields) == 0 {
-			return journalPriority, priorityLevel(journalPriority)
-		}
-		value := strings.Trim(fields[0], `"`)
-		if priority, level, ok := canonicalLevel(value); ok {
+	// 解析用上游的 logfmt.Parse，级别归一仍走 canonicalLevel：两个服务后端必须
+	// 共用同一张表，否则同一条 dae 日志在 systemd 和 procd 下会落进不同的桶。
+	if fields, ok := logfmt.Parse(message); ok {
+		if priority, level, ok := canonicalLevel(fields["level"]); ok {
 			return priority, level
 		}
 	}

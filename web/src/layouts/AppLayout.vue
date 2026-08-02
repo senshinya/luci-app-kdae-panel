@@ -30,6 +30,7 @@ import {
   PulseOutline,
   ReaderOutline,
   SettingsOutline,
+  SwapHorizontalOutline,
 } from '@vicons/ionicons5'
 import { getJSON } from '../api/client'
 import type { PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
@@ -59,6 +60,7 @@ function menuLink(label: string, name: string, icon: typeof GridOutline): MenuOp
 
 const menuOptions: MenuOption[] = [
   menuLink('运行概览', 'dashboard', GridOutline),
+  menuLink('连接活动', 'connections', SwapHorizontalOutline),
   menuLink('代理编排', 'orchestration', GitNetworkOutline),
   menuLink('配置管理', 'config', DocumentTextOutline),
   menuLink('配置能力', 'schema', CodeSlashOutline),

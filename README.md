@@ -6,31 +6,35 @@
 
 ## 界面预览
 
-| 运行概览 | 代理编排 |
+| 运行概览 | 连接活动 |
 | :--: | :--: |
-| ![运行概览](docs/screenshots/dashboard.png) | ![代理编排](docs/screenshots/orchestration.png) |
+| ![运行概览](docs/screenshots/dashboard.png) | ![连接活动](docs/screenshots/connections.png) |
 
-| 配置管理 | 动态配置能力 |
+| 代理编排 | 配置管理 |
 | :--: | :--: |
-| ![配置管理](docs/screenshots/config.png) | ![动态配置能力](docs/screenshots/schema.png) |
+| ![代理编排](docs/screenshots/orchestration.png) | ![配置管理](docs/screenshots/config.png) |
 
-| dae 版本管理 | Geo 数据管理 |
+| 动态配置能力 | dae 版本管理 |
 | :--: | :--: |
-| ![dae 版本管理](docs/screenshots/versions.png) | ![Geo 数据管理](docs/screenshots/geo.png) |
+| ![动态配置能力](docs/screenshots/schema.png) | ![dae 版本管理](docs/screenshots/versions.png) |
 
-| 故障诊断 | 运行日志 |
+| Geo 数据管理 | 故障诊断 |
 | :--: | :--: |
-| ![故障诊断](docs/screenshots/diagnostics.png) | ![运行日志](docs/screenshots/logs.png) |
+| ![Geo 数据管理](docs/screenshots/geo.png) | ![故障诊断](docs/screenshots/diagnostics.png) |
 
-| 配置备份 | 面板设置 |
+| 运行日志 | 配置备份 |
 | :--: | :--: |
-| ![配置备份](docs/screenshots/backups.png) | ![面板设置](docs/screenshots/settings.png) |
+| ![运行日志](docs/screenshots/logs.png) | ![配置备份](docs/screenshots/backups.png) |
 
-| 首次设置 | 登录 |
+| 面板设置 | 首次设置 |
 | :--: | :--: |
-| ![首次设置](docs/screenshots/setup.png) | ![登录](docs/screenshots/login.png) |
+| ![面板设置](docs/screenshots/settings.png) | ![首次设置](docs/screenshots/setup.png) |
 
-*截图由 v1.0.0 当前代码的 Playwright 演示环境生成，页面状态、节点、订阅、日志、诊断与延迟均为示例数据。*
+| 登录 | 移动端连接活动 |
+| :--: | :--: |
+| ![登录](docs/screenshots/login.png) | ![移动端连接活动](docs/screenshots/connections-mobile.png) |
+
+*截图由当前代码的 Playwright 演示环境生成，页面状态、连接、节点、订阅、日志、诊断与延迟均为示例数据。*
 
 ## 功能
 
@@ -43,6 +47,7 @@
 - 独立的 Geo 数据管理页：一键更新、文件状态与路径、异常事务恢复、每天到每 30 天的定时更新；内置 Loyalsoldier 与 v2fly，也可保存多组自定义公网 HTTPS 直链；两个文件逐一校验 SHA-256，即使分处不同目录也各自原位更新并共同回滚，运行中按服务后端记录的 PID reload，未运行则在下次启动时生效，来源沿用上次且绝不静默切换规则集；
 - 面板自身的新版本提醒：读取本仓库最新发布并长时缓存，设置页支持立即检查；
 - 节点入口延迟探测：公网使用不经过 dae TCP/UDP 转发的 ICMP 三次中位数，内网使用 TCP；不靠延迟阈值猜测，也不以可能经过当前代理的结果兜底；
+- 连接活动：以 dae 的 info 日志展示最近 24 小时内有界的连接建立流水（源、目的、嗅探域名、出站、节点、策略、进程和 MAC），同时把 dae 当前持有的 TCP socket 按远端地址聚合；两种口径分别呈现，不读取内部 eBPF Map，也不伪造逐条存活状态、流量或速率；
 - 原始配置编辑、独立校验、并发冲突检测和事务保存；
 - 保存前备份、原子替换及重载失败后的磁盘回滚；
 - 配置历史存档：可为当前配置保存名称和备注，恢复前展示与当前配置的逐行差异，并用当前 dae 预先校验兼容性；不兼容存档禁止恢复，真正恢复时仍再次校验并受乐观锁保护；存档支持原文导出、单份删除和多选批量删除，自动备份仍按 50 份、256 MiB 上限自动清理；

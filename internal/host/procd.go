@@ -360,8 +360,8 @@ func (m *procdManager) Logs(ctx context.Context, limit int) ([]LogEntry, error) 
 	if limit <= 0 {
 		limit = 200
 	}
-	if limit > maxLogLines {
-		limit = maxLogLines
+	if limit > MaxLogLines {
+		limit = MaxLogLines
 	}
 	result, err := m.run(ctx, "logread", "-e", m.serviceName)
 	if err != nil {

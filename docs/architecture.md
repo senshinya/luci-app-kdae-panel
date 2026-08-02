@@ -12,7 +12,8 @@ kdae-panel
   ├── dae 适配：固定参数调用公开 CLI
   ├── 服务管理：systemctl（procd 部署下是 ubus + init 脚本，见「服务后端」）
   ├── 日志读取：journalctl JSON（procd 部署下是 logread，见「服务后端」）
-  ├── 网络探测：对节点服务器发起 TCP 握手
+  ├── 连接活动：连接建立流水与 /proc 出站端点分布
+  ├── 网络探测：对节点服务器发起 ICMP / TCP 探测
   └── 定时重载：按间隔触发 dae reload 以刷新订阅
         │
         ▼
@@ -35,6 +36,7 @@ kdae-panel
 | `.dae` 入口配置 | 配置的唯一真实来源 | 中 |
 | systemd 单元 / procd init 脚本 | 生命周期与资源状态 | 低 |
 | journald JSON / logread | 近期日志 | 低 |
+| Linux procfs socket 表 | dae 出站端点分布与 socket 计数 | 中 |
 
 默认启用的 dae 版本管理还会依赖四个外部契约，它们不属于 dae 本身，风险也更高：GitHub Release 的 `dae-linux-<平台>.zip` 与 `.dgst` 命名（中）、GitHub Actions 接口的 `digest` 字段（中）、`nightly.link` 的重定向服务（高，第三方），以及首次安装依赖的发布包内容——`dae.service` 里的默认路径 `/usr/bin/dae` 与 `/etc/dae/config.dae`，面板靠替换这两个字面量把单元改写到实际路径（中，仅 systemd 部署；procd 部署下这份服务定义由 `kdae-panel` 软件包提供，面板不写它，详见下方「服务后端」）。
 
@@ -236,6 +238,7 @@ Geo 管理是侧栏一级入口，由 `EnableGeoUpdate` 控制是否启用（默
 - 服务运行状态、PID、内存、本次运行时长、任务数和开机启动策略（systemd 与 procd 都拿得到；
   只有重启计数是 systemd 独有的，见「服务后端」）；
 - 服务日志（systemd 下是 journald，procd 下是 `logread`）；
+- 有边界的连接活动：日志提供连接建立流水，procfs 提供 dae 当前出站端点分布和 TCP/UDP socket 计数；
 - dae 版本、命令能力和配置结构；
 - sysdump gzip 诊断归档（在私有临时目录生成，读取后立即清理）；
 - 面板主机到节点服务器的入口延迟：公网使用 ICMP，内网使用 TCP（`POST /api/v1/net/latency`）。
@@ -244,15 +247,19 @@ Geo 管理是侧栏一级入口，由 `EnableGeoUpdate` 控制是否启用（默
 
 探测目标由管理员的配置决定，可能合法指向内网或回环地址，因此不做地址段过滤；约束来自端点的认证与 CSRF 校验，以及面板进程级的并发上限（16 个并发拨号，跨请求共享）。
 
+连接活动不是 dae 内部连接表。面板每次请求最多读取 500 行 journald，把 `info` 级别的连接建立事件保存在最多 2000 条、最长 24 小时的内存窗口中；面板重启后从当前日志窗口重新积累。另一条独立路径用 `/proc/<pid>/fd` 的 socket inode 流式过滤 `/proc/net/tcp{,6}` 与 `udp{,6}`，结果缓存 2 秒，只统计 dae 进程此刻持有的 socket；ESTABLISHED TCP 按远端 `IP:端口` 聚合。
+
+两条路径不能按四元组合并。dae 的透明代理客户端侧留在 eBPF 数据面，没有稳定可见的 userspace socket；直连流量可能连 dae 出站 socket 都不产生，而代理出站 socket 又会被多条客户端连接复用。标准 procfs 因此只能回答“dae 当前连接了哪些远端”，不能回答“某一条日志记录现在是否还活着”。页面与 API 分开呈现历史流水和实时端点，并让日志与 procfs 独立降级，不用近似值伪装精确状态。
+
 以下数据没有稳定公开接口，当前不伪造或解析内部实现：
 
-- 实时连接列表与 UDP 会话数；
+- 完整、无窗口缺口的实时连接表，以及逐条 TCP/UDP 存活状态；
 - 每条路由的命中统计；
 - dae 维度的精确流量与实时速率；
 - 内部 DNS 缓存；
 - 每个出站节点的真实运行时健康状态，以及 `min_*` 策略当前选中的节点。
 
-上游把这些数据放在进程内 Go API（`control.SnapshotRuntimeStats`、节点延迟探测）里，明确供 dae-wing 一类进程内消费者使用，没有对外的 socket 或 HTTP 端点。面板与 dae 分离运行，因此不去猜测这些数值。未来若 dae 提供稳定的只读接口，可以作为可选适配器接入，不影响现有 CLI 路径——届时先扩展能力探测与上游契约测试，再启用对应界面。
+上游把精确统计放在进程内 Go API（`control.SnapshotRuntimeStats`、节点延迟探测）里，明确供 dae-wing 一类进程内消费者使用，没有对外的 socket 或 HTTP 端点。面板与 dae 分离运行，因此只展示公开日志与标准内核接口能证明的部分。未来若 dae 提供稳定的只读接口，可以作为可选适配器接入，不影响现有 CLI 路径——届时先扩展能力探测与上游契约测试，再启用对应界面。
 
 ## 上游契约验证
 

@@ -332,6 +332,7 @@ ICMP ping socket 通常受系统的 `ping_group_range` 控制；发行单元同�
 | `POST` | `/service/actions/reload` | 运行中按服务后端记录的主进程号执行 `dae reload`；未运行则返回延后状态 |
 | `POST` | `/service/actions/suspend` | 执行 `dae suspend` |
 | `GET` | `/logs?limit=200` | 最近 1–500 条服务日志（systemd 后端读 journald，procd 后端读 `logread`） |
+| `GET` | `/connections?limit=500` | 连接建立流水与 dae 当前出站端点，条数范围 1–2000 |
 
 所有动作名和参数都由服务端白名单决定。URL、请求体和查询参数都不能注入额外命令参数。
 
@@ -346,6 +347,20 @@ JSON 里），因为那台机器上真的没有这个数：
 刻意不用 0 补齐缺失的那一个：`restarts: 0` 会把"服务反复崩溃"显示成"一次没崩过"，还会让版本
 切换的崩溃循环检测（比较观察窗口前后的 `restarts`）永远判定为稳定。procd 上那道检测改看主进程号
 是否变化，见 `internal/daeinstall/installer.go` 的 `observeAfterRestart`。
+
+连接活动响应把两个不同口径的数据明确分开：
+
+| 字段 | 来源 | 含义 |
+|---|---|---|
+| `entries` | dae `info` 级别的连接日志 | 历史建立流水，包含源、目的、嗅探域名、出站、节点、策略、进程和 MAC |
+| `endpoints` | `/proc/net/tcp{,6}` 与 `/proc/<pid>/fd` | dae 此刻持有的 ESTABLISHED TCP socket，按远端 `IP:端口` 聚合 |
+| `summary.outboundTcp` | 同上 | dae 当前持有的 ESTABLISHED TCP socket 总数 |
+| `summary.udpSockets` | `/proc/net/udp{,6}` | dae 当前持有的 UDP socket 总数 |
+| `summary.windowEvents` | 面板内存 | 当前最多 24 小时窗口内积累的连接建立事件总数 |
+
+`logsOk` 与 `snapshotOk` 分别表示两个来源是否可用；任一来源失败不会抹掉另一边的数据。日志事件在内存中最多保留 2000 条、最长 24 小时，面板重启后从当前日志窗口重新积累；响应与端点分组也有硬上限。`truncated=true` 表示逐条数据不完整，摘要计数仍来自完整扫描。解析器拒绝未知协议与残缺连接行，只接收 `info` 事件，并在 `dropped` 中报告疑似上游格式变化。
+
+`endpoints` 是远端地址分布，不是节点名称映射：同一节点可能解析成多个地址，直连流量也可能完全留在 eBPF 数据面而不产生 dae userspace socket。dae 没有公开逐条连接状态接口，因此 API 不提供 `live`、`closed` 一类猜测值。端点只读取服务后端的日志（journald 或 `logread`）与 Linux procfs，不读取 dae/kdae 内部 eBPF Map；与其他管理接口一样只允许已登录管理员访问。
 
 ## 错误格式
 

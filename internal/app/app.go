@@ -22,6 +22,7 @@ import (
 	"github.com/tuoro/kdae-panel/internal/auth"
 	"github.com/tuoro/kdae-panel/internal/configstore"
 	"github.com/tuoro/kdae-panel/internal/dae"
+	"github.com/tuoro/kdae-panel/internal/daeconn"
 	"github.com/tuoro/kdae-panel/internal/daeinstall"
 	"github.com/tuoro/kdae-panel/internal/diagnostics"
 	"github.com/tuoro/kdae-panel/internal/geodata"
@@ -76,6 +77,7 @@ type Dependencies struct {
 	PanelUpdate       PanelUpdateService
 	GitHub            GitHubCredentialService
 	SubscriptionNodes SubscriptionNodeService
+	Connections       daeconn.Snapshotter
 }
 
 type SubscriptionNodeService interface {
@@ -378,6 +380,7 @@ func NewWithDependencies(cfg Config, logger *slog.Logger, dependencies Dependenc
 	})
 	registerConfigurationRoutes(router, dependencies.Configuration, operations)
 	registerServiceRoutes(router, dependencies.Dae, dependencies.Host, operations)
+	registerConnectionRoutes(router, dependencies.Host, dependencies.Connections)
 	registerProbeRoutes(router, dependencies.Probe, logger)
 	registerSubscriptionNodeRoutes(router, dependencies.SubscriptionNodes)
 	registerScheduleRoutes(router, "/api/v1/schedule/reload", scheduleService)

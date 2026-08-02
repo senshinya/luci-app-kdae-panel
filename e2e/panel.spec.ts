@@ -901,6 +901,78 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.unroute('**/api/v1/dae/cache')
   })
 
+  await test.step('连接活动分别展示历史流水与实时出站端点', async () => {
+    const reference = Date.now()
+    const at = (secondsAgo: number) => new Date(reference - secondsAgo * 1000).toISOString()
+    await page.route('**/api/v1/connections?*', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        snapshotAt: at(0),
+        snapshotOk: true,
+        logsOk: true,
+        summary: { outboundTcp: 32, udpSockets: 1, windowEvents: 6 },
+        endpoints: [
+          { address: '144.34.225.42:30128', count: 26 },
+          { address: '223.6.6.6:443', count: 4 },
+          { address: '38.55.107.116:443', count: 2 },
+          { address: '203.0.113.90:8443', count: 1 },
+        ],
+        entries: [
+          {
+            at: at(12), network: 'tcp4', src: '192.168.31.10:51324',
+            dst: 'www.example.com:443', dstAddr: '93.184.216.34:443', sniffed: 'www.example.com:443',
+            outbound: 'proxy', dialer: 'demo-sg', policy: 'min_moving_avg', pname: 'curl',
+          },
+          {
+            at: at(48), network: 'tcp6', src: '[2001:db8::10]:52100',
+            dst: '[2606:4700::6810:85e5]:443', dstAddr: '[2606:4700::6810:85e5]:443',
+            outbound: 'proxy', dialer: 'demo-us',
+          },
+          {
+            at: at(96), network: 'tcp4', src: '192.168.31.11:51325',
+            dst: 'api.example.com:443', dstAddr: '203.0.113.8:443', outbound: 'direct',
+          },
+          {
+            at: at(150), network: 'udp4', src: '192.168.31.12:5353',
+            dst: 'dns.example:53', dstAddr: '198.51.100.53:53', outbound: 'proxy', dialer: 'demo-jp',
+          },
+          {
+            at: at(220), network: 'tcp4', src: '192.168.31.13:51326',
+            dst: 'offload.example:443', dstAddr: '198.51.100.8:443', outbound: 'proxy', offloaded: true,
+          },
+          {
+            at: at(1800), network: 'tcp4', src: '192.168.31.14:51327',
+            dst: 'old.example:443', dstAddr: '198.51.100.9:443', outbound: 'direct',
+          },
+        ],
+      }),
+    }))
+    await page.goto('/connections')
+    await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
+    await expect(page.locator('.connection-pulse')).toContainText('32条 dae TCP 出站')
+    await expect(page.getByText('dae 出站远端')).toBeVisible()
+    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
+    await page.getByRole('button', { name: '查看全部 4' }).click()
+    await expect(page.locator('.n-drawer').getByText('203.0.113.90:8443')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.n-drawer')).not.toBeVisible()
+    await expect(page.locator('tbody tr')).toHaveCount(5)
+    await expect(page.getByText('old.example:443')).toHaveCount(0)
+    await expect(page.getByText('存活', { exact: true })).toHaveCount(0)
+    await capture(page, 'connections.png', 1600, 1000)
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.locator('.connection-mobile-row')).toHaveCount(5)
+    await expect(page.locator('.n-data-table')).toHaveCount(0)
+    await capture(page, 'connections-mobile.png', 390, 844)
+    await page.getByRole('button', { name: '展开' }).click()
+    await expect(page.getByText('144.34.225.42:30128')).toBeVisible()
+    await expect(page.getByRole('button', { name: '查看全部 4 个远端' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.setViewportSize({ width: 1600, height: 900 })
+    await page.unroute('**/api/v1/connections?*')
+  })
+
   await test.step('日志页展示多级近期记录并保持最新在前', async () => {
     await page.route('**/api/v1/logs?*', (route) => route.fulfill({
       contentType: 'application/json',
