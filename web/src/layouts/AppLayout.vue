@@ -46,13 +46,28 @@ const backend = useBackendStore()
 const message = useMessage()
 const mobile = useMobileViewport()
 const drawerVisible = ref(false)
+const mobileNavRef = ref<HTMLElement | null>(null)
 const viewportWidth = ref(window.innerWidth)
 const drawerWidth = computed(() => Math.min(320, Math.round(viewportWidth.value * 0.86)))
 const collapsed = ref(window.innerWidth < 1100)
 
+interface MenuRouterLinkSlot {
+  href: string
+  isExactActive: boolean
+  navigate: (event?: MouseEvent) => Promise<unknown>
+}
+
 function menuLink(label: string, name: string, icon: typeof GridOutline): MenuOption {
   return {
-    label: () => h(RouterLink, { to: { name } }, { default: () => label }),
+    // 选中态由 NMenu 的 value 统一管理。使用 RouterLink 的 custom 模式，避免根路径
+    // 在所有子页面上保留 router-link-active，形成第二套相互矛盾的活动状态。
+    label: () => h(RouterLink, { to: { name }, custom: true }, {
+      default: ({ href, isExactActive, navigate }: MenuRouterLinkSlot) => h('a', {
+        href,
+        'aria-current': isExactActive ? 'page' : undefined,
+        onClick: navigate,
+      }, label),
+    }),
     key: name,
     icon: () => h(NIcon, null, { default: () => h(icon) }),
   }
@@ -93,6 +108,13 @@ function handleExpired() {
 function handleResize() {
   viewportWidth.value = window.innerWidth
   if (!mobile.value && window.innerWidth < 1100) collapsed.value = true
+}
+
+function focusSelectedMobileMenuItem() {
+  // 抽屉默认会聚焦第一项，让非当前页的“运行概览”出现灰色焦点底色。
+  mobileNavRef.value
+    ?.querySelector<HTMLAnchorElement>('.n-menu-item-content--selected a')
+    ?.focus({ preventScroll: true })
 }
 
 watch(mobile, () => { drawerVisible.value = false })
@@ -153,7 +175,13 @@ onBeforeUnmount(() => {
       <NMenu :value="selectedKey" :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="22" :options="menuOptions" />
     </NLayoutSider>
 
-    <NDrawer v-model:show="drawerVisible" placement="left" :width="drawerWidth">
+    <NDrawer
+      v-model:show="drawerVisible"
+      placement="left"
+      :width="drawerWidth"
+      :auto-focus="false"
+      @after-enter="focusSelectedMobileMenuItem"
+    >
       <NDrawerContent class="mobile-nav-drawer" :native-scrollbar="false" body-content-style="padding: 0;">
         <div class="brand mobile-drawer-brand">
           <div class="brand-mark">K</div>
@@ -162,7 +190,9 @@ onBeforeUnmount(() => {
             <span>零侵入管理面板</span>
           </div>
         </div>
-        <NMenu :value="selectedKey" :options="menuOptions" @update:value="drawerVisible = false" />
+        <div ref="mobileNavRef">
+          <NMenu :value="selectedKey" :options="menuOptions" @update:value="drawerVisible = false" />
+        </div>
         <template #footer>
           <div class="mobile-drawer-account">
             <NAvatar round size="small">{{ auth.user?.username?.slice(0, 1).toUpperCase() }}</NAvatar>

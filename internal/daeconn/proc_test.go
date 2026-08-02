@@ -67,7 +67,8 @@ func TestProcSnapshotterGroupsOutboundEndpointsAndCaches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.OutboundTCP != 3 || snapshot.UDPSockets != 1 || snapshot.Endpoints["8.8.8.8:443"] != 2 || snapshot.Endpoints["1.1.1.1:80"] != 1 {
+	if snapshot.OutboundTCP != 3 || snapshot.UDPSockets != 1 || snapshot.SampledTCPPeak != 3 || snapshot.SampledUDPPeak != 1 ||
+		snapshot.Endpoints["8.8.8.8:443"] != 2 || snapshot.Endpoints["1.1.1.1:80"] != 1 {
 		t.Fatalf("快照统计异常: %+v", snapshot)
 	}
 
@@ -78,8 +79,14 @@ func TestProcSnapshotterGroupsOutboundEndpointsAndCaches(t *testing.T) {
 	}
 	now = now.Add(defaultCacheTTL + time.Millisecond)
 	refreshed, err := snapshotter.Snapshot(context.Background(), 42)
-	if err != nil || refreshed.OutboundTCP != 0 {
+	if err != nil || refreshed.OutboundTCP != 0 || refreshed.SampledTCPPeak != 3 || refreshed.SampledUDPPeak != 1 {
 		t.Fatalf("缓存过期后未重新采集: %+v, %v", refreshed, err)
+	}
+	writeProcTable(t, root, "udp", "header\n")
+	now = now.Add(RecentSampleWindow + time.Millisecond)
+	expired, err := snapshotter.Snapshot(context.Background(), 42)
+	if err != nil || expired.SampledTCPPeak != 0 || expired.SampledUDPPeak != 0 {
+		t.Fatalf("过期采样仍计入峰值: %+v, %v", expired, err)
 	}
 }
 
@@ -110,6 +117,22 @@ func TestProcSnapshotterCapsEndpointGroupsWithoutLosingSocketCount(t *testing.T)
 	}
 	if snapshot.OutboundTCP != 2 || len(snapshot.Endpoints) != 1 || !snapshot.Truncated {
 		t.Fatalf("端点上限未正确执行: %+v", snapshot)
+	}
+}
+
+func TestProcSnapshotterClearsSampledPeakWhenPIDChanges(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	snapshotter := NewProcSnapshotter()
+	snapshotter.now = func() time.Time { return now }
+	snapshotter.cachedPID = 42
+	snapshotter.observed = []socketObservation{{at: now, tcp: 8, udp: 3}}
+
+	snapshot, err := snapshotter.Snapshot(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SampledTCPPeak != 0 || snapshot.SampledUDPPeak != 0 {
+		t.Fatalf("旧 dae PID 的峰值泄漏到停止状态: %+v", snapshot)
 	}
 }
 

@@ -80,6 +80,12 @@ textarea {
   min-height: 0;
 }
 
+/* 路由切换时旧菜单项应立即取消底色，避免组件库的淡出动画留下灰色残影。 */
+.app-sidebar .n-menu-item-content::before,
+.mobile-nav-drawer .n-menu-item-content::before {
+  transition: none;
+}
+
 .app-main {
   min-width: 0;
 }
@@ -828,13 +834,16 @@ pre,
   font-size: 12px;
 }
 
+.connection-snapshot-summary {
+  border-bottom: 1px solid var(--border);
+}
+
 .connection-pulse {
   min-height: 74px;
-  padding: 12px 4px 16px;
+  padding: 12px 4px 8px;
   display: flex;
   align-items: center;
   gap: 30px;
-  border-bottom: 1px solid var(--border);
 }
 
 .connection-pulse-primary {
@@ -844,7 +853,7 @@ pre,
   gap: 8px;
 }
 
-.connection-pulse-primary > span:last-child {
+.connection-pulse-primary-label {
   color: var(--text-muted);
   font-size: 13px;
 }
@@ -853,6 +862,11 @@ pre,
   color: var(--text-bright);
   font-size: 30px;
   line-height: 1;
+}
+
+.connection-pulse-primary strong.textual {
+  font-size: 15px;
+  line-height: 1.2;
 }
 
 .connection-live-beacon {
@@ -867,6 +881,11 @@ pre,
 .connection-live-beacon.muted {
   background: var(--text-faint);
   box-shadow: 0 0 0 6px var(--border-soft);
+}
+
+.connection-live-beacon.recent {
+  background: var(--accent);
+  box-shadow: 0 0 0 6px var(--accent-soft);
 }
 
 .connection-pulse-metrics {
@@ -888,6 +907,17 @@ pre,
 .connection-pulse-metrics dt,
 .connection-pulse-metrics dd {
   margin: 0;
+}
+
+.connection-pulse-metrics dd.textual {
+  font-size: 12px;
+}
+
+.connection-snapshot-note {
+  margin: 0 4px 12px;
+  display: block;
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 .connection-endpoint-trigger {

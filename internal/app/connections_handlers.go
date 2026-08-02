@@ -23,11 +23,13 @@ const (
 )
 
 type connectionsSummary struct {
-	OutboundTCP   int `json:"outboundTcp"`
-	UDPSockets    int `json:"udpSockets"`
-	WindowEvents  int `json:"windowEvents"`
-	WindowClients int `json:"windowClients"`
-	WindowTargets int `json:"windowTargets"`
+	OutboundTCP    int `json:"outboundTcp"`
+	UDPSockets     int `json:"udpSockets"`
+	SampledTCPPeak int `json:"sampledTcpPeak"`
+	SampledUDPPeak int `json:"sampledUdpPeak"`
+	WindowEvents   int `json:"windowEvents"`
+	WindowClients  int `json:"windowClients"`
+	WindowTargets  int `json:"windowTargets"`
 }
 
 type connectionEndpoint struct {
@@ -50,17 +52,19 @@ type connectionFacets struct {
 }
 
 type connectionsResponse struct {
-	SnapshotAt   time.Time            `json:"snapshotAt"`
-	SnapshotOK   bool                 `json:"snapshotOk"`
-	LogsOK       bool                 `json:"logsOk"`
-	LogLevel     string               `json:"logLevel,omitempty"`
-	Dropped      int                  `json:"dropped,omitempty"`
-	Truncated    bool                 `json:"truncated,omitempty"`
-	FacetLimited bool                 `json:"facetLimited,omitempty"`
-	Summary      connectionsSummary   `json:"summary"`
-	Facets       connectionFacets     `json:"facets"`
-	Endpoints    []connectionEndpoint `json:"endpoints"`
-	Entries      []daeconn.Event      `json:"entries"`
+	SnapshotAt          time.Time            `json:"snapshotAt"`
+	SnapshotOK          bool                 `json:"snapshotOk"`
+	ServiceRunning      bool                 `json:"serviceRunning"`
+	SocketWindowSeconds int                  `json:"socketWindowSeconds"`
+	LogsOK              bool                 `json:"logsOk"`
+	LogLevel            string               `json:"logLevel,omitempty"`
+	Dropped             int                  `json:"dropped,omitempty"`
+	Truncated           bool                 `json:"truncated,omitempty"`
+	FacetLimited        bool                 `json:"facetLimited,omitempty"`
+	Summary             connectionsSummary   `json:"summary"`
+	Facets              connectionFacets     `json:"facets"`
+	Endpoints           []connectionEndpoint `json:"endpoints"`
+	Entries             []daeconn.Event      `json:"entries"`
 }
 
 type connectionTracker struct {
@@ -116,7 +120,9 @@ func (tracker *connectionTracker) handle(writer http.ResponseWriter, request *ht
 
 	var snapshot daeconn.Snapshot
 	snapshotOK := false
+	serviceRunning := false
 	if status, statusErr := tracker.host.Status(request.Context()); statusErr == nil {
+		serviceRunning = status.MainPID > 0
 		if taken, snapshotErr := tracker.snapshotter.Snapshot(request.Context(), status.MainPID); snapshotErr == nil {
 			snapshot, snapshotOK = taken, true
 		}
@@ -137,19 +143,23 @@ func (tracker *connectionTracker) handle(writer http.ResponseWriter, request *ht
 		}
 	}
 	writeJSON(writer, http.StatusOK, connectionsResponse{
-		SnapshotAt:   snapshotAt,
-		SnapshotOK:   snapshotOK,
-		LogsOK:       logErr == nil,
-		LogLevel:     logLevel,
-		Dropped:      dropped,
-		Truncated:    storeTruncated || snapshot.Truncated || responseTruncated,
-		FacetLimited: facetLimited,
+		SnapshotAt:          snapshotAt,
+		SnapshotOK:          snapshotOK,
+		ServiceRunning:      serviceRunning,
+		SocketWindowSeconds: int(daeconn.RecentSampleWindow / time.Second),
+		LogsOK:              logErr == nil,
+		LogLevel:            logLevel,
+		Dropped:             dropped,
+		Truncated:           storeTruncated || snapshot.Truncated || responseTruncated,
+		FacetLimited:        facetLimited,
 		Summary: connectionsSummary{
-			OutboundTCP:   snapshot.OutboundTCP,
-			UDPSockets:    snapshot.UDPSockets,
-			WindowEvents:  len(windowed),
-			WindowClients: clientCount,
-			WindowTargets: targetCount,
+			OutboundTCP:    snapshot.OutboundTCP,
+			UDPSockets:     snapshot.UDPSockets,
+			SampledTCPPeak: snapshot.SampledTCPPeak,
+			SampledUDPPeak: snapshot.SampledUDPPeak,
+			WindowEvents:   len(windowed),
+			WindowClients:  clientCount,
+			WindowTargets:  targetCount,
 		},
 		Facets:    facets,
 		Endpoints: sortedConnectionEndpoints(snapshot.Endpoints),

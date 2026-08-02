@@ -141,8 +141,20 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
   })
 
   await test.step('Geo 数据是独立入口并可持久化自定义来源', async () => {
-    await page.goto('/geo')
+    const dashboardLink = page.locator('.app-sidebar a[href="/"]')
+    const geoLink = page.locator('.app-sidebar a[href="/geo"]')
+    await geoLink.click()
+    await expect(page).toHaveURL(/\/geo$/)
     await expect(page.getByRole('heading', { name: 'Geo 数据', level: 2 })).toBeVisible()
+    await expect(page.locator('.app-sidebar .n-menu-item-content', { hasText: 'Geo 数据' })).toHaveClass(/n-menu-item-content--selected/)
+    await expect(dashboardLink).not.toHaveAttribute('aria-current', 'page')
+    await expect(dashboardLink).not.toHaveClass(/router-link-active/)
+    expect(await dashboardLink.evaluate((link) => !link.closest('.n-menu-item-content')?.matches(':focus-within'))).toBe(true)
+    expect(await geoLink.evaluate((link) => document.activeElement === link)).toBe(true)
+    expect(await dashboardLink.evaluate((link) => {
+      const item = link.closest('.n-menu-item-content')
+      return item ? getComputedStyle(item, '::before').transitionDuration : null
+    })).toBe('0s')
     await expect(page.getByText('geoip.dat', { exact: true })).toBeVisible()
     await expect(page.getByText('geosite.dat', { exact: true })).toBeVisible()
 
@@ -583,6 +595,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     // 先让当前配置与存档产生差异，再验证“预览 -> 恢复”的完整事务入口。
     await page.goto('/config')
     const configEditor = page.locator('.config-editor textarea')
+    await expect(configEditor).toHaveValue(/global \{/)
     await configEditor.fill(`${(await configEditor.inputValue()).trimEnd()}\n\n# E2E 恢复差异\n`)
     await page.locator('.page-toolbar').getByRole('button', { name: '保存并重载' }).click()
     await page.locator('.n-dialog').getByRole('button', { name: '保存并重载' }).click()
@@ -909,9 +922,14 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
       body: JSON.stringify({
         snapshotAt: at(0),
         snapshotOk: true,
+        serviceRunning: true,
+        socketWindowSeconds: 30,
         logsOk: true,
         logLevel: 'info',
-        summary: { outboundTcp: 32, udpSockets: 1, windowEvents: 205, windowClients: 4, windowTargets: 8 },
+        summary: {
+          outboundTcp: 32, udpSockets: 1, sampledTcpPeak: 38, sampledUdpPeak: 4,
+          windowEvents: 205, windowClients: 4, windowTargets: 8,
+        },
         facets: {
           targets: [
             { id: 'api.github.com', label: 'api.github.com', count: 72 },
@@ -979,7 +997,8 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     }))
     await page.goto('/connections')
     await expect(page.getByRole('heading', { name: '连接活动', level: 2 })).toBeVisible()
-    await expect(page.locator('.connection-pulse')).toContainText('32条 dae TCP 出站')
+    await expect(page.locator('.connection-pulse')).toContainText('32当前 TCP 出站')
+    await expect(page.locator('.connection-snapshot-note')).toContainText('近 30 秒已采样峰值：TCP 38 · UDP 4')
     await expect(page.locator('.connection-facet-row', { hasText: 'api.github.com' })).toBeVisible()
     await page.locator('.connection-facet-row', { hasText: 'api.github.com' }).click()
     await expect(page.locator('tbody tr')).toHaveCount(1)
@@ -990,7 +1009,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.locator('tbody tr')).toHaveCount(2)
     await page.locator('.connection-facet-row', { hasText: '192.168.31.10' }).click()
     await page.locator('.connection-facet-modes .n-radio-button', { hasText: '目标' }).click()
-    await page.getByRole('button', { name: '实时端点 4' }).click()
+    await page.getByRole('button', { name: 'TCP 端点 4' }).click()
     await expect(page.locator('.n-drawer').getByText('203.0.113.90:8443')).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.locator('.n-drawer')).not.toBeVisible()
@@ -1033,7 +1052,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(modeBoxes[2].y).toBeGreaterThan(modeBoxes[0].y)
     expect(Math.max(...modeBoxes.map(({ width }) => width)) - Math.min(...modeBoxes.map(({ width }) => width))).toBeLessThanOrEqual(1)
     await page.keyboard.press('Escape')
-    await page.getByRole('button', { name: '实时端点 4' }).click()
+    await page.getByRole('button', { name: 'TCP 端点 4' }).click()
     await expect(page.locator('.n-drawer').getByText('144.34.225.42:30128')).toBeVisible()
     await page.keyboard.press('Escape')
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
@@ -1042,10 +1061,14 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.route('**/api/v1/connections?*', (route) => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        snapshotAt: at(0), snapshotOk: true, logsOk: true, logLevel: 'warn',
-        summary: { outboundTcp: 2, udpSockets: 0, windowEvents: 0, windowClients: 0, windowTargets: 0 },
+        snapshotAt: at(0), snapshotOk: true, serviceRunning: true, socketWindowSeconds: 30,
+        logsOk: true, logLevel: 'warn',
+        summary: {
+          outboundTcp: 0, udpSockets: 0, sampledTcpPeak: 0, sampledUdpPeak: 0,
+          windowEvents: 0, windowClients: 0, windowTargets: 0,
+        },
         facets: { targets: [], clients: [], nodes: [], groups: [] },
-        endpoints: [{ address: '203.0.113.8:443', count: 2 }],
+        endpoints: [],
         entries: [],
       }),
     }))
@@ -1053,6 +1076,9 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.getByText('当前 dae 输出级别为')).toBeVisible()
     await expect(page.getByRole('button', { name: '切换为 info' })).toBeVisible()
     await expect(page.getByText('当前日志级别不记录连接建立流水')).toBeVisible()
+    await expect(page.locator('.connection-pulse').getByText('未捕获', { exact: true })).toHaveCount(3)
+    await expect(page.locator('.connection-snapshot-note')).toContainText('“未捕获”不代表没有代理流量')
+    await expect(page.getByRole('button', { name: 'TCP 端点 未捕获' })).toBeDisabled()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     await page.setViewportSize({ width: 1600, height: 900 })
     await page.unroute('**/api/v1/connections?*')
@@ -1124,8 +1150,23 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await page.getByRole('button', { name: '打开导航' }).click()
     const drawer = page.locator('.n-drawer')
     await expect(drawer.getByText('kdae-panel')).toBeVisible()
+    const drawerDashboard = drawer.locator('.n-menu-item-content', { hasText: '运行概览' })
+    const drawerOrchestration = drawer.locator('.n-menu-item-content', { hasText: '代理编排' })
+    await expect(drawerOrchestration).toHaveClass(/n-menu-item-content--selected/)
+    await expect.poll(() => drawerOrchestration.locator('a').evaluate((link) => document.activeElement === link)).toBe(true)
+    await expect(drawerDashboard).not.toHaveClass(/n-menu-item-content--selected/)
+    expect(await drawerDashboard.evaluate((item) => item.matches(':focus-within'))).toBe(false)
+    await drawer.getByText('Geo 数据', { exact: true }).click()
+    await expect(drawer).not.toBeVisible()
+    await expect(page).toHaveURL(/\/geo$/)
+    await page.getByRole('button', { name: '打开导航' }).click()
+    const drawerGeo = drawer.locator('.n-menu-item-content', { hasText: 'Geo 数据' })
+    await expect(drawerGeo).toHaveClass(/n-menu-item-content--selected/)
+    await expect.poll(() => drawerGeo.locator('a').evaluate((link) => document.activeElement === link)).toBe(true)
+    expect(await drawerDashboard.evaluate((item) => item.matches(':focus-within'))).toBe(false)
     await drawer.getByText('代理编排', { exact: true }).click()
     await expect(drawer).not.toBeVisible()
+    await expect(page).toHaveURL(/\/proxy$/)
 
     let overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)

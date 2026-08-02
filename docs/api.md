@@ -358,11 +358,12 @@ JSON 里），因为那台机器上真的没有这个数：
 | `endpoints` | `/proc/net/tcp{,6}` 与 `/proc/<pid>/fd` | dae 此刻持有的 ESTABLISHED TCP socket，按远端 `IP:端口` 聚合 |
 | `summary.outboundTcp` | 同上 | dae 当前持有的 ESTABLISHED TCP socket 总数 |
 | `summary.udpSockets` | `/proc/net/udp{,6}` | dae 当前持有的 UDP socket 总数 |
+| `summary.sampledTcpPeak` / `sampledUdpPeak` | 最近成功的 procfs 快照 | `socketWindowSeconds` 秒内实际采样到的峰值；dae PID 变化后清空 |
 | `summary.windowEvents` / `windowClients` / `windowTargets` | 面板内存 | 所选时间窗内保留的事件、客户端和目标数 |
 
-`logsOk` 与 `snapshotOk` 分别表示两个来源是否可用；任一来源失败不会抹掉另一边的数据。`logLevel` 来自当前配置的 `global.log_level`，字段省略时按 dae 默认值 `info` 返回，无法可靠读取时省略。`warn` 或 `error` 不会产生连接建立流水，页面会保留实时 socket 快照并提供经配置事务切换到 `info` 的入口。日志事件在内存中最多保留 2000 条、最长 24 小时，面板重启后从当前日志窗口重新积累。分布在明细条数裁剪前计算，每个维度最多返回前 200 项，超限时 `facetLimited=true`。`truncated=true` 表示部分明细或端点不完整，页面计数只能基于面板当前保留或扫描到的数据。解析器拒绝未知协议与残缺连接行，只接收 `info` 事件；只有同时包含 `<->` 与连接元数据的候选行解析失败才计入 `dropped`，Netkit 设备对等普通生命周期日志不会制造误报。
+`logsOk` 与 `snapshotOk` 分别表示两个来源是否可用；任一来源失败不会抹掉另一边的数据。`serviceRunning` 根据服务后端记录的主进程 PID 区分“dae 未运行”和“运行中但当前未捕获”，`socketWindowSeconds` 给出离散采样峰值窗口。`logLevel` 来自当前配置的 `global.log_level`，字段省略时按 dae 默认值 `info` 返回，无法可靠读取时省略。`warn` 或 `error` 不会产生连接建立流水，页面会保留实时 socket 快照并提供经配置事务切换到 `info` 的入口。日志事件在内存中最多保留 2000 条、最长 24 小时，面板重启后从当前日志窗口重新积累。分布在明细条数裁剪前计算，每个维度最多返回前 200 项，超限时 `facetLimited=true`。`truncated=true` 表示部分明细或端点不完整，页面计数只能基于面板当前保留或扫描到的数据。解析器拒绝未知协议与残缺连接行，只接收 `info` 事件；只有同时包含 `<->` 与连接元数据的候选行解析失败才计入 `dropped`，Netkit 设备对等普通生命周期日志不会制造误报。
 
-`endpoints` 是远端地址分布，不是节点名称映射：同一节点可能解析成多个地址，直连流量也可能完全留在 eBPF 数据面而不产生 dae userspace socket。dae 没有公开逐条连接状态接口，因此 API 不提供 `live`、`closed` 一类猜测值。端点只读取服务后端的日志（journald 或 `logread`）与 Linux procfs，不读取 dae/kdae 内部 eBPF Map；与其他管理接口一样只允许已登录管理员访问。
+`endpoints` 是远端地址分布，不是节点名称映射：同一节点可能解析成多个地址，直连流量也可能完全留在 eBPF 数据面而不产生 dae userspace socket。当前值为零只表示这次离散采样没有命中，不能推出“没有代理流量”；峰值同样只汇总实际采样，不填补采样间隙。dae 没有公开逐条连接状态接口，因此 API 不提供 `live`、`closed` 一类猜测值。端点只读取服务后端的日志（journald 或 `logread`）与 Linux procfs，不读取 dae/kdae 内部 eBPF Map；与其他管理接口一样只允许已登录管理员访问。
 
 ## 错误格式
 

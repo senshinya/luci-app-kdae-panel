@@ -86,6 +86,30 @@ const facetOptions: Array<{ label: string, value: keyof ConnectionFacets }> = [
 const entries = computed(() => data.value?.entries ?? [])
 const summary = computed(() => data.value?.summary)
 const snapshotLabel = computed(() => data.value?.snapshotAt ? formatDateTime(data.value.snapshotAt) : '等待快照')
+const socketReadable = computed(() => Boolean(data.value?.serviceRunning && data.value.snapshotOk))
+const tcpSocketCaptured = computed(() => socketReadable.value && (summary.value?.outboundTcp ?? 0) > 0)
+const udpSocketCaptured = computed(() => socketReadable.value && (summary.value?.udpSockets ?? 0) > 0)
+const hasCurrentSockets = computed(() => tcpSocketCaptured.value || udpSocketCaptured.value)
+const hasRecentSocketSamples = computed(() => socketReadable.value &&
+  ((summary.value?.sampledTcpPeak ?? 0) > 0 || (summary.value?.sampledUdpPeak ?? 0) > 0))
+const tcpSocketValue = computed(() => visibleSocketCount(summary.value?.outboundTcp))
+const udpSocketValue = computed(() => visibleSocketCount(summary.value?.udpSockets))
+const endpointCountValue = computed(() => {
+  if (!data.value) return '—'
+  if (!data.value.serviceRunning) return '未运行'
+  if (!data.value.snapshotOk) return '—'
+  return data.value.endpoints.length > 0 ? String(data.value.endpoints.length) : '未捕获'
+})
+const socketSnapshotNote = computed(() => {
+  if (!data.value) return '正在读取 dae socket 快照…'
+  if (!data.value.serviceRunning) return 'dae 当前未运行，没有可采集的进程 socket。'
+  if (!data.value.snapshotOk) return '暂时无法读取 dae 进程的 socket 快照。'
+  const seconds = Math.max(1, data.value.socketWindowSeconds)
+  const peak = hasRecentSocketSamples.value
+    ? `近 ${seconds} 秒已采样峰值：TCP ${summary.value?.sampledTcpPeak ?? 0} · UDP ${summary.value?.sampledUdpPeak ?? 0}。`
+    : `近 ${seconds} 秒的离散采样尚未捕获到 dae socket。`
+  return `${peak}这里只统计 dae 进程持有的 userspace socket；短连接、直连和 eBPF 数据面连接可能不会出现，因此“未捕获”不代表没有代理流量。`
+})
 const activeFilterCount = computed(() => Number(!!outbound.value) + Number(!!network.value) + Number(!!selectedFacet.value))
 const facetItems = computed(() => data.value?.facets[facetDimension.value] ?? [])
 const visibleFacets = computed(() => facetItems.value.slice(0, desktopFacetCap))
@@ -125,6 +149,14 @@ const filteredEntries = computed(() => {
 const mobileEntries = computed(() => filteredEntries.value.slice(0, mobileListCap))
 const endpointMaximum = computed(() => data.value?.endpoints[0]?.count ?? 1)
 const historySuppressed = computed(() => data.value?.logLevel === 'warn' || data.value?.logLevel === 'error')
+
+function visibleSocketCount(value?: number): string {
+  if (!data.value) return '—'
+  if (!data.value.serviceRunning) return '未运行'
+  if (!data.value.snapshotOk) return '—'
+  return value && value > 0 ? String(value) : '未捕获'
+}
+
 const emptyDescription = computed(() => {
   if (historySuppressed.value) return '当前日志级别不记录连接建立流水'
   if (data.value?.snapshotOk && ((summary.value?.outboundTcp ?? 0) > 0 || (summary.value?.udpSockets ?? 0) > 0)) {
@@ -366,21 +398,29 @@ onBeforeUnmount(() => {
       </div>
     </NAlert>
 
-    <section class="connection-pulse" aria-label="连接摘要">
-      <div class="connection-pulse-primary">
-        <span class="connection-live-beacon" :class="{ muted: !data?.snapshotOk }"></span>
-        <strong>{{ data?.snapshotOk ? summary?.outboundTcp : '—' }}</strong>
-        <span>条 dae TCP 出站</span>
+    <section class="connection-snapshot-summary" aria-label="连接摘要">
+      <div class="connection-pulse">
+        <div class="connection-pulse-primary">
+          <span class="connection-live-beacon" :class="{ muted: !hasCurrentSockets, recent: !hasCurrentSockets && hasRecentSocketSamples }"></span>
+          <strong :class="{ textual: !tcpSocketCaptured }">{{ tcpSocketValue }}</strong>
+          <span class="connection-pulse-primary-label">当前 TCP 出站</span>
+        </div>
+        <dl class="connection-pulse-metrics">
+          <div><dt>当前 UDP</dt><dd :class="{ textual: !udpSocketCaptured }">{{ udpSocketValue }}</dd></div>
+          <div><dt>新建连接</dt><dd>{{ summary?.windowEvents ?? '—' }}</dd></div>
+          <div><dt>客户端</dt><dd>{{ summary?.windowClients ?? '—' }}</dd></div>
+          <div><dt>目标</dt><dd>{{ summary?.windowTargets ?? '—' }}</dd></div>
+        </dl>
+        <NButton
+          text
+          class="connection-endpoint-trigger"
+          :disabled="!socketReadable || !data?.endpoints.length"
+          @click="endpointDrawerOpen = true"
+        >
+          TCP 端点 <strong>{{ endpointCountValue }}</strong>
+        </NButton>
       </div>
-      <dl class="connection-pulse-metrics">
-        <div><dt>UDP socket</dt><dd>{{ data?.snapshotOk ? summary?.udpSockets : '—' }}</dd></div>
-        <div><dt>新建连接</dt><dd>{{ summary?.windowEvents ?? '—' }}</dd></div>
-        <div><dt>客户端</dt><dd>{{ summary?.windowClients ?? '—' }}</dd></div>
-        <div><dt>目标</dt><dd>{{ summary?.windowTargets ?? '—' }}</dd></div>
-      </dl>
-      <NButton text class="connection-endpoint-trigger" :disabled="!data?.snapshotOk" @click="endpointDrawerOpen = true">
-        实时端点 <strong>{{ data?.snapshotOk ? data.endpoints.length : '—' }}</strong>
-      </NButton>
+      <NText depth="3" class="connection-snapshot-note">{{ socketSnapshotNote }}</NText>
     </section>
 
     <section class="connection-workbench">
@@ -575,15 +615,15 @@ onBeforeUnmount(() => {
       :width="mobile ? undefined : 420"
       :height="mobile ? '72vh' : undefined"
     >
-      <NDrawerContent title="dae 出站远端" closable :native-scrollbar="false">
-        <NText depth="3" class="connection-drawer-description">当前 TCP socket 按远端 IP:端口聚合</NText>
+      <NDrawerContent title="当前可见 TCP 端点" closable :native-scrollbar="false">
+        <NText depth="3" class="connection-drawer-description">dae 当前持有的 TCP socket，按远端 IP:端口聚合</NText>
         <div v-if="data?.endpoints.length" class="connection-endpoint-drawer-list">
           <div v-for="endpoint in data?.endpoints ?? []" :key="endpoint.address" class="connection-endpoint-row">
             <div><span class="mono">{{ endpoint.address }}</span><strong>{{ endpoint.count }}</strong></div>
             <span class="connection-endpoint-track"><i :style="{ width: `${Math.max(2, endpoint.count / endpointMaximum * 100)}%` }"></i></span>
           </div>
         </div>
-        <NEmpty v-else description="当前没有可见的 dae TCP 出站" />
+        <NEmpty v-else description="当前未捕获到 dae TCP 出站" />
       </NDrawerContent>
     </NDrawer>
   </div>

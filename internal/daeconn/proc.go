@@ -19,16 +19,26 @@ const (
 	tcpEstablished      = "01"
 	defaultCacheTTL     = 2 * time.Second
 	defaultMaxEndpoints = 200
+	// RecentSampleWindow 是同一 dae PID 的离散 socket 样本保留窗口。
+	RecentSampleWindow = 30 * time.Second
 )
 
 // Snapshot 是 dae 进程在某一时刻持有的 socket 概况。这里只能看到 dae
 // 自己持有的 userspace socket，不能据此判断任一客户端连接是否仍然存活。
 type Snapshot struct {
-	TakenAt     time.Time
-	OutboundTCP int
-	UDPSockets  int
-	Endpoints   map[string]int
-	Truncated   bool
+	TakenAt        time.Time
+	OutboundTCP    int
+	UDPSockets     int
+	SampledTCPPeak int
+	SampledUDPPeak int
+	Endpoints      map[string]int
+	Truncated      bool
+}
+
+type socketObservation struct {
+	at  time.Time
+	tcp int
+	udp int
 }
 
 // Snapshotter 提供可注入的连接快照接口。
@@ -51,6 +61,7 @@ type ProcSnapshotter struct {
 	cachedPID int
 	cached    Snapshot
 	cachedErr error
+	observed  []socketObservation
 }
 
 func NewProcSnapshotter() *ProcSnapshotter {
@@ -68,14 +79,34 @@ func (snapshotter *ProcSnapshotter) Snapshot(ctx context.Context, mainPID int) (
 	snapshotter.mu.Lock()
 	defer snapshotter.mu.Unlock()
 	now := snapshotter.now()
+	if snapshotter.cachedPID != mainPID {
+		snapshotter.observed = nil
+	}
 	cacheAge := now.Sub(snapshotter.cachedAt)
 	if snapshotter.cachedPID == mainPID && !snapshotter.cachedAt.IsZero() && cacheAge >= 0 && cacheAge < snapshotter.cacheTTL {
-		return snapshotter.cached, snapshotter.cachedErr
+		return snapshotter.withSampledPeaks(snapshotter.cached, now), snapshotter.cachedErr
 	}
 	snapshot, err := snapshotter.take(ctx, mainPID, now.UTC())
 	snapshotter.cachedAt, snapshotter.cachedPID = now, mainPID
 	snapshotter.cached, snapshotter.cachedErr = snapshot, err
-	return snapshot, err
+	if err == nil {
+		snapshotter.observed = append(snapshotter.observed, socketObservation{
+			at: now, tcp: snapshot.OutboundTCP, udp: snapshot.UDPSockets,
+		})
+	}
+	return snapshotter.withSampledPeaks(snapshot, now), err
+}
+
+func (snapshotter *ProcSnapshotter) withSampledPeaks(snapshot Snapshot, now time.Time) Snapshot {
+	cutoff := now.Add(-RecentSampleWindow)
+	for len(snapshotter.observed) > 0 && snapshotter.observed[0].at.Before(cutoff) {
+		snapshotter.observed = snapshotter.observed[1:]
+	}
+	for _, observation := range snapshotter.observed {
+		snapshot.SampledTCPPeak = max(snapshot.SampledTCPPeak, observation.tcp)
+		snapshot.SampledUDPPeak = max(snapshot.SampledUDPPeak, observation.udp)
+	}
+	return snapshot
 }
 
 func (snapshotter *ProcSnapshotter) take(ctx context.Context, mainPID int, takenAt time.Time) (Snapshot, error) {

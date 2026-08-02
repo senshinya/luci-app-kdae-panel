@@ -414,6 +414,8 @@ export interface ConnectionFacets {
 export interface ConnectionsResponse {
   snapshotAt: string
   snapshotOk: boolean
+  serviceRunning: boolean
+  socketWindowSeconds: number
   logsOk: boolean
   logLevel?: 'error' | 'warn' | 'info' | 'debug' | 'trace'
   dropped?: number
@@ -422,6 +424,8 @@ export interface ConnectionsResponse {
   summary: {
     outboundTcp: number
     udpSockets: number
+    sampledTcpPeak: number
+    sampledUdpPeak: number
     windowEvents: number
     windowClients: number
     windowTargets: number

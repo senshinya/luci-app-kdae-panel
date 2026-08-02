@@ -45,10 +45,12 @@ func TestConnectionsEndpoint(t *testing.T) {
 		},
 	}
 	snapshotter := &stubConnectionSnapshotter{snapshot: daeconn.Snapshot{
-		TakenAt:     timestamp.Add(time.Second),
-		OutboundTCP: 2,
-		UDPSockets:  1,
-		Endpoints:   map[string]int{"203.0.113.9:443": 1, "203.0.113.8:443": 3},
+		TakenAt:        timestamp.Add(time.Second),
+		OutboundTCP:    2,
+		UDPSockets:     1,
+		SampledTCPPeak: 4,
+		SampledUDPPeak: 2,
+		Endpoints:      map[string]int{"203.0.113.9:443": 1, "203.0.113.8:443": 3},
 	}}
 	application, err := NewWithDependencies(Config{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), Dependencies{
 		Dae:           stubDaeService{},
@@ -70,8 +72,10 @@ func TestConnectionsEndpoint(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if snapshotter.pid != 42 || !response.SnapshotOK || !response.LogsOK || response.LogLevel != "warn" || response.Summary.OutboundTCP != 2 ||
-		response.Summary.UDPSockets != 1 || response.Summary.WindowEvents != 2 ||
+	if snapshotter.pid != 42 || !response.SnapshotOK || !response.ServiceRunning ||
+		response.SocketWindowSeconds != int(daeconn.RecentSampleWindow/time.Second) || !response.LogsOK || response.LogLevel != "warn" ||
+		response.Summary.OutboundTCP != 2 || response.Summary.UDPSockets != 1 ||
+		response.Summary.SampledTCPPeak != 4 || response.Summary.SampledUDPPeak != 2 || response.Summary.WindowEvents != 2 ||
 		response.Summary.WindowClients != 1 || response.Summary.WindowTargets != 1 {
 		t.Fatalf("响应概况异常: %+v, pid=%d", response, snapshotter.pid)
 	}
@@ -91,6 +95,25 @@ func TestConnectionsEndpoint(t *testing.T) {
 	if len(response.Facets.Nodes) != 1 || response.Facets.Nodes[0].Label != "tokyo" || response.Facets.Nodes[0].Count != 2 ||
 		len(response.Facets.Groups) != 1 || response.Facets.Groups[0].Label != "proxy" || response.Facets.Groups[0].Count != 2 {
 		t.Fatalf("路由分布异常: nodes=%+v groups=%+v", response.Facets.Nodes, response.Facets.Groups)
+	}
+}
+
+func TestConnectionsEndpointDistinguishesStoppedServiceFromEmptySnapshot(t *testing.T) {
+	snapshotter := &stubConnectionSnapshotter{snapshot: daeconn.Snapshot{Endpoints: map[string]int{}}}
+	application, err := NewWithDependencies(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), Dependencies{
+		Dae: stubDaeService{}, Host: &stubHostService{status: host.Status{}}, Connections: snapshotter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/connections", nil))
+	var response connectionsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || response.ServiceRunning || !response.SnapshotOK || snapshotter.pid != 0 {
+		t.Fatalf("停止状态被误报为实时零连接: status=%d response=%+v pid=%d", recorder.Code, response, snapshotter.pid)
 	}
 }
 
