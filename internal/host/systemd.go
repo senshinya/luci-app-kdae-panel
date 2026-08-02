@@ -15,11 +15,7 @@ import (
 const (
 	defaultTimeout = 30 * time.Second
 	actionTimeout  = 150 * time.Second
-	// MaxLogLines 是单次读取日志的行数上限，两个后端共用。导出是因为调用方
-	// 想"尽可能多地取一窗日志"时需要知道这个上限，抄一份常量会在这里调整后
-	// 静默失配。
-	MaxLogLines = 500
-	maxLogLines = MaxLogLines
+	maxLogLines    = 500
 )
 
 type systemdManager struct {
@@ -67,11 +63,6 @@ type LogEntry struct {
 	Message   string    `json:"message"`
 	Unit      string    `json:"unit,omitempty"`
 	PID       string    `json:"pid,omitempty"`
-	// Raw 是 procd 后端把 logfmt 的 msg 提出来之前的完整原始行。dae 连接日志的
-	// 元数据（outbound、dialer、sniffed…）都在 msg 之外的键里，只留 Message
-	// 它们就丢了。systemd 后端的 Message 本来就是原始行，此字段留空。
-	// 只供面板内部消费，不进日志 API 的输出。
-	Raw string `json:"-"`
 }
 
 type Action string

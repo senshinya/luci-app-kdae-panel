@@ -30,7 +30,6 @@ import {
   PulseOutline,
   ReaderOutline,
   SettingsOutline,
-  SwapHorizontalOutline,
 } from '@vicons/ionicons5'
 import { getJSON } from '../api/client'
 import type { PanelUpdatePayload, PanelUpdateStatus } from '../types/api'
@@ -66,7 +65,6 @@ const menuOptions: MenuOption[] = [
   menuLink('dae 版本', 'versions', CubeOutline),
   menuLink('Geo 数据', 'geo', EarthOutline),
   menuLink('故障诊断', 'diagnostics', PulseOutline),
-  menuLink('连接活动', 'connections', SwapHorizontalOutline),
   menuLink('运行日志', 'logs', ReaderOutline),
   menuLink('配置备份', 'backups', ArchiveOutline),
   menuLink('面板设置', 'settings', SettingsOutline),

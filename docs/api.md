@@ -347,39 +347,6 @@ JSON 里），因为那台机器上真的没有这个数：
 切换的崩溃循环检测（比较观察窗口前后的 `restarts`）永远判定为稳定。procd 上那道检测改看主进程号
 是否变化，见 `internal/daeinstall/installer.go` 的 `observeAfterRestart`。
 
-### 连接活动
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/connections?limit=2000` | 连接建立流水与当前出站连接分布，`limit` 裁剪流水条数（1–2000） |
-
-响应由两类口径不同的数据组成，字段上分开、界面上也分开呈现：
-
-| 字段 | 来源 | 口径 |
-|---|---|---|
-| `entries` | dae `info` 级别的连接建立日志 | **历史流水**，按时间倒序；每条带源、目的、嗅探域名、出站、节点、进程名与 MAC |
-| `clients`、`domains`、`nodes`、`groups` | 同上，按客户端地址 / 目的域名 / `dialer` / `outbound` 聚合 | **历史**，窗口内新建连接数；`clients` 的 `note` 带该地址最近一次出现的 MAC |
-| `summary.outboundSockets`、`udpSockets` | `/proc/net/tcp{,6}` 里 dae 持有的 socket | **实时**总数 |
-| `summary.windowEvents`、`activeNodes` | 日志 | **历史**计数 |
-
-**不提供逐条连接的存活状态**，这不是简化而是能力边界：dae 的 eBPF 数据面把被代理连接的
-客户端一侧完全留在内核，既没有 userspace socket 也不进 netfilter conntrack，真机验证过没有
-任何公开接口能逐条判定；出站 socket 又多对一地指向同一个节点地址，无法归属到具体连接。
-详见 `docs/architecture.md` 的观测边界一节。每连接的流量与速率同理不提供。
-
-其余已知边界：
-
-| 边界 | 行为 |
-|---|---|
-| dae 日志级别高于 `info` | 采集不到新流水，响应带 `logLevel` 供前端给出配置引导；出站分布不受影响 |
-| 日志缓冲区窗口有限（OpenWrt 默认 64 KiB） | 面板在内存里累积事件（上限 2000 条、24 小时，重启清零），把窗口从缓冲区寿命延长到面板运行期 |
-| 上游日志格式变化 | 解析失败的行静默跳过，只累计到 `dropped`；非 `info` 级别的行主动忽略，不计入 `dropped` |
-| 日志内容可被外部影响 | 嗅探到的域名、订阅里的节点名都可能含引号。解析器按 logrus 的 `%q` 规则处理转义并对同名键取首次出现的值，避免日志内容伪造出 `outbound` 一类字段；`network` 只接受 dae 的四种取值 |
-| 流水或分组超出上限 | 响应带 `truncated: true`；`summary` 与分组计数不受裁剪影响，始终完整 |
-
-不按 dae 当前出站 socket 的远端地址分组：那张表的键是代理服务器地址，有几个节点就只有几行，
-说的和 `summary.outboundSockets` 是同一件事，没有额外信息量。
-
 ## 错误格式
 
 ```json

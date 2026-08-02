@@ -1,1 +1,0 @@
-import{Tn as e}from"./client-CHTsrZM3.js";function t(){return e()!==null}var n=typeof window<`u`;export{n,t};
