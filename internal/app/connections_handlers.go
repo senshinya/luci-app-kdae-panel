@@ -65,7 +65,7 @@ func (tracker *connectionTracker) handle(writer http.ResponseWriter, request *ht
 	logs, logErr := tracker.host.Logs(request.Context(), host.MaxLogLines)
 	lines := make([]daeconn.LogLine, len(logs))
 	for index, entry := range logs {
-		lines[index] = daeconn.LogLine{Timestamp: entry.Timestamp, Message: entry.Message}
+		lines[index] = daeconn.LogLine{Timestamp: entry.Timestamp, Message: entry.RawLine()}
 	}
 	events, dropped := daeconn.Parse(lines)
 	merged, storeTruncated := tracker.store.Merge(events)

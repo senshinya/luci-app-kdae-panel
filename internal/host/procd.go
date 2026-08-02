@@ -415,8 +415,11 @@ func parseLogreadLine(line, serviceName string) (LogEntry, bool) {
 	}
 	entry.PID = pid
 	entry.Message = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message), ":"))
+	entry.Raw = entry.Message
 	// dae 自己输出 logfmt。把 level/msg 提到结构化字段上，日志页的级别筛选
 	// 才对 dae 的日志同样有效，而不是只对 procd 的封装层有效。
+	// 改写只动 Message：Raw 留着完整字段给连接解析，否则 network/outbound
+	// 这些键在这里就没了，daeconn 只能把每条连接行都当成格式变化丢掉。
 	if priority, level, text, ok := parseLogfmt(entry.Message); ok {
 		entry.Level = level
 		entry.Priority = priority

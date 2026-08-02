@@ -65,6 +65,18 @@ type LogEntry struct {
 	Message   string    `json:"message"`
 	Unit      string    `json:"unit,omitempty"`
 	PID       string    `json:"pid,omitempty"`
+	// Raw 是服务后端拿到的原始日志行，不随 Message 一起被改写。procd 后端会把
+	// Message 换成 logfmt 的 msg 正文让日志页好读，而连接解析要的是完整字段，
+	// 两者只能各留一份。不出现在 /api/v1/logs 的响应里：前端用不到，白白翻倍。
+	Raw string `json:"-"`
+}
+
+// RawLine 返回未经改写的原始日志行，后端没填 Raw 时退回 Message。
+func (entry LogEntry) RawLine() string {
+	if entry.Raw != "" {
+		return entry.Raw
+	}
+	return entry.Message
 }
 
 type Action string
@@ -303,6 +315,7 @@ func parseJournal(output string) ([]LogEntry, error) {
 			Priority:  priority,
 			Level:     level,
 			Message:   message,
+			Raw:       message,
 			Unit:      rawString(raw["_SYSTEMD_UNIT"]),
 			PID:       rawString(raw["_PID"]),
 		})

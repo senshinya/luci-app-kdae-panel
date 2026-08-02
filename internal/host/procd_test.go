@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/command"
+	"github.com/tuoro/kdae-panel/internal/daeconn"
 )
 
 // errExitStatus 模拟命令以非零码退出。
@@ -756,6 +757,62 @@ func TestProcdLogsBusyboxTimestampHandlesLeapDay(t *testing.T) {
 	}
 	if got.Year() != 2024 {
 		t.Fatalf("年份 = %d，期望 2024（最近的闰年）", got.Year())
+	}
+}
+
+// procd 后端为了日志页好读，会把 Message 换成 logfmt 的 msg 正文。连接解析要的
+// 却是完整字段，两条需求只能各留一份：Message 给人看，RawLine() 给 daeconn 用。
+//
+// 这条回归测试的由来：换成 msg 正文之后，连接行里仍然留着 " <-> "，于是 daeconn
+// 把每一条都算作候选、又因为拿不到 network/outbound 全部解析失败，界面上报成
+// "N 条疑似连接日志无法解析，dae 的日志格式可能已经变化"——真机上 432 条全丢，
+// 而 dae 的格式其实一个字都没变。systemd 后端保留整行，所以只在 procd 上出现。
+func TestProcdLogsKeepRawLineForConnectionParsing(t *testing.T) {
+	initScriptDir(t, "dae")
+	// 取自 ImmortalWrt 24.10 真机（dae unstable-20260802.r1000.ae056a）。
+	output := `Sun Aug  2 22:41:27 2026 daemon.err dae[21354]: ` +
+		`time="Aug 02 14:41:27" level=info msg="192.168.7.239:8016 <-> settings-win.data.microsoft.com:443" ` +
+		`dialer=biggerboxpro dscp=0 ip="57.155.104.224:443" mac="28:d0:43:f9:3e:ec" network=tcp4 ` +
+		`outbound=US pname= policy=fixed sniffed=settings-win.data.microsoft.com` + "\n"
+	runner := &scriptedRunner{t: t, replies: map[string]command.Result{
+		"logread -e dae": {Stdout: output},
+	}}
+	manager := newTestProcdManager(t, runner)
+
+	entries, err := manager.Logs(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Logs 返回错误: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(entries))
+	}
+	// 日志页那一侧不能因为这个修复退回去显示整行 logfmt。
+	if entries[0].Message != "192.168.7.239:8016 <-> settings-win.data.microsoft.com:443" {
+		t.Fatalf("Message = %q，期望只剩 msg 正文", entries[0].Message)
+	}
+
+	events, dropped := daeconn.Parse([]daeconn.LogLine{{
+		Timestamp: entries[0].Timestamp,
+		Message:   entries[0].RawLine(),
+	}})
+	if dropped != 0 {
+		t.Fatalf("dropped = %d，连接行被当成日志格式变化丢弃了", dropped)
+	}
+	if len(events) != 1 {
+		t.Fatalf("解析出 %d 条事件，期望 1 条", len(events))
+	}
+	event := events[0]
+	if event.Network != "tcp4" || event.Outbound != "US" || event.Dialer != "biggerboxpro" {
+		t.Fatalf("network/outbound/dialer = %s/%s/%s", event.Network, event.Outbound, event.Dialer)
+	}
+	if event.Src != "192.168.7.239:8016" || event.Target != "settings-win.data.microsoft.com:443" {
+		t.Fatalf("src/dst = %s / %s", event.Src, event.Target)
+	}
+	if event.Sniffed != "settings-win.data.microsoft.com" || event.DstAddr != "57.155.104.224:443" {
+		t.Fatalf("sniffed/ip = %s / %s", event.Sniffed, event.DstAddr)
+	}
+	if event.Mac != "28:d0:43:f9:3e:ec" {
+		t.Fatalf("mac = %s", event.Mac)
 	}
 }
 
