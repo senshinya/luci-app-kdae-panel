@@ -6,33 +6,27 @@
 
 ## 界面预览
 
-| 运行概览 | 连接活动 |
-| :--: | :--: |
-| ![运行概览](docs/screenshots/dashboard.png) | ![连接活动](docs/screenshots/connections.png) |
-
-| 代理编排 | 配置管理 |
-| :--: | :--: |
-| ![代理编排](docs/screenshots/orchestration.png) | ![配置管理](docs/screenshots/config.png) |
-
-| 动态配置能力 | dae 版本管理 |
-| :--: | :--: |
-| ![动态配置能力](docs/screenshots/schema.png) | ![dae 版本管理](docs/screenshots/versions.png) |
-
-| Geo 数据管理 | 故障诊断 |
-| :--: | :--: |
-| ![Geo 数据管理](docs/screenshots/geo.png) | ![故障诊断](docs/screenshots/diagnostics.png) |
-
-| 运行日志 | 配置备份 |
-| :--: | :--: |
-| ![运行日志](docs/screenshots/logs.png) | ![配置备份](docs/screenshots/backups.png) |
-
-| 面板设置 | 首次设置 |
-| :--: | :--: |
-| ![面板设置](docs/screenshots/settings.png) | ![首次设置](docs/screenshots/setup.png) |
-
-| 登录 | 移动端连接活动 |
-| :--: | :--: |
-| ![登录](docs/screenshots/login.png) | ![移动端连接活动](docs/screenshots/connections-mobile.png) |
+<table>
+  <tr>
+    <td colspan="2" width="33%" align="center"><strong>运行概览</strong><br><img width="100%" src="docs/screenshots/dashboard.png" alt="运行概览"></td>
+    <td colspan="2" width="33%" align="center"><strong>连接活动</strong><br><img width="100%" src="docs/screenshots/connections.png" alt="连接活动"></td>
+    <td colspan="2" width="33%" align="center"><strong>代理编排</strong><br><img width="100%" src="docs/screenshots/orchestration.png" alt="代理编排"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><strong>配置管理</strong><br><img width="100%" src="docs/screenshots/config.png" alt="配置管理"></td>
+    <td colspan="2" align="center"><strong>动态配置能力</strong><br><img width="100%" src="docs/screenshots/schema.png" alt="动态配置能力"></td>
+    <td colspan="2" align="center"><strong>dae 版本管理</strong><br><img width="100%" src="docs/screenshots/versions.png" alt="dae 版本管理"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><strong>Geo 数据管理</strong><br><img width="100%" src="docs/screenshots/geo.png" alt="Geo 数据管理"></td>
+    <td colspan="2" align="center"><strong>故障诊断</strong><br><img width="100%" src="docs/screenshots/diagnostics.png" alt="故障诊断"></td>
+    <td colspan="2" align="center"><strong>运行日志</strong><br><img width="100%" src="docs/screenshots/logs.png" alt="运行日志"></td>
+  </tr>
+  <tr>
+    <td colspan="3" width="50%" align="center"><strong>配置备份</strong><br><img width="100%" src="docs/screenshots/backups.png" alt="配置备份"></td>
+    <td colspan="3" width="50%" align="center"><strong>面板设置</strong><br><img width="100%" src="docs/screenshots/settings.png" alt="面板设置"></td>
+  </tr>
+</table>
 
 *截图由当前代码的 Playwright 演示环境生成，页面状态、连接、节点、订阅、日志、诊断与延迟均为示例数据。*
 

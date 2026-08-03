@@ -772,17 +772,17 @@ func TestStatusDefaultsToLoyalsoldierBeforeAnyUpdate(t *testing.T) {
 // 地方，更新"成功"却毫无效果。
 func TestSearchPathHonoursLocationAsset(t *testing.T) {
 	paths := SearchPath("/etc/dae/config.dae", map[string]string{LocationAssetEnv: "/opt/geo"})
-	if len(paths) == 0 || paths[0] != "/opt/geo" {
+	if len(paths) == 0 || paths[0] != filepath.Clean("/opt/geo") {
 		t.Fatalf("DAE_LOCATION_ASSET 应排在最前: %v", paths)
 	}
-	if paths[1] != filepath.Dir("/etc/dae/config.dae") {
+	if paths[1] != filepath.Clean(filepath.Dir("/etc/dae/config.dae")) {
 		t.Fatalf("配置目录应排在第二位: %v", paths)
 	}
 }
 
 func TestSearchPathWithoutLocationAsset(t *testing.T) {
 	paths := SearchPath("/etc/dae/config.dae", nil)
-	if paths[0] != filepath.Dir("/etc/dae/config.dae") {
+	if paths[0] != filepath.Clean(filepath.Dir("/etc/dae/config.dae")) {
 		t.Fatalf("没有环境变量时配置目录应排在最前: %v", paths)
 	}
 }
@@ -794,19 +794,21 @@ func TestSearchPathWithoutLocationAsset(t *testing.T) {
 // 文件两次，第二次记成"被遮蔽的副本"，界面于是给出一句自相矛盾的话：dae 只读
 // /etc/dae/geoip.dat，而 /etc/dae/geoip.dat 里的副本不会生效、可以删掉。
 func TestSearchPathDeduplicatesDirectories(t *testing.T) {
+	configDir := filepath.Clean("/etc/dae")
 	for name, environment := range map[string]map[string]string{
-		"与配置目录相同": {LocationAssetEnv: "/etc/dae"},
-		"只差一个尾斜杠": {LocationAssetEnv: "/etc/dae/"},
+		"与配置目录相同":  {LocationAssetEnv: "/etc/dae"},
+		"只差一个尾斜杠":  {LocationAssetEnv: "/etc/dae/"},
+		"绕了一层上级目录": {LocationAssetEnv: "/etc/dae/subdir/.."},
 	} {
 		paths := SearchPath("/etc/dae/config.dae", environment)
 		var hits int
 		for _, path := range paths {
-			if path == "/etc/dae" {
+			if path == configDir {
 				hits++
 			}
 		}
 		if hits != 1 {
-			t.Fatalf("%s：/etc/dae 在搜索顺序里出现 %d 次: %v", name, hits, paths)
+			t.Fatalf("%s：%s 在搜索顺序里出现 %d 次: %v", name, configDir, hits, paths)
 		}
 	}
 }
@@ -876,6 +878,27 @@ func TestStatusHasNoSelfShadowingWarning(t *testing.T) {
 		if strings.Contains(warning, "可以删掉") {
 			t.Fatalf("不该出现让用户删掉唯一生效文件的告警: %s", warning)
 		}
+	}
+}
+
+// 回滚点删不掉时必须报出来并保留记录：那是一份几十兆的旧副本白占磁盘，
+// 状态页要能发现它。
+func TestDoneReportsBackupCleanupFailure(t *testing.T) {
+	directory := testDirectory(t)
+	backup := filepath.Join(directory, upstream.GeoIPName+rollbackSuffix)
+	if err := os.MkdirAll(filepath.Join(backup, "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transaction := &geoTransaction{staged: []stagedFile{{
+		name: upstream.GeoIPName, backup: backup,
+	}}}
+
+	err := transaction.done()
+	if err == nil || !strings.Contains(err.Error(), upstream.GeoIPName) {
+		t.Fatalf("清理失败应指出对应文件: %v", err)
+	}
+	if transaction.staged[0].backup != backup {
+		t.Fatal("清理失败后必须保留回滚点记录，供状态页发现并处理")
 	}
 }
 

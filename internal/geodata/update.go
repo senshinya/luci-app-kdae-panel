@@ -99,6 +99,9 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 	if stateErr != nil {
 		m.logger.Warn("记录 geo 更新状态失败", "error", stateErr)
 	}
+	if cleanupErr != nil {
+		m.logger.Warn("清理旧 Geo 回滚点失败", "error", cleanupErr)
+	}
 	m.logger.Info("已更新 geo 数据",
 		"source", state.Source, "tag", state.Tag, "targets", targets,
 		"reloaded", reloaded)
@@ -113,6 +116,10 @@ func (m *Manager) Apply(ctx context.Context, data upstream.GeoData) (Status, err
 	if stateErr != nil {
 		updated.Warnings = append(updated.Warnings,
 			fmt.Sprintf("geo 数据已更新并生效，但更新记录写入失败（%v）", stateErr))
+	}
+	if cleanupErr != nil {
+		updated.Warnings = append(updated.Warnings,
+			fmt.Sprintf("Geo 数据已更新并生效，但旧回滚点清理失败（%v）；可在异常文件区域确认后清理", cleanupErr))
 	}
 	return updated, nil
 }
@@ -306,7 +313,7 @@ func (t *geoTransaction) rollback() error {
 	return errors.Join(failures...)
 }
 
-// done 在 reload 成功后丢弃回滚点。
+// done 在 reload 成功后丢弃回滚点；删不掉时保留路径并交给状态页处理。
 //
 // 刻意不长期保留：geo 随时可以从上游重新下载并自校验，留一份几十兆的旧副本
 // 只是白占磁盘。二进制不同——kdae 的 CI 产物 90 天就过期，旧版本可能永久取不回来，
@@ -318,15 +325,15 @@ func (t *geoTransaction) rollback() error {
 func (t *geoTransaction) done() error {
 	var failures []error
 	for index := range t.staged {
-		backup := t.staged[index].backup
-		if backup == "" {
+		file := &t.staged[index]
+		if file.backup == "" {
 			continue
 		}
-		if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
-			failures = append(failures, fmt.Errorf("删除 %s 的回滚点: %w", t.staged[index].name, err))
+		if err := os.Remove(file.backup); err != nil && !os.IsNotExist(err) {
+			failures = append(failures, fmt.Errorf("删除 %s 回滚点 %s: %w", file.name, file.backup, err))
 			continue
 		}
-		t.staged[index].backup = ""
+		file.backup = ""
 	}
 	return errors.Join(failures...)
 }
