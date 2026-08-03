@@ -60,8 +60,13 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.12'
+          # kdae 独立决定自己的 Go 基线；直接读上游 go.mod，避免它升级后
+          # 兼容检查还停在面板的工具链版本而在真正验证契约前就失败。
+          go-version-file: upstream/go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            upstream/go.sum
 
       - name: 安装上游构建依赖
         run: |
@@ -71,8 +76,13 @@ jobs:
       - name: 构建 kdae
         run: make -C upstream dae NOSTRIP=y DEFAULT_GOEXPERIMENT= OUTPUT=dae-contract
 
+      # Git 不记录普通文件的读权限，检出的示例配置固定是 0644；kdae 会拒绝
+      # 其他用户可读的配置。复制成面板生产环境实际使用的 0600 再验证。
+      - name: 准备契约配置
+        run: install -m0600 upstream/example.dae "${RUNNER_TEMP}/kdae-contract.dae"
+
       - name: 验证面板与 kdae 公开契约
         env:
           KDAE_CONTRACT_BINARY: ${{ github.workspace }}/upstream/dae-contract
-          KDAE_CONTRACT_CONFIG: ${{ github.workspace }}/upstream/example.dae
+          KDAE_CONTRACT_CONFIG: ${{ runner.temp }}/kdae-contract.dae
         run: go test -count=1 -run '^TestUpstreamContract$' -timeout=4m ./internal/dae
