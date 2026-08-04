@@ -24,10 +24,11 @@ import {
 } from '@vicons/ionicons5'
 import { RouterLink } from 'vue-router'
 import { APIError, getJSON, postJSON } from '../api/client'
-import type { ConfigDocument, DaeReport, ServiceStatus } from '../types/api'
+import type { ConfigDocument, DaeReport, ServiceStatus, SubscriptionNodeSource } from '../types/api'
 import { formatBytes, formatElapsedSince } from '../utils/format'
 import { parseGroups, parseRoutingRules, readSection } from '../utils/daeconf'
 import { useBackendStore } from '../stores/backend'
+import FixedGroupCard from '../components/dashboard/FixedGroupCard.vue'
 
 const message = useMessage()
 const loading = ref(true)
@@ -36,9 +37,12 @@ const actionLoading = ref('')
 const service = ref<ServiceStatus | null>(null)
 const dae = ref<DaeReport | null>(null)
 const configContent = ref<string | null>(null)
+const configHash = ref('')
 const serviceError = ref('')
 const daeError = ref('')
 const configError = ref('')
+const subscriptionSources = ref<SubscriptionNodeSource[]>([])
+const subscriptionSourcesLoaded = ref(false)
 const now = ref(Date.now())
 let clockTimer: number | undefined
 
@@ -67,10 +71,11 @@ const orchestration = computed(() => {
 async function refresh(silent = false) {
   if (silent) refreshing.value = true
   else loading.value = true
-  const [serviceResult, daeResult, configResult] = await Promise.allSettled([
+  const [serviceResult, daeResult, configResult, subscriptionResult] = await Promise.allSettled([
     getJSON<ServiceStatus>('/api/v1/service'),
     getJSON<DaeReport>('/api/v1/dae/capabilities'),
     getJSON<ConfigDocument>('/api/v1/config'),
+    getJSON<{ sources: SubscriptionNodeSource[] }>('/api/v1/subscriptions/nodes'),
   ])
   if (serviceResult.status === 'fulfilled') {
     service.value = serviceResult.value
@@ -86,14 +91,24 @@ async function refresh(silent = false) {
   }
   if (configResult.status === 'fulfilled') {
     configContent.value = configResult.value.content
+    configHash.value = configResult.value.hash
     configError.value = ''
   } else if (configResult.reason instanceof APIError && configResult.reason.status === 404) {
     // 只有 404 才代表配置确实不存在；其他失败保留上次读到的内容并报错
     configContent.value = null
+    configHash.value = ''
     configError.value = ''
   } else {
     configError.value = configResult.reason instanceof Error ? configResult.reason.message : '读取配置失败'
   }
+  // 订阅节点缓存读取失败不影响概览其他部分，因此不设错误横幅；
+  // sourcesLoaded 为 false 时快速切换卡片会自然退回索引框并说明原因。
+  if (subscriptionResult.status === 'fulfilled') {
+    subscriptionSources.value = subscriptionResult.value.sources
+  } else {
+    subscriptionSources.value = []
+  }
+  subscriptionSourcesLoaded.value = subscriptionResult.status === 'fulfilled'
   loading.value = false
   refreshing.value = false
 }
@@ -178,6 +193,16 @@ onBeforeUnmount(() => {
         </NCard>
       </NGridItem>
     </NGrid>
+
+    <FixedGroupCard
+      v-if="configContent !== null"
+      :content="configContent"
+      :hash="configHash"
+      :sources="subscriptionSources"
+      :sources-loaded="subscriptionSourcesLoaded"
+      @switched="refresh(true)"
+      @conflict="refresh(true)"
+    />
 
     <NGrid class="equal-height-grid" responsive="screen" cols="1 l:2 xl:3" :x-gap="16" :y-gap="16">
       <NGridItem>
