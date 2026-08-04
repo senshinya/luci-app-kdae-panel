@@ -17,9 +17,8 @@ import {
   type DataTableColumns,
 } from 'naive-ui'
 import { CreateOutline, DownloadOutline, FlashOutline, PricetagOutline, TrashOutline } from '@vicons/ionicons5'
-import { postJSON } from '../../api/client'
+import { useLatencyProbe } from '../../composables/useLatencyProbe'
 import { useMobileViewport } from '../../composables/useMobileViewport'
-import type { LatencyResult, LatencyTarget } from '../../types/api'
 import { appendToSection, isQuotable, isValidTag, parseGroups, quote, readSection, removeLine, replaceLine, type Entry } from '../../utils/daeconf'
 import { includeNodesInGroups } from '../../utils/group'
 import { allocateNodeTags, parseNodeLink, type NodeLinkInfo } from '../../utils/nodelink'
@@ -141,101 +140,35 @@ function applyTag() {
 }
 
 // ---- 节点延迟(公网 ICMP、内网 TCP，非 dae 内部健康检查) ----
-const probing = ref(false)
-const latency = ref(new Map<string, LatencyResult>())
+// 阈值分档、分批探测、文案与 tooltip 结构收拢在 useLatencyProbe 里，供节点瓦片等
+// 后续界面复用；这里只做 NodeRow -> {host, port} 的适配，行为与此前完全一致。
+const {
+  probing,
+  probe: probeLatencyTargets,
+  label: latencyLabelOf,
+  type: latencyTypeOf,
+  title: latencyTitleOf,
+  cell: latencyCellOf,
+} = useLatencyProbe(message)
 
-function latencyKey(info: NodeLinkInfo): string {
-  return `${info.host}:${info.port}`
-}
-
-/** 与后端 netprobe.Target.validate 一致，避免把明显非法的目标发出去。 */
-function probeTarget(info: NodeLinkInfo | null): LatencyTarget | null {
-  const host = info?.host
-  const port = info?.port
-  if (!host || host !== host.trim() || host.length > 253 || /[\s/\\]/.test(host)) return null
-  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) return null
-  return { host, port }
-}
-
-async function probeLatency() {
-  const targets = new Map<string, LatencyTarget>()
-  for (const row of nodes.value) {
-    const target = probeTarget(row.info)
-    if (target) targets.set(`${target.host}:${target.port}`, target)
-  }
-  if (targets.size === 0) {
-    message.warning('没有可探测的节点(需要能解析出服务器与端口)')
-    return
-  }
-  probing.value = true
-  const batch = [...targets.values()]
-  const merged = new Map(latency.value)
-  try {
-    for (let start = 0; start < batch.length; start += 64) {
-      const { results } = await postJSON<{ results: LatencyResult[] }>('/api/v1/net/latency', {
-        targets: batch.slice(start, start + 64),
-      })
-      for (const result of results) merged.set(`${result.host}:${result.port}`, result)
-      // 逐批发布，某一批失败时前面的结果仍然可见
-      latency.value = new Map(merged)
-    }
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : '延迟探测失败')
-  } finally {
-    probing.value = false
-  }
+function probeLatency() {
+  return probeLatencyTargets(nodes.value.map((row) => row.info))
 }
 
 function latencyCell(row: NodeRow) {
-  if (!row.info || !probeTarget(row.info)) return h(NText, { depth: 3 }, { default: () => '—' })
-  const result = latency.value.get(latencyKey(row.info))
-  if (!result) return h(NText, { depth: 3 }, { default: () => '未测' })
-  if (!result.reachable) {
-    const label = result.method === 'icmp' ? '无法测量' : '不可达'
-    return h(NTooltip, null, {
-      trigger: () => h(NTag, { size: 'small', type: 'error', bordered: false }, { default: () => label }),
-      default: () => result.error || '连接失败',
-    })
-  }
-  const value = result.latencyMs || 0
-  const type = value < 100 ? 'success' : value < 300 ? 'warning' : 'error'
-  const tag = () => h(NTag, { size: 'small', type, bordered: false }, {
-    default: () => `${value.toFixed(value < 10 ? 1 : 0)} ms`,
-  })
-  return h(NTooltip, null, {
-    trigger: tag,
-    default: () => [
-      result.method === 'icmp' ? 'ICMP 网络延迟（不验证代理端口或协议）' : 'TCP 握手延迟',
-      result.resolvedIp ? ` · ${result.resolvedIp}` : '',
-    ].join(''),
-  })
+  return latencyCellOf(row.info)
 }
 
 function latencyLabel(row: NodeRow): string {
-  if (!row.info || !probeTarget(row.info)) return '—'
-  const result = latency.value.get(latencyKey(row.info))
-  if (!result) return '未测'
-  if (!result.reachable) return result.method === 'icmp' ? '无法测量' : '不可达'
-  const value = result.latencyMs || 0
-  return `${value.toFixed(value < 10 ? 1 : 0)} ms`
+  return latencyLabelOf(row.info)
 }
 
 function latencyType(row: NodeRow): 'success' | 'warning' | 'error' | 'default' {
-  if (!row.info || !probeTarget(row.info)) return 'default'
-  const result = latency.value.get(latencyKey(row.info))
-  if (!result) return 'default'
-  if (!result.reachable) return 'error'
-  const value = result.latencyMs || 0
-  return value < 100 ? 'success' : value < 300 ? 'warning' : 'error'
+  return latencyTypeOf(row.info)
 }
 
 function latencyTitle(row: NodeRow): string {
-  if (!row.info) return ''
-  const result = latency.value.get(latencyKey(row.info))
-  if (!result) return ''
-  if (!result.reachable) return result.error || ''
-  const method = result.method === 'icmp' ? 'ICMP 网络延迟' : 'TCP 握手延迟'
-  return result.resolvedIp ? `${method} · ${result.resolvedIp}` : method
+  return latencyTitleOf(row.info)
 }
 
 const nodeColumns: DataTableColumns<NodeRow> = [
