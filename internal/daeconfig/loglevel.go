@@ -43,46 +43,30 @@ func validLogLevel(value string) bool {
 	}
 }
 
-// tokenize 只保留定位 global 声明需要的标识符和结构符号；注释与字符串内容
-// 必须跳过，否则节点链接或注释里的 `global { log_level: ... }` 会污染结果。
+// tokenize 只保留定位声明需要的标识符和结构符号。注释与字符串内容先由 maskContent
+// 抹平，否则节点链接或注释里的 `global { log_level: ... }` 会污染结果。
 func tokenize(content string) []string {
-	tokens := make([]string, 0, strings.Count(content, "\n")*2)
-	for index := 0; index < len(content); {
+	masked := maskContent(content)
+	tokens := make([]string, 0, strings.Count(masked, "\n")*2)
+	for index := 0; index < len(masked); {
 		switch {
-		case isSpace(content[index]):
+		case isSpace(masked[index]):
 			index++
-		case content[index] == '#':
-			index = skipUntil(content, index+1, '\n')
-		case content[index] == '/' && index+1 < len(content) && content[index+1] == '*':
-			if end := strings.Index(content[index+2:], "*/"); end >= 0 {
-				index += end + 4
-			} else {
-				return tokens
-			}
-		case content[index] == '\'' || content[index] == '"':
-			index = skipString(content, index)
-		case isIdentifierStart(content[index]):
+		case isIdentifierStart(masked[index]):
 			end := index + 1
-			for end < len(content) && isIdentifierPart(content[end]) {
+			for end < len(masked) && isIdentifierPart(masked[end]) {
 				end++
 			}
-			tokens = append(tokens, content[index:end])
+			tokens = append(tokens, masked[index:end])
 			index = end
-		case strings.ContainsRune("{}:", rune(content[index])):
-			tokens = append(tokens, content[index:index+1])
+		case strings.ContainsRune("{}:", rune(masked[index])):
+			tokens = append(tokens, masked[index:index+1])
 			index++
 		default:
 			index++
 		}
 	}
 	return tokens
-}
-
-func skipUntil(content string, index int, delimiter byte) int {
-	for index < len(content) && content[index] != delimiter {
-		index++
-	}
-	return index
 }
 
 func skipString(content string, index int) int {
