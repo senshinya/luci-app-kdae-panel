@@ -76,8 +76,8 @@ function describeTarget(entry: FixedGroupView, targetIndex: number): string {
   return `fixed(${targetIndex})`
 }
 
-async function refresh() {
-  loading.value = true
+/** config 与 sources 的公共读取逻辑；不切换 loading，供 refresh 与切换后的静默重读共用。 */
+async function loadDocumentAndSources() {
   const [configResult, sourcesResult] = await Promise.allSettled([
     getJSON<ConfigDocument>('/api/v1/config'),
     getJSON<{ sources: SubscriptionNodeSource[] }>('/api/v1/subscriptions/nodes'),
@@ -94,10 +94,27 @@ async function refresh() {
   }
   sources.value = sourcesResult.status === 'fulfilled' ? sourcesResult.value.sources : []
   sourcesLoaded.value = true
+}
+
+async function refresh() {
+  loading.value = true
+  await loadDocumentAndSources()
   loading.value = false
 }
 
-/** 切换成功或遇到 409 后必须重新读取，否则 expectedHash 立刻过期，下一次切换必然冲突。 */
+/**
+ * 切换成功后必须连同 sources 一起重读：这条路径刚触发了一次 dae reload，reload 会
+ * 重新拉取订阅，persist.d 缓存可能已被改写、节点顺序可能已变，只重读 config 会让
+ * 瓦片名与“当前 X”停留在切换前的快照。expectedHash 会过期，sources 同样会过期。
+ */
+async function reloadAfterSwitch() {
+  await loadDocumentAndSources()
+}
+
+/**
+ * 409 configuration_conflict 时磁盘已变化，必须重新读取，否则 expectedHash 立刻过期，
+ * 下一次切换必然冲突；这种情况下 dae 没有重载过，sources 仍然可信，无需一并重读。
+ */
 async function reloadConfig() {
   try {
     document.value = await getJSON<ConfigDocument>('/api/v1/config')
@@ -120,9 +137,12 @@ async function switchTo(entry: FixedGroupView, targetIndex: number) {
     message.success(result.deferred
       ? `已把 ${entry.group.name} 切到 ${label}；dae 未运行，下次启动生效`
       : `已把 ${entry.group.name} 切到 ${label} 并完成无损重载`)
-    await reloadConfig()
+    await reloadAfterSwitch()
   } catch (error) {
-    if (error instanceof APIError && error.status === 409) {
+    if (error instanceof APIError && error.status === 409 && error.code === 'operation_in_progress') {
+      // 另一个控制操作正在执行：磁盘配置没有变化，expectedHash 仍然有效，不需要重读。
+      message.warning('另一个控制操作正在执行，请稍后重试')
+    } else if (error instanceof APIError && error.status === 409) {
       message.warning('配置已在别处发生变化，已自动重新读取')
       await reloadConfig()
     } else {
