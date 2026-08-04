@@ -244,6 +244,39 @@ group {
     expect(resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true).resolvable).toBe(false)
   })
 
+  it('本地节点里有未命名的条目时不可解', () => {
+    // 未命名节点是面板本身承认并处理的真实状态（见 NodesCard.vue 的 labelAnonymousNodes），
+    // dae 仍会为它建立连接、占用一个下标，只是面板不知道该叫它什么。
+    const content = `node {
+    'vless://u@hk1.example.com:443#HK01'
+    hk02: 'vless://u@hk2.example.com:443#HK02'
+}
+
+group {
+    proxy {
+        policy: fixed(0)
+    }
+}
+`
+    expect(resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true).resolvable).toBe(false)
+  })
+
+  it('存在未命名的订阅时不可解', () => {
+    // 订阅标签是可选的（见 SubscriptionsCard.vue），没写标签的订阅一样会被 dae 拉取节点、
+    // 落在面板不知道的某个 tag 里，不能因为面板过滤不出它的 tag 就当它不存在。
+    const content = `${nodes}subscription {
+    'https://example.com/sub'
+}
+
+group {
+    proxy {
+        policy: fixed(0)
+    }
+}
+`
+    expect(resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true).resolvable).toBe(false)
+  })
+
   it('排除条件不可解', () => {
     const content = `${nodes}group {
     proxy {

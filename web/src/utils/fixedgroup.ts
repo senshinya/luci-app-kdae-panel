@@ -77,18 +77,27 @@ function fromLocalNodes(
   sources: SubscriptionNodeSource[],
   sourcesLoaded: boolean,
 ): FixedCandidates {
-  const subscriptionTags = readSection(content, 'subscription').entries
+  // 订阅是否存在只看条目本身，不能先按 tag 过滤——没写标签的订阅一样会被 dae 拉取节点、
+  // 一样占用某个（面板不知道的）tag，遗漏它会让下面的判断误以为“没有订阅”。
+  const subscriptionEntries = readSection(content, 'subscription').entries
+  const anonymousSubscription = subscriptionEntries.some((entry) => !entry.tag?.trim())
+  const subscriptionTags = subscriptionEntries
     .map((entry) => entry.tag?.trim() || '')
     .filter(Boolean)
-  if (filters.length === 0 && subscriptionTags.length > 0) {
+  if (filters.length === 0 && subscriptionEntries.length > 0) {
     return unresolvable('该分组包含全部节点，其中含订阅节点；dae 跨来源的顺序每次重载都可能不同')
   }
 
   const entries = readSection(content, 'node').entries
+  // 未命名的本地节点条目 dae 仍会为它建立 dialer、占用一个下标，面板却无法为它取名，
+  // 一旦被静默剔除，它之后的所有下标都会整体错位而不自知，所以整组直接判不可解。
+  if (entries.some((entry) => !entry.tag?.trim())) {
+    return unresolvable('本地节点里有未命名的条目，dae 仍会为它建立连接，索引会整体偏移')
+  }
   const wanted = filters.length === 0
     ? null
     : new Set(filters.flatMap((filter) => filter.values.map((value) => value.trim()).filter(Boolean)))
-  const available = new Set(entries.map((entry) => entry.tag?.trim() || '').filter(Boolean))
+  const available = new Set(entries.map((entry) => entry.tag!.trim()))
   if (wanted) {
     const missing = [...wanted].filter((name) => !available.has(name))
     if (missing.length > 0) {
@@ -96,16 +105,15 @@ function fromLocalNodes(
     }
   }
 
-  const selected = entries.filter((entry) => {
-    const tag = entry.tag?.trim() || ''
-    return tag !== '' && (!wanted || wanted.has(tag))
-  })
+  const selected = entries.filter((entry) => !wanted || wanted.has(entry.tag!.trim()))
   if (selected.some((entry) => parseNodeLink(entry.value) === null)) {
     return unresolvable('候选里有无法解析的节点链接，dae 可能会跳过它，索引会整体前移')
   }
 
   // dae 的 name() 不区分来源，本地标签与订阅节点重名时会同时命中，顺序随之不可知。
-  if (subscriptionTags.length > 0) {
+  if (subscriptionEntries.length > 0) {
+    // 没有标签的订阅无法用 tag 去查缓存，因而永远没法确认它是否与本地节点重名。
+    if (anonymousSubscription) return unresolvable('存在未命名的订阅，无法确认它的节点是否与本地节点重名')
     if (!sourcesLoaded) return unresolvable('订阅节点缓存尚未读取，无法确认节点名是否与订阅重名')
     const usable = new Map(sources.map((source) => [source.tag, source]))
     const unusable = subscriptionTags.filter((tag) => {
