@@ -110,9 +110,18 @@ function fromLocalNodes(
   sources: SubscriptionNodeSource[],
   sourcesLoaded: boolean,
 ): FixedCandidates {
+  // 一行写两条、或被跨行块注释穿过的行，readSection 只计入 unparsedLines、不产 entry——
+  // 这类行里可能藏着面板漏看的 tag（本地节点或整份订阅），必须在读 entries 之前先查，
+  // 否则会把“面板没列全”误判成“配置里确实没有”，进而展示一个顺序错位的节点名。
+  const subscriptionSection = readSection(content, 'subscription')
+  const nodeSection = readSection(content, 'node')
+  if (subscriptionSection.unparsedLines > 0 || nodeSection.unparsedLines > 0) {
+    return unresolvable('配置里有跨行或一行多条的写法，面板没能完整列出，无法确认 dae 的节点顺序')
+  }
+
   // 订阅是否存在只看条目本身，不能先按 tag 过滤——没写标签的订阅一样会被 dae 拉取节点、
   // 一样占用某个（面板不知道的）tag，遗漏它会让下面的判断误以为“没有订阅”。
-  const subscriptionEntries = readSection(content, 'subscription').entries
+  const subscriptionEntries = subscriptionSection.entries
   const anonymousSubscription = subscriptionEntries.some((entry) => !entry.tag?.trim())
   const subscriptionTags = subscriptionEntries
     .map((entry) => entry.tag?.trim() || '')
@@ -121,7 +130,7 @@ function fromLocalNodes(
     return unresolvable('该分组包含全部节点，其中含订阅节点；dae 跨来源的顺序每次重载都可能不同')
   }
 
-  const entries = readSection(content, 'node').entries
+  const entries = nodeSection.entries
   // 未命名的本地节点条目 dae 仍会为它建立 dialer、占用一个下标，面板却无法为它取名，
   // 一旦被静默剔除，它之后的所有下标都会整体错位而不自知，所以整组直接判不可解。
   if (entries.some((entry) => !entry.tag?.trim())) {

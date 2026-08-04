@@ -393,6 +393,42 @@ group {
       nodes: [{ name: 'weird', protocol: 'foo', host: '', port: null }],
     })
   })
+
+  // Critical 1 回归：readSection 对“一行写两条”或“被跨行块注释穿过”的行只计入
+  // unparsedLines、不产 entry；fromLocalNodes 曾经只看 entries，导致把“面板没列全”
+  // 误判成“配置里确实没有”，展示一个顺序早已错位的节点名。
+  it('本地节点一行写两条时不可解，不能因为少看一条就展示错位的节点名', () => {
+    const content = `node {
+    hk01: 'vless://u@h1.example.com:443#HK01' hk02: 'vless://u@h2.example.com:443#HK02'
+    jp01: 'vless://u@h3.example.com:443#JP01'
+}
+
+group {
+    proxy {
+        policy: fixed(0)
+    }
+}
+`
+    // dae 实际看到 hk01/hk02/jp01 三个 dialer，fixed(0) 是 hk01；面板的 entries 解析
+    // 只剩 jp01，若忽略 unparsedLines 就会误判为“唯一候选是 jp01”并展示成当前节点。
+    const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
+    expect(result.resolvable).toBe(false)
+  })
+
+  it('订阅一行写多条时不可解，即便按 entries 数看起来配置里没有订阅', () => {
+    const content = `${nodes}subscription { a: 'https://example.com/a' b: 'https://example.com/b' }
+
+group {
+    proxy {
+        policy: fixed(0)
+    }
+}
+`
+    // 本地三个节点自身完整可解析，但 subscriptionEntries 会被“一行写两条”坑成空数组，
+    // 让 fromLocalNodes 误以为没有订阅，从而展示一份不完整的候选（漏掉两个订阅 tag）。
+    const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
+    expect(result.resolvable).toBe(false)
+  })
 })
 
 describe('splitHostPort', () => {
