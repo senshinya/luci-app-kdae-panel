@@ -230,11 +230,36 @@ const unknownSubscriptionNodes = computed(() => {
   }
   return [...new Set(unknown)]
 })
-/** 编辑弹窗当前指向的分组的候选节点；分组关闭或找不到时为 null。 */
-const editingCandidates = computed<FixedCandidates | null>(() => {
+/**
+ * 把编辑弹窗里的草稿过滤假设写入 content 后的文本与该分组的最新解析结果；
+ * 草稿本身不可序列化（为空、非法字符等）或分组已找不到时返回 null。
+ * 校验和候选展示都必须基于这份"即将真正保存"的状态，而不是弹窗打开时那份旧的分组。
+ */
+function applyDraftFilters(): { next: string; latest: Group } | null {
   const target = groupTarget.value
-  const group = target ? groups.value[target.index] : null
-  return group ? candidatesFor(group) : null
+  const current = target ? groups.value[target.index] : null
+  if (!target || !current) return null
+  const serialized = groupFilters.value.map(serializeGroupFilter)
+  if (serialized.some((value) => value === null)) return null
+
+  let next = content.value
+  for (let index = current.filters.length - 1; index >= 0; index -= 1) {
+    next = setGroupFilter(next, current, index, serialized[index] || '')
+  }
+  for (let index = current.filters.length; index < serialized.length; index += 1) {
+    const latest = parseGroups(next)[target.index]
+    if (!latest) return null
+    next = setGroupFilter(next, latest, latest.filters.length, serialized[index]!)
+  }
+  const latest = parseGroups(next)[target.index]
+  return latest ? { next, latest } : null
+}
+
+/** 编辑弹窗当前草稿的候选节点；草稿不可序列化或分组关闭时为 null。 */
+const editingCandidates = computed<FixedCandidates | null>(() => {
+  const applied = applyDraftFilters()
+  if (!applied) return null
+  return resolveFixedCandidates(applied.next, applied.latest, subscriptionNodeSources.value, subscriptionNodesLoaded.value)
 })
 
 function openGroupEditor(groupIndex: number) {
@@ -268,28 +293,26 @@ function applyGroupEdit() {
     message.error('配置在编辑期间发生了变化，请关闭后重新打开')
     return
   }
-  const serialized = groupFilters.value.map(serializeGroupFilter)
-  if (serialized.some((value) => value === null)) {
+  const applied = applyDraftFilters()
+  if (!applied) {
     message.error('过滤条件不能为空；请选择节点或订阅，名称也不能同时含单双引号')
     return
   }
-  if (groupPolicy.value === 'fixed' && !validFixedIndex(current, groupFixedIndex.value)) {
-    return
+  if (groupPolicy.value === 'fixed') {
+    if (!Number.isInteger(groupFixedIndex.value) || groupFixedIndex.value < 0) {
+      message.error('fixed(n) 的索引必须是从 0 开始的整数')
+      return
+    }
+    // 越界校验必须针对过滤草稿写入之后的候选（applied.next/applied.latest），
+    // 不能用 candidatesFor(current)：current 是弹窗打开时的旧过滤，草稿改动后候选可能已经变化。
+    const candidates = resolveFixedCandidates(
+      applied.next, applied.latest, subscriptionNodeSources.value, subscriptionNodesLoaded.value,
+    )
+    if (!checkFixedIndexBounds(candidates, groupFixedIndex.value)) return
   }
 
-  let next = content.value
-  for (let index = current.filters.length - 1; index >= 0; index -= 1) {
-    next = setGroupFilter(next, current, index, serialized[index] || '')
-  }
-  for (let index = current.filters.length; index < serialized.length; index += 1) {
-    const latest = parseGroups(next)[target.index]
-    if (!latest) return
-    next = setGroupFilter(next, latest, latest.filters.length, serialized[index]!)
-  }
-  const latest = parseGroups(next)[target.index]
-  if (!latest) return
   const policy = groupPolicy.value === 'fixed' ? `fixed(${groupFixedIndex.value})` : groupPolicy.value
-  content.value = setGroupPolicy(next, latest, policy)
+  content.value = setGroupPolicy(applied.next, applied.latest, policy)
   groupEditVisible.value = false
   groupTarget.value = null
 }
@@ -322,19 +345,23 @@ function candidateReason(candidates: FixedCandidates | null): string {
   return candidates.reason
 }
 
-/** 校验索引；可解时必须落在候选范围内，不可解时只要求是非负整数。 */
-function validFixedIndex(group: Group, index: number): boolean {
-  if (!Number.isInteger(index) || index < 0) {
-    message.error('fixed(n) 的索引必须是从 0 开始的整数')
-    return false
-  }
-  const candidates = candidatesFor(group)
+/** 候选可解时校验索引是否落在范围内；不可解时始终放行（不做面板保证不了的静默兜底）。 */
+function checkFixedIndexBounds(candidates: FixedCandidates, index: number): boolean {
   if (!candidates.resolvable) return true
   if (index < candidates.nodes.length) return true
   message.error(candidates.nodes.length === 0
     ? '当前分组没有可供 fixed(0) 选择的节点'
     : `fixed(${index}) 已越界；当前过滤条件只有 ${candidates.nodes.length} 个明确节点`)
   return false
+}
+
+/** 校验索引；先做非负整数检查，再基于该分组当前已持久化的候选检查越界。 */
+function validFixedIndex(group: Group, index: number): boolean {
+  if (!Number.isInteger(index) || index < 0) {
+    message.error('fixed(n) 的索引必须是从 0 开始的整数')
+    return false
+  }
+  return checkFixedIndexBounds(candidatesFor(group), index)
 }
 </script>
 
