@@ -1,0 +1,1 @@
+import{On as e,Tt as t}from"./client-CHTsrZM3.js";import{m as n}from"./index-CT_UXXMx.js";function r(){let r=e(n,null);return r===null&&t(`use-dialog`,`No outer <n-dialog-provider /> founded.`),r}export{r as t};
