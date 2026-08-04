@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -513,6 +513,52 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     if (UPDATE_SCREENSHOTS) {
       await page.unroute(capabilityPattern, maskCapabilityPath)
     }
+  })
+
+  await test.step('节点选择页点选瓦片直接切换 fixed 分组，且不产生自动备份', async () => {
+    const backupDir = join(here, '.work', 'backups')
+    const backupCountBefore = readdirSync(backupDir).length
+    const policyRequests: string[] = []
+    const trackPolicyRequest = (request: import('@playwright/test').Request) => {
+      if (request.method() === 'PUT' && /\/api\/v1\/groups\/[^/]+\/policy$/.test(new URL(request.url()).pathname)) {
+        policyRequests.push(request.url())
+      }
+    }
+    page.on('request', trackPolicyRequest)
+
+    await page.goto('/nodes')
+    await expect(page.getByRole('heading', { name: '节点选择', level: 2 })).toBeVisible()
+    // e2e_fixed 的候选全部是显式本地节点(E2E-01、SG-01)，顺序可静态展开，应当铺出瓦片而不是索引框
+    const card = page.getByTestId('fixed-group-card-e2e_fixed')
+    await expect(card).toBeVisible()
+    await expect(card).toContainText('fixed(0)')
+    await expect(card).toContainText('当前 E2E-01')
+    const grid = page.getByTestId('fixed-group-grid-e2e_fixed')
+    await expect(grid).toBeVisible()
+
+    await card.getByTestId('fixed-group-tile-e2e_fixed-1').click()
+    await expect(page.getByText('已把 e2e_fixed 切到 SG-01 并完成无损重载')).toBeVisible()
+    await expect(card).toContainText('fixed(1)')
+    await expect(card).toContainText('当前 SG-01')
+    expect(policyRequests).toHaveLength(1)
+
+    // 点击已经选中的节点应当无操作：不发起第二次写入请求
+    await card.getByTestId('fixed-group-tile-e2e_fixed-1').click()
+    await page.locator('.page-toolbar').getByRole('button', { name: '重新读取' }).click()
+    await expect(card).toContainText('fixed(1)')
+    expect(policyRequests).toHaveLength(1)
+    page.off('request', trackPolicyRequest)
+
+    // 配置文件里该分组必须精确写成 fixed(1)，不是 fixed( 子串、也不能残留旧值或重复声明
+    const saved = readFileSync(configPath, 'utf8')
+    const fixedGroupBody = /e2e_fixed\s*\{([^}]*)\}/.exec(saved)?.[1] || ''
+    const policyLines = fixedGroupBody.split('\n').map((line) => line.trim()).filter((line) => line.startsWith('policy:'))
+    expect(policyLines).toHaveLength(1)
+    expect(policyLines[0]).toBe('policy: fixed(1)')
+
+    // 快速切换端点不产生自动备份——读真实文件系统才是可信的证据，不能只看接口响应
+    const backupCountAfter = readdirSync(backupDir).length
+    expect(backupCountAfter).toBe(backupCountBefore)
   })
 
   await test.step('原始配置与动态能力页面展示当前 dae 数据', async () => {

@@ -2139,6 +2139,122 @@ pre,
   cursor: help;
 }
 
+/* ---- 节点选择页：fixed 分组的候选节点瓦片 ---- */
+.node-selection-hint {
+  margin: -6px 0 -4px;
+}
+
+.node-selection-list {
+  display: grid;
+  gap: 16px;
+}
+
+.fixed-group-card .n-card-header {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.fixed-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.fixed-group-head code {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.fixed-group-current {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.fixed-group-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fixed-group-index-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.node-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(168px, 100%), 1fr));
+  gap: 10px;
+}
+
+.node-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+
+.node-tile:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.node-tile:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* 选中态不能只靠边框颜色：额外叠加底色 + 右上角勾选标记，色盲用户也能分辨。 */
+.node-tile.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.node-tile-selected-mark {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.node-tile-name {
+  overflow: hidden;
+  padding-right: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-tile-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.node-tile-desc {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .routing-list {
   margin: 0;
   padding: 0;

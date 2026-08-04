@@ -22,6 +22,7 @@ const router = createRouter({
       children: [
         { path: '', name: 'dashboard', component: () => import('../views/DashboardView.vue'), meta: { title: '运行概览' } },
         { path: 'connections', name: 'connections', component: () => import('../views/ConnectionsView.vue'), meta: { title: '连接活动' } },
+        { path: 'nodes', name: 'nodes', component: () => import('../views/NodeSelectionView.vue'), meta: { title: '节点选择' } },
         { path: 'proxy', name: 'orchestration', component: () => import('../views/OrchestrationView.vue'), meta: { title: '代理编排' } },
         { path: 'config', name: 'config', component: () => import('../views/ConfigView.vue'), meta: { title: '配置管理' } },
         { path: 'schema', name: 'schema', component: () => import('../views/SchemaView.vue'), meta: { title: '配置能力' } },

@@ -18,6 +18,7 @@ import {
   type MenuOption,
 } from 'naive-ui'
 import {
+  AppsOutline,
   ArchiveOutline,
   CodeSlashOutline,
   CubeOutline,
@@ -76,6 +77,7 @@ function menuLink(label: string, name: string, icon: typeof GridOutline): MenuOp
 const menuOptions: MenuOption[] = [
   menuLink('运行概览', 'dashboard', GridOutline),
   menuLink('连接活动', 'connections', SwapHorizontalOutline),
+  menuLink('节点选择', 'nodes', AppsOutline),
   menuLink('代理编排', 'orchestration', GitNetworkOutline),
   menuLink('配置管理', 'config', DocumentTextOutline),
   menuLink('配置能力', 'schema', CodeSlashOutline),
