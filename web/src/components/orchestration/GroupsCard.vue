@@ -255,10 +255,14 @@ function applyDraftFilters(): { next: string; latest: Group } | null {
   return latest ? { next, latest } : null
 }
 
-/** 编辑弹窗当前草稿的候选节点；草稿不可序列化或分组关闭时为 null。 */
-const editingCandidates = computed<FixedCandidates | null>(() => {
+/**
+ * 编辑弹窗当前草稿的候选节点。草稿暂不可序列化时（例如刚点了「选择节点」还没填值）
+ * 必须仍返回一个带原因的 FixedCandidates，而不是 null——否则模板的兜底数字框会
+ * 悄悄失去说明文案，违反“退回数字框时必须说明原因”的约束。
+ */
+const editingCandidates = computed<FixedCandidates>(() => {
   const applied = applyDraftFilters()
-  if (!applied) return null
+  if (!applied) return { resolvable: false, reason: '当前有过滤条件还没填完；填完后才能按节点名选择' }
   return resolveFixedCandidates(applied.next, applied.latest, subscriptionNodeSources.value, subscriptionNodesLoaded.value)
 })
 
@@ -334,14 +338,14 @@ function candidateOptions(nodes: string[]) {
 }
 
 /** 候选可解时取出节点名列表，供模板窄化联合类型，避免在 template 里做类型断言。 */
-function candidateNodes(candidates: FixedCandidates | null): string[] {
-  if (!candidates || !candidates.resolvable) return []
+function candidateNodes(candidates: FixedCandidates): string[] {
+  if (!candidates.resolvable) return []
   return candidates.nodes
 }
 
-/** 候选不可解时取出原因文案；可解或为空时返回空字符串。 */
-function candidateReason(candidates: FixedCandidates | null): string {
-  if (!candidates || candidates.resolvable) return ''
+/** 候选不可解时取出原因文案；可解时返回空字符串。 */
+function candidateReason(candidates: FixedCandidates): string {
+  if (candidates.resolvable) return ''
   return candidates.reason
 }
 
@@ -484,7 +488,7 @@ function validFixedIndex(group: Group, index: number): boolean {
       <NSelect v-model:value="groupPolicy" :options="POLICY_OPTIONS" />
       <template v-if="groupPolicy === 'fixed'">
         <NSelect
-          v-if="editingCandidates?.resolvable"
+          v-if="editingCandidates.resolvable"
           v-model:value="groupFixedIndex"
           class="group-fixed-picker"
           :options="candidateOptions(candidateNodes(editingCandidates))"
@@ -493,7 +497,7 @@ function validFixedIndex(group: Group, index: number): boolean {
         <NInputNumber v-else v-model:value="groupFixedIndex" :min="0" :precision="0" />
       </template>
     </div>
-    <NText v-if="groupPolicy === 'fixed' && editingCandidates && !editingCandidates.resolvable" depth="3">
+    <NText v-if="groupPolicy === 'fixed' && !editingCandidates.resolvable" depth="3">
       {{ candidateReason(editingCandidates) }}
     </NText>
     <div class="group-filter-editor">
