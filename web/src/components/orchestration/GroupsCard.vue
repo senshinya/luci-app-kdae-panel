@@ -255,17 +255,6 @@ function applyDraftFilters(): { next: string; latest: Group } | null {
   return latest ? { next, latest } : null
 }
 
-/**
- * 编辑弹窗当前草稿的候选节点。草稿暂不可序列化时（例如刚点了「选择节点」还没填值）
- * 必须仍返回一个带原因的 FixedCandidates，而不是 null——否则模板的兜底数字框会
- * 悄悄失去说明文案，违反“退回数字框时必须说明原因”的约束。
- */
-const editingCandidates = computed<FixedCandidates>(() => {
-  const applied = applyDraftFilters()
-  if (!applied) return { resolvable: false, reason: '当前有过滤条件还没填完；填完后才能按节点名选择' }
-  return resolveFixedCandidates(applied.next, applied.latest, subscriptionNodeSources.value, subscriptionNodesLoaded.value)
-})
-
 function openGroupEditor(groupIndex: number) {
   const group = groups.value[groupIndex]
   if (!group) return
@@ -331,22 +320,6 @@ const fixedCandidatesByGroup = computed(() => new Map<string, FixedCandidates>(
 
 function candidatesFor(group: Group): FixedCandidates {
   return fixedCandidatesByGroup.value.get(group.name) ?? { resolvable: false, reason: '未能定位该分组的候选节点' }
-}
-
-function candidateOptions(nodes: string[]) {
-  return nodes.map((name, index) => ({ label: `${index}· ${name}`, value: index }))
-}
-
-/** 候选可解时取出节点名列表，供模板窄化联合类型，避免在 template 里做类型断言。 */
-function candidateNodes(candidates: FixedCandidates): string[] {
-  if (!candidates.resolvable) return []
-  return candidates.nodes
-}
-
-/** 候选不可解时取出原因文案；可解时返回空字符串。 */
-function candidateReason(candidates: FixedCandidates): string {
-  if (candidates.resolvable) return ''
-  return candidates.reason
 }
 
 /** 候选可解时校验索引是否落在范围内；不可解时始终放行（不做面板保证不了的静默兜底）。 */
@@ -417,30 +390,15 @@ function validFixedIndex(group: Group, index: number): boolean {
           :disabled="group.policy !== null && !group.policy.editable"
           @update:value="(value: string) => changePolicy(group, value)"
         />
-        <template v-if="parsePolicy(group.policy?.value).name === 'fixed'">
-          <NSelect
-            v-if="candidatesFor(group).resolvable"
-            size="small"
-            class="group-fixed-picker"
-            :value="parsePolicy(group.policy?.value).index"
-            :options="candidateOptions(candidateNodes(candidatesFor(group)))"
-            :consistent-menu-width="false"
-            @update:value="(value: number) => changeFixedIndex(group, value)"
-          />
-          <NTooltip v-else>
-            <template #trigger>
-              <NInputNumber
-                size="small"
-                class="group-fixed-index"
-                :min="0"
-                :precision="0"
-                :value="parsePolicy(group.policy?.value).index"
-                @update:value="(value: number | null) => changeFixedIndex(group, value)"
-              />
-            </template>
-            {{ candidateReason(candidatesFor(group)) }}
-          </NTooltip>
-        </template>
+        <NInputNumber
+          v-if="parsePolicy(group.policy?.value).name === 'fixed'"
+          size="small"
+          class="group-fixed-index"
+          :min="0"
+          :precision="0"
+          :value="parsePolicy(group.policy?.value).index"
+          @update:value="(value: number | null) => changeFixedIndex(group, value)"
+        />
       </div>
       <div class="group-row filters">
         <NText depth="3">过滤</NText>
@@ -486,20 +444,8 @@ function validFixedIndex(group: Group, index: number): boolean {
     <div class="group-editor-policy">
       <NText depth="3">策略</NText>
       <NSelect v-model:value="groupPolicy" :options="POLICY_OPTIONS" />
-      <template v-if="groupPolicy === 'fixed'">
-        <NSelect
-          v-if="editingCandidates.resolvable"
-          v-model:value="groupFixedIndex"
-          class="group-fixed-picker"
-          :options="candidateOptions(candidateNodes(editingCandidates))"
-          :consistent-menu-width="false"
-        />
-        <NInputNumber v-else v-model:value="groupFixedIndex" :min="0" :precision="0" />
-      </template>
+      <NInputNumber v-if="groupPolicy === 'fixed'" v-model:value="groupFixedIndex" :min="0" :precision="0" />
     </div>
-    <NText v-if="groupPolicy === 'fixed' && !editingCandidates.resolvable" depth="3">
-      {{ candidateReason(editingCandidates) }}
-    </NText>
     <div class="group-filter-editor">
       <div class="group-filter-editor-head">
         <div>
