@@ -147,7 +147,7 @@ onMounted(() => void refresh())
 </script>
 
 <template>
-  <div class="page-stack">
+  <div class="page-stack node-selection-page">
     <div class="page-toolbar">
       <div>
         <h2>节点选择</h2>

@@ -2144,6 +2144,11 @@ pre,
   margin: -6px 0 -4px;
 }
 
+/* 分组卡各占整行，没有同行邻居要对齐底边，panel-card 的高度下限只会留出空白。 */
+.node-selection-page .panel-card {
+  min-height: auto;
+}
+
 .node-selection-list {
   display: grid;
   gap: 16px;
