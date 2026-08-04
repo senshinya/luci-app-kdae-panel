@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tuoro/kdae-panel/internal/daeconfig"
 )
 
 const (
@@ -65,6 +67,17 @@ type SaveResult struct {
 	Deferred   bool      `json:"deferred,omitempty"`
 	SavedAt    time.Time `json:"savedAt"`
 	RolledBack bool      `json:"rolledBack"`
+}
+
+// commitRequest 描述一次落盘：新内容、用于回滚的旧内容，以及是否留自动备份。
+type commitRequest struct {
+	newContent []byte
+	oldContent []byte
+	oldHash    string
+	mode       os.FileMode
+	existed    bool
+	backup     bool
+	apply      bool
 }
 
 type Backup struct {
@@ -205,7 +218,6 @@ func (m *Manager) Save(ctx context.Context, content, expectedHash string, apply 
 }
 
 func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string, apply bool) (SaveResult, error) {
-
 	newContent := []byte(content)
 	if len(newContent) > MaxConfigBytes {
 		return SaveResult{}, fmt.Errorf("配置大小超过 %d 字节限制", MaxConfigBytes)
@@ -229,7 +241,22 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 	if existed {
 		mode = oldInfo.Mode().Perm()
 	}
-	tempPath, cleanup, err := m.writeCandidate(newContent, mode)
+	return m.commitUnlocked(ctx, commitRequest{
+		newContent: newContent,
+		oldContent: oldContent,
+		oldHash:    oldHash,
+		mode:       mode,
+		existed:    existed,
+		backup:     true,
+		apply:      apply,
+	})
+}
+
+// commitUnlocked 是 Save 与 SetGroupPolicy 共用的落盘事务：写候选文件、校验、
+// 乐观锁重检、按需备份、原子替换、按需重载与失败回滚。两者的差别只在
+// commitRequest.backup——SetGroupPolicy 明确要求不留自动备份（见其注释）。
+func (m *Manager) commitUnlocked(ctx context.Context, req commitRequest) (SaveResult, error) {
+	tempPath, cleanup, err := m.writeCandidate(req.newContent, req.mode)
 	if err != nil {
 		return SaveResult{}, err
 	}
@@ -249,9 +276,10 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 	if err != nil {
 		return SaveResult{}, err
 	}
-	if latestExisted != existed || latestHash != oldHash {
+	if latestExisted != req.existed || latestHash != req.oldHash {
 		return SaveResult{}, ErrConflict
 	}
+	oldContent, mode := req.oldContent, req.mode
 	if latestExisted {
 		oldContent = latestContent
 		// 候选文件在 validate 之前就按当时的权限位定型了，而 validate 是个可能跑几秒
@@ -266,7 +294,7 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 	}
 
 	backupID := ""
-	if existed {
+	if req.backup && req.existed {
 		backupID, err = m.createBackup(oldContent)
 		if err != nil {
 			return SaveResult{}, err
@@ -278,12 +306,12 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 	committed = true
 
 	result := SaveResult{
-		Hash:     hashBytes(newContent),
+		Hash:     hashBytes(req.newContent),
 		BackupID: backupID,
-		Applied:  apply,
+		Applied:  req.apply,
 		SavedAt:  m.now().UTC(),
 	}
-	if !apply {
+	if !req.apply {
 		return result, nil
 	}
 	if err := m.control.Reload(ctx); err != nil {
@@ -291,11 +319,43 @@ func (m *Manager) saveUnlocked(ctx context.Context, content, expectedHash string
 			result.Deferred = true
 			return result, nil
 		}
-		rollbackErr := m.rollback(oldContent, mode, existed)
+		rollbackErr := m.rollback(oldContent, mode, req.existed)
 		result.RolledBack = rollbackErr == nil
 		return result, &ApplyError{Cause: err, RolledBack: result.RolledBack, RollbackErr: rollbackErr}
 	}
 	return result, nil
+}
+
+// SetGroupPolicy 只改写指定分组的 policy 值并按需重载。它走与 Save 相同的事务，
+// 唯一的区别是不留自动备份：改动只有一个策略值，reload 失败的回滚用的是内存里的
+// 旧内容，不依赖备份文件；而备份与手动存档共用保留上限，频繁切换会把存档挤掉。
+func (m *Manager) SetGroupPolicy(ctx context.Context, group, policy, expectedHash string) (SaveResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	oldContent, oldInfo, oldHash, existed, err := m.readCurrentBytes()
+	if err != nil {
+		return SaveResult{}, err
+	}
+	if !existed {
+		return SaveResult{}, ErrNotFound
+	}
+	if expectedHash == "" || expectedHash != oldHash {
+		return SaveResult{}, ErrConflict
+	}
+	next, err := daeconfig.SetGroupPolicy(string(oldContent), group, policy)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	return m.commitUnlocked(ctx, commitRequest{
+		newContent: []byte(next),
+		oldContent: oldContent,
+		oldHash:    oldHash,
+		mode:       oldInfo.Mode().Perm(),
+		existed:    true,
+		backup:     false,
+		apply:      true,
+	})
 }
 
 func (m *Manager) ListBackups(_ context.Context) ([]Backup, error) {

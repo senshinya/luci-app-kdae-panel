@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tuoro/kdae-panel/internal/daeconfig"
 )
 
 type fakeController struct {
@@ -415,5 +417,133 @@ func TestRestoreRejectsTraversal(t *testing.T) {
 	_, err := manager.Restore(context.Background(), "../config.dae", "", false)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("错误 = %v，期望不存在", err)
+	}
+}
+
+const groupPolicyConfig = `global {
+    log_level: info
+}
+
+group {
+    proxy {
+        filter: name(a, b)
+        policy: fixed(0)
+    }
+}
+
+routing {
+    fallback: proxy
+}
+`
+
+func countBackups(t *testing.T, entryPath string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(entryPath), "backups"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("读取备份目录失败: %v", err)
+	}
+	return len(entries)
+}
+
+func TestSetGroupPolicyAppliesWithoutBackup(t *testing.T) {
+	controller := &fakeController{}
+	manager, entryPath := newTestManager(t, groupPolicyConfig, controller)
+	document, err := manager.Read(context.Background())
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+
+	result, err := manager.SetGroupPolicy(context.Background(), "proxy", "fixed(2)", document.Hash)
+	if err != nil {
+		t.Fatalf("切换分组策略失败: %v", err)
+	}
+	if !result.Applied || result.Deferred || controller.reloadCount != 1 {
+		t.Fatalf("结果异常: result=%+v reload=%d", result, controller.reloadCount)
+	}
+	if result.BackupID != "" {
+		t.Fatalf("快速切换不应产生备份编号: %q", result.BackupID)
+	}
+	if count := countBackups(t, entryPath); count != 0 {
+		t.Fatalf("快速切换不应产生备份文件，实际 %d 份", count)
+	}
+	content, err := os.ReadFile(entryPath)
+	if err != nil {
+		t.Fatalf("读取新配置失败: %v", err)
+	}
+	if !strings.Contains(string(content), "policy: fixed(2)") {
+		t.Fatalf("policy 未被改写:\n%s", content)
+	}
+	if !strings.Contains(string(content), "filter: name(a, b)") {
+		t.Fatalf("其余内容被破坏:\n%s", content)
+	}
+}
+
+func TestSetGroupPolicyRejectsStaleHash(t *testing.T) {
+	manager, _ := newTestManager(t, groupPolicyConfig, &fakeController{})
+	if _, err := manager.SetGroupPolicy(context.Background(), "proxy", "fixed(1)", "过期哈希"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("过期哈希应返回冲突，实际: %v", err)
+	}
+}
+
+func TestSetGroupPolicyRejectsUnknownGroup(t *testing.T) {
+	manager, _ := newTestManager(t, groupPolicyConfig, &fakeController{})
+	document, err := manager.Read(context.Background())
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if _, err := manager.SetGroupPolicy(context.Background(), "missing", "fixed(1)", document.Hash); !errors.Is(err, daeconfig.ErrGroupPolicyUnlocatable) {
+		t.Fatalf("未知分组应返回不可定位，实际: %v", err)
+	}
+}
+
+func TestSetGroupPolicyRollsBackWhenReloadFails(t *testing.T) {
+	controller := &fakeController{reloadErr: errors.New("reload 失败")}
+	manager, entryPath := newTestManager(t, groupPolicyConfig, controller)
+	document, err := manager.Read(context.Background())
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+
+	_, err = manager.SetGroupPolicy(context.Background(), "proxy", "fixed(2)", document.Hash)
+	var applyErr *ApplyError
+	if !errors.As(err, &applyErr) || !applyErr.RolledBack {
+		t.Fatalf("reload 失败应回滚，实际: %v", err)
+	}
+	content, err := os.ReadFile(entryPath)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if string(content) != groupPolicyConfig {
+		t.Fatalf("回滚后内容不等于原文:\n%s", content)
+	}
+	if count := countBackups(t, entryPath); count != 0 {
+		t.Fatalf("回滚路径也不应产生备份，实际 %d 份", count)
+	}
+}
+
+func TestSetGroupPolicyDefersWhenDaeNotRunning(t *testing.T) {
+	controller := &fakeController{reloadErr: ErrReloadDeferred}
+	manager, entryPath := newTestManager(t, groupPolicyConfig, controller)
+	document, err := manager.Read(context.Background())
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+
+	result, err := manager.SetGroupPolicy(context.Background(), "proxy", "fixed(2)", document.Hash)
+	if err != nil {
+		t.Fatalf("dae 未运行时也应保存成功: %v", err)
+	}
+	if !result.Deferred {
+		t.Fatalf("应标记为延后生效: %+v", result)
+	}
+	content, err := os.ReadFile(entryPath)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if !strings.Contains(string(content), "policy: fixed(2)") {
+		t.Fatalf("配置未落盘:\n%s", content)
 	}
 }
