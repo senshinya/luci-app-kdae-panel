@@ -61,6 +61,7 @@ type ConfigurationService interface {
 	ExportBackup(ctx context.Context, backupID string) (configstore.BackupExport, error)
 	PreviewBackup(ctx context.Context, backupID string) (configstore.BackupPreview, error)
 	Restore(ctx context.Context, backupID, expectedHash string, apply bool) (configstore.SaveResult, error)
+	SetGroupPolicy(ctx context.Context, group, policy, expectedHash string) (configstore.SaveResult, error)
 }
 
 type Dependencies struct {

@@ -86,6 +86,10 @@ func (s stubConfigurationService) Restore(_ context.Context, _, _ string, _ bool
 	return configstore.SaveResult{}, nil
 }
 
+func (s stubConfigurationService) SetGroupPolicy(_ context.Context, _, _, _ string) (configstore.SaveResult, error) {
+	return configstore.SaveResult{}, nil
+}
+
 func (s stubDaeService) Inspect(_ context.Context) dae.Report {
 	return s.report
 }

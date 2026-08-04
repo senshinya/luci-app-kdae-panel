@@ -7,11 +7,13 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
 
 	"github.com/tuoro/kdae-panel/internal/configstore"
+	"github.com/tuoro/kdae-panel/internal/daeconfig"
 )
 
 type configContentRequest struct {
@@ -30,6 +32,15 @@ type backupMetadataRequest struct {
 	Note string `json:"note,omitempty"`
 }
 
+type groupPolicyRequest struct {
+	Policy       string `json:"policy"`
+	ExpectedHash string `json:"expectedHash"`
+}
+
+// 这个端点只服务「快速切换固定节点」，因此只接受 fixed(n)。改别的策略仍走完整保存，
+// 那条路径有备份也有完整的编排上下文。
+var fixedPolicyPattern = regexp.MustCompile(`^fixed\([0-9]{1,9}\)$`)
+
 func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationService, operations *sync.Mutex) {
 	if service == nil {
 		unavailable := func(writer http.ResponseWriter, _ *http.Request) {
@@ -45,6 +56,7 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 		router.HandleFunc("GET /api/v1/config/backups/{id}/export", unavailable)
 		router.HandleFunc("GET /api/v1/config/backups/{id}/preview", unavailable)
 		router.HandleFunc("POST /api/v1/config/backups/{id}/restore", unavailable)
+		router.HandleFunc("PUT /api/v1/groups/{name}/policy", unavailable)
 		return
 	}
 
@@ -82,6 +94,35 @@ func registerConfigurationRoutes(router *http.ServeMux, service ConfigurationSer
 			payload.ExpectedHash,
 			boolDefaultTrue(payload.Apply),
 		)
+		if err != nil {
+			writeConfigurationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, result)
+	})
+	router.HandleFunc("PUT /api/v1/groups/{name}/policy", func(writer http.ResponseWriter, request *http.Request) {
+		name := request.PathValue("name")
+		var payload groupPolicyRequest
+		if !decodeJSONBody(writer, request, &payload) {
+			return
+		}
+		if strings.TrimSpace(name) == "" {
+			writeAPIError(writer, http.StatusBadRequest, "group_policy_invalid", "分组名不能为空")
+			return
+		}
+		if !fixedPolicyPattern.MatchString(payload.Policy) {
+			writeAPIError(writer, http.StatusBadRequest, "group_policy_invalid", "该接口只接受 fixed(n) 形式的策略")
+			return
+		}
+		if strings.TrimSpace(payload.ExpectedHash) == "" {
+			writeAPIError(writer, http.StatusBadRequest, "group_policy_invalid", "expectedHash 必填")
+			return
+		}
+		if !acquireOperation(writer, operations) {
+			return
+		}
+		defer operations.Unlock()
+		result, err := service.SetGroupPolicy(request.Context(), name, payload.Policy, payload.ExpectedHash)
 		if err != nil {
 			writeConfigurationError(writer, err)
 			return
@@ -239,6 +280,8 @@ func writeConfigurationError(writer http.ResponseWriter, err error) {
 		writeAPIError(writer, http.StatusNotFound, "configuration_not_found", err.Error())
 	case errors.Is(err, configstore.ErrConflict):
 		writeAPIError(writer, http.StatusConflict, "configuration_conflict", err.Error())
+	case errors.Is(err, daeconfig.ErrGroupPolicyUnlocatable):
+		writeAPIError(writer, http.StatusUnprocessableEntity, "group_policy_unlocatable", err.Error())
 	case errors.Is(err, configstore.ErrInvalid):
 		writeAPIError(writer, http.StatusBadRequest, "configuration_backup_invalid", err.Error())
 	case errors.As(err, &validationErr):

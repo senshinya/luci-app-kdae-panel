@@ -90,6 +90,24 @@ X-CSRF-Token: <csrfToken>
 | `422` | `configuration_invalid` | dae 拒绝候选配置 |
 | `502` | `configuration_apply_failed` | 保存后重载失败，响应包含回滚状态 |
 
+### 分组固定节点快速切换
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `PUT` | `/groups/{name}/policy` | 只改写指定分组的 `policy`，并立即重载 |
+
+```json
+{ "policy": "fixed(2)", "expectedHash": "读取配置时拿到的 SHA-256" }
+```
+
+只接受 `fixed(n)` 形式，`n` 为非负整数；改别的策略仍走 `PUT /config` 的完整保存。`expectedHash` 必填。服务端自己在 `group` 节里定位该分组的 `policy` 值并原地替换，其余字节（含注释、缩进和别的分组）保持不变，因此不需要也不接受完整配置正文。
+
+响应与 `PUT /config` 相同（`hash`、`applied`、`deferred`、`rolledBack`、`savedAt`），但 `backupId` 恒为空：这条路径**不产生自动备份**。改动只有一个策略值，重载失败的回滚用的是内存中的旧内容；而自动备份与手动存档共用 50 份、256 MiB 的保留上限，频繁切换会把命名存档挤掉。
+
+分组不存在、没有 `policy`、有多处 `policy` 声明或 `policy` 值跨行时返回 `422 group_policy_unlocatable`，此时应改用代理编排页的原文编辑。其余错误码与 `PUT /config` 一致，并共用同一把串行门。
+
+`fixed(n)` 的 `n` 是 dae 内部 dialer 列表中的下标。dae 构建该列表时按 tag（本地 `node` 节为一个 tag，每份订阅各一个）遍历一个 map，**跨 tag 的块顺序每次启动和每次重载都可能不同**，同一 tag 内部保持声明顺序；dae 解析失败的节点链接会被跳过且不占下标。因此面板只在一个分组的候选节点全部来自同一个 tag、且能逐一对齐时才展示节点名，其余情况只展示下标。即便如此，dae 的链接解析器仍可能拒绝面板认为合法的链接，那种情况下下标会错位而面板无从察觉。
+
 ## dae 版本管理
 
 默认开启。显式设置 `KDAE_PANEL_ENABLE_DAE_INSTALL=false` 时，以下接口一律返回 `503 dae_install_disabled`。
