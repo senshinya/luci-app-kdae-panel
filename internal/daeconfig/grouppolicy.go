@@ -57,12 +57,23 @@ func GroupPolicySpan(content, group string) (int, int, error) {
 		for lineEnd < body.end && masked[lineEnd] != '\n' {
 			lineEnd++
 		}
-		valueEnd := lineEnd
-		for valueEnd > valueStart && (masked[valueEnd-1] == ' ' || masked[valueEnd-1] == '\t' || masked[valueEnd-1] == '\r') {
-			valueEnd--
+		// policy 的值本来就是单 token（如 fixed(0)、min_moving_avg）。右边界只取到第一个
+		// 空白为止，其后到行尾必须全是空白（含已被掩码抹掉的行尾注释），否则说明这一行
+		// 上还有别的声明（如 `policy: fixed(0) filter: name(a)` 写在同一行），贸然把
+		// 剩下的内容也当成 policy 值删掉会连带删除别的声明，属于“定点改写”做不到的情况。
+		valueEnd := valueStart
+		for valueEnd < lineEnd && masked[valueEnd] != ' ' && masked[valueEnd] != '\t' && masked[valueEnd] != '\r' {
+			valueEnd++
 		}
 		if valueEnd == valueStart {
 			return 0, 0, fmt.Errorf("%w: 分组 %s 的 policy 值跨行", ErrGroupPolicyUnlocatable, group)
+		}
+		trailing := valueEnd
+		for trailing < lineEnd && (masked[trailing] == ' ' || masked[trailing] == '\t' || masked[trailing] == '\r') {
+			trailing++
+		}
+		if trailing != lineEnd {
+			return 0, 0, fmt.Errorf("%w: 分组 %s 的 policy 声明与其他内容共享一行，无法安全定位", ErrGroupPolicyUnlocatable, group)
 		}
 		found, start, end = true, valueStart, valueEnd
 		index = lineEnd

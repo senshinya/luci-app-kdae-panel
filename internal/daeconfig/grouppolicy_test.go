@@ -93,6 +93,32 @@ func TestGroupPolicySpanIgnoresStructureInsideStrings(t *testing.T) {
 	}
 }
 
+// Important 2 回归：单行分组体里 policy 与别的声明共享同一行时，旧实现会把行尾
+// 之前的全部内容（包括后面的 filter 声明）都当成 policy 值取走，SetGroupPolicy
+// 改写时连带删除了那些 filter，违背“其余字节保持不变”的承诺。现在应判为不可定位，
+// 而不是静默吞掉同一行上的其他声明。
+func TestGroupPolicySpanRejectsValueSharingLineWithOtherDeclarations(t *testing.T) {
+	content := "group {\n    proxy { policy: fixed(0) filter: name(a) filter: subtag(s) }\n    backup { policy: random }\n}\n"
+	if _, _, err := GroupPolicySpan(content, "proxy"); !errors.Is(err, ErrGroupPolicyUnlocatable) {
+		t.Fatalf("policy 与其他声明共享一行时应判为不可定位，实际: %v", err)
+	}
+	// 同一份配置里结构正常的另一个分组不应受影响。
+	start, end, err := GroupPolicySpan(content, "backup")
+	if err != nil {
+		t.Fatalf("定位 backup 的 policy 失败: %v", err)
+	}
+	if got := content[start:end]; got != "random" {
+		t.Fatalf("backup 的 policy 值不对: %q", got)
+	}
+}
+
+func TestSetGroupPolicyRejectsValueSharingLineWithOtherDeclarations(t *testing.T) {
+	content := "group {\n    proxy { policy: fixed(0) filter: name(a) filter: subtag(s) }\n    backup { policy: random }\n}\n"
+	if _, err := SetGroupPolicy(content, "proxy", "fixed(1)"); !errors.Is(err, ErrGroupPolicyUnlocatable) {
+		t.Fatalf("单行分组体里 policy 后还有其他内容时应拒绝改写而不是连带删除它们，实际: %v", err)
+	}
+}
+
 func TestGroupPolicySpanStopsAtTrailingComment(t *testing.T) {
 	content := "group {\n    proxy {\n        policy: fixed(10)  # 固定第 10 个\n    }\n}\n"
 	start, end, err := GroupPolicySpan(content, "proxy")

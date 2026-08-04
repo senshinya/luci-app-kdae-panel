@@ -104,7 +104,7 @@ X-CSRF-Token: <csrfToken>
 
 响应与 `PUT /config` 相同（`hash`、`applied`、`deferred`、`rolledBack`、`savedAt`），但 `backupId` 恒为空：这条路径**不产生自动备份**。改动只有一个策略值，重载失败的回滚用的是内存中的旧内容；而自动备份与手动存档共用 50 份、256 MiB 的保留上限，频繁切换会把命名存档挤掉。
 
-分组不存在、没有 `policy`、有多处 `policy` 声明或 `policy` 值跨行时返回 `422 group_policy_unlocatable`，此时应改用代理编排页的原文编辑。其余错误码与 `PUT /config` 一致，并共用同一把串行门。
+分组不存在、没有 `policy`、有多处 `policy` 声明、`policy` 值跨行，或 `policy` 与别的声明（如 `filter`）挤在同一行时返回 `422 group_policy_unlocatable`，此时应改用代理编排页的原文编辑。最后一种是为了不把同一行上别的声明连带删掉——定点替换只在这一行只有这一个声明时才安全。其余错误码与 `PUT /config` 一致，并共用同一把串行门。
 
 `fixed(n)` 的 `n` 是 dae 内部 dialer 列表中的下标。dae 构建该列表时按 tag（本地 `node` 节为一个 tag，每份订阅各一个）遍历一个 map，**跨 tag 的块顺序每次启动和每次重载都可能不同**，同一 tag 内部保持声明顺序；dae 解析失败的节点链接会被跳过且不占下标。因此面板只在一个分组的候选节点全部来自同一个 tag、且能逐一对齐时才展示节点名，其余情况只展示下标。即便如此，dae 的链接解析器仍可能拒绝面板认为合法的链接，那种情况下下标会错位而面板无从察觉。
 
