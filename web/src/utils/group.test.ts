@@ -3,7 +3,6 @@ import {
   createGroupFilter,
   describeGroupFilter,
   includeNodesInGroups,
-  knownFixedCandidateCount,
   parseGroupFilter,
   serializeGroupFilter,
 } from './group'
@@ -91,22 +90,5 @@ describe('分组资源过滤', () => {
   it('跨行过滤分组保持逐字节不变，避免把新声明插进续行中间', () => {
     const text = "group {\n  proxy {\n    filter: subtag(a) &&\n      !name(keyword: '过期')\n  }\n}\n"
     expect(includeNodesInGroups(text, ['proxy'], ['hk_01'])).toBe(text)
-  })
-
-  it('只在 fixed 候选数量可精确推导时返回数量', () => {
-    expect(knownFixedCandidateCount([], 2, false)).toBe(2)
-    expect(knownFixedCandidateCount([], 2, true)).toBeNull()
-    expect(knownFixedCandidateCount([{
-      ...createGroupFilter('nodes'), values: ['a', 'b', 'a'],
-    }], 9, false)).toBe(2)
-    expect(knownFixedCandidateCount([{
-      ...createGroupFilter('nodes'), values: ['a'],
-    }, {
-      ...createGroupFilter('subscriptionNodes'), source: 'main', values: ['a', 'b'],
-    }], 9, true)).toBe(3)
-    expect(knownFixedCandidateCount([createGroupFilter('subscriptions')], 2, false)).toBeNull()
-    expect(knownFixedCandidateCount([{
-      ...createGroupFilter('nodes'), values: ['a'], exclude: true,
-    }], 2, false)).toBeNull()
   })
 })

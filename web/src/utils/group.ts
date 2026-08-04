@@ -161,23 +161,3 @@ export function includeNodesInGroups(text: string, groupNames: string[], nodeTag
   }
   return next
 }
-
-/**
- * 只在候选数量可由当前配置精确得出时返回数字；整份订阅、关键词和高级表达式均返回 null。
- * fixed(n) 的 n 是从 0 开始的索引。
- */
-export function knownFixedCandidateCount(
-  filters: GroupFilterDraft[],
-  unfilteredNodeCount: number,
-  hasSubscriptions: boolean,
-): number | null {
-  if (filters.length === 0) return hasSubscriptions ? null : unfilteredNodeCount
-  if (filters.some((filter) => !['nodes', 'subscriptionNodes'].includes(filter.kind) || filter.exclude)) return null
-  const candidates = new Set<string>()
-  for (const filter of filters) {
-    for (const value of filter.values.map((item) => item.trim()).filter(Boolean)) {
-      candidates.add(filter.kind === 'nodes' ? `node:${value}` : `subscription:${filter.source}:${value}`)
-    }
-  }
-  return candidates.size
-}
