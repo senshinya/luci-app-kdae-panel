@@ -12,9 +12,37 @@ import { parseNodeLink } from './nodelink'
  * 已知残留风险：dae 自己的链接解析器可能拒绝面板认为合法的链接，被拒的节点不占下标，
  * 此时 dae 的列表比这里算出的短，下标会错位而面板无从察觉。不做静默兜底。
  */
+export interface FixedCandidate {
+  /** dae 里的节点名；数组下标即 fixed(n) 的 n */
+  name: string
+  /** 协议，取不到时为空串 */
+  protocol: string
+  /** 主机名或 IP，取不到时为空串 */
+  host: string
+  /** 端口，取不到时为 null */
+  port: number | null
+}
+
 export type FixedCandidates =
-  | { resolvable: true; nodes: string[] }
+  | { resolvable: true; nodes: FixedCandidate[] }
   | { resolvable: false; reason: string }
+
+/**
+ * 拆分后端用 Go 的 net.JoinHostPort 拼出的 "主机:端口"（IPv6 形如 "[::1]:443"）。
+ * 端口缺失、非数字或超出 1-65535 范围时一律退化为 port: null；不是端口分隔符的冒号
+ * 不拆分，整串原样保留在 host 里——这只用于展示与延迟探测，宁可显示原文也不猜错。
+ */
+export function splitHostPort(hostport: string): { host: string; port: number | null } {
+  const bracketed = /^\[([^\]]*)\](?::(\d+))?$/.exec(hostport)
+  if (bracketed) {
+    const port = bracketed[2] ? Number(bracketed[2]) : null
+    return { host: bracketed[1], port: port !== null && port >= 1 && port <= 65535 ? port : null }
+  }
+  const colon = hostport.lastIndexOf(':')
+  if (colon < 0 || !/^\d+$/.test(hostport.slice(colon + 1))) return { host: hostport, port: null }
+  const port = Number(hostport.slice(colon + 1))
+  return { host: hostport.slice(0, colon), port: port >= 1 && port <= 65535 ? port : null }
+}
 
 const FIXED_PATTERN = /^fixed\((\d+)\)$/
 
@@ -66,7 +94,12 @@ function fromSubscription(
     const missing = [...wanted].filter((name) => !known.has(name))
     if (missing.length > 0) return unresolvable(`${missing.join('、')} 不在订阅 ${tag} 的缓存中`)
   }
-  const nodes = source.nodes.map((node) => node.name).filter((name) => !wanted || wanted.has(name))
+  const nodes: FixedCandidate[] = source.nodes
+    .filter((node) => !wanted || wanted.has(node.name))
+    .map((node) => {
+      const { host, port } = splitHostPort(node.host || '')
+      return { name: node.name, protocol: node.protocol || '', host, port }
+    })
   if (nodes.length === 0) return unresolvable('该分组当前没有可选节点')
   return { resolvable: true, nodes }
 }
@@ -130,7 +163,11 @@ function fromLocalNodes(
     }
   }
 
-  const nodes = selected.map((entry) => entry.tag!.trim())
+  const nodes: FixedCandidate[] = selected.map((entry) => {
+    // 上面已经拒绝过 parseNodeLink 为 null 的候选，这里非空断言是安全的。
+    const info = parseNodeLink(entry.value)!
+    return { name: entry.tag!.trim(), protocol: info.protocol || '', host: info.host || '', port: info.port ?? null }
+  })
   if (nodes.length === 0) return unresolvable('该分组当前没有可选节点')
   return { resolvable: true, nodes }
 }

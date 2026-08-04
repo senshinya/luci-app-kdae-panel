@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseGroups } from './daeconf'
-import { parseFixedIndex, resolveFixedCandidates } from './fixedgroup'
+import { parseFixedIndex, resolveFixedCandidates, splitHostPort } from './fixedgroup'
 import type { SubscriptionNodeSource } from '../types/api'
 
 function groupOf(content: string, name: string) {
@@ -44,7 +44,13 @@ describe('resolveFixedCandidates', () => {
 }
 `
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
-    expect(result).toEqual({ resolvable: true, nodes: ['hk01', 'jp01'] })
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [
+        { name: 'hk01', protocol: 'vless', host: 'hk1.example.com', port: 443 },
+        { name: 'jp01', protocol: 'vless', host: 'jp1.example.com', port: 443 },
+      ],
+    })
   })
 
   it('没有过滤且配置里没有订阅时候选是全部本地节点', () => {
@@ -55,7 +61,14 @@ describe('resolveFixedCandidates', () => {
 }
 `
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
-    expect(result).toEqual({ resolvable: true, nodes: ['hk01', 'hk02', 'jp01'] })
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [
+        { name: 'hk01', protocol: 'vless', host: 'hk1.example.com', port: 443 },
+        { name: 'hk02', protocol: 'vless', host: 'hk2.example.com', port: 443 },
+        { name: 'jp01', protocol: 'vless', host: 'jp1.example.com', port: 443 },
+      ],
+    })
   })
 
   it('没有过滤但存在订阅时不可解', () => {
@@ -86,7 +99,14 @@ group {
 }
 `
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [source('mysub', ['S1', 'S2', 'S3'])], true)
-    expect(result).toEqual({ resolvable: true, nodes: ['S1', 'S2', 'S3'] })
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [
+        { name: 'S1', protocol: 'vless', host: 'S1.example.com', port: 443 },
+        { name: 'S2', protocol: 'vless', host: 'S2.example.com', port: 443 },
+        { name: 'S3', protocol: 'vless', host: 'S3.example.com', port: 443 },
+      ],
+    })
   })
 
   it('订阅内指定节点按缓存顺序过滤', () => {
@@ -102,7 +122,13 @@ group {
 }
 `
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [source('mysub', ['S1', 'S2', 'S3'])], true)
-    expect(result).toEqual({ resolvable: true, nodes: ['S1', 'S3'] })
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [
+        { name: 'S1', protocol: 'vless', host: 'S1.example.com', port: 443 },
+        { name: 'S3', protocol: 'vless', host: 'S3.example.com', port: 443 },
+      ],
+    })
   })
 
   it('订阅缓存有被跳过的无名节点时不可解', () => {
@@ -323,5 +349,69 @@ group {
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
     if (result.resolvable) throw new Error('该用例应不可解')
     expect(result.reason.length).toBeGreaterThan(0)
+  })
+
+  it('订阅节点缺协议或主机时仍可解，只是候选字段留空', () => {
+    // 判定规则只关心顺序能否对齐，协议/主机是否取得到不该影响可解性。
+    const content = `subscription {
+    mysub: 'https://example.com/sub'
+}
+
+group {
+    proxy {
+        filter: subtag(mysub)
+        policy: fixed(0)
+    }
+}
+`
+    const bare: SubscriptionNodeSource = {
+      tag: 'mysub',
+      cachedAt: '2026-08-04T00:00:00Z',
+      nodes: [{ name: 'S1', matches: 1 }],
+    }
+    const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [bare], true)
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [{ name: 'S1', protocol: '', host: '', port: null }],
+    })
+  })
+
+  it('本地节点链接解析不出主机时仍可解，只是候选字段留空', () => {
+    const content = `node {
+    weird: 'foo://'
+}
+
+group {
+    proxy {
+        policy: fixed(0)
+    }
+}
+`
+    const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
+    expect(result).toEqual({
+      resolvable: true,
+      nodes: [{ name: 'weird', protocol: 'foo', host: '', port: null }],
+    })
+  })
+})
+
+describe('splitHostPort', () => {
+  it('IPv6 地址带方括号时拆出裸地址与端口', () => {
+    expect(splitHostPort('[::1]:443')).toEqual({ host: '::1', port: 443 })
+    expect(splitHostPort('[2001:db8::1]:8443')).toEqual({ host: '2001:db8::1', port: 8443 })
+  })
+
+  it('没有端口时端口为 null，主机原样保留', () => {
+    expect(splitHostPort('example.com')).toEqual({ host: 'example.com', port: null })
+    expect(splitHostPort('[::1]')).toEqual({ host: '::1', port: null })
+  })
+
+  it('端口不是数字时不拆分，整串原样作为主机', () => {
+    expect(splitHostPort('example.com:abc')).toEqual({ host: 'example.com:abc', port: null })
+  })
+
+  it('端口越界时端口为 null，但仍能拆出主机', () => {
+    expect(splitHostPort('example.com:0')).toEqual({ host: 'example.com', port: null })
+    expect(splitHostPort('example.com:99999')).toEqual({ host: 'example.com', port: null })
   })
 })
