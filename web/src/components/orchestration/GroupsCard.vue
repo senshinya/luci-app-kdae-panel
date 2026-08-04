@@ -33,7 +33,7 @@ import {
   setGroupPolicy,
   type Group,
 } from '../../utils/daeconf'
-import { parseFixedIndex, resolveFixedCandidates, type FixedCandidates } from '../../utils/fixedgroup'
+import { knownFixedCandidateCount, parseFixedIndex, resolveFixedCandidates, type FixedCandidates } from '../../utils/fixedgroup'
 import {
   createGroupFilter,
   describeGroupFilter,
@@ -301,7 +301,7 @@ function applyGroupEdit() {
     const candidates = resolveFixedCandidates(
       applied.next, applied.latest, subscriptionNodeSources.value, subscriptionNodesLoaded.value,
     )
-    if (!checkFixedIndexBounds(candidates, groupFixedIndex.value)) return
+    if (!checkFixedIndexBounds(candidates, groupFilters.value, groupFixedIndex.value)) return
   }
 
   const policy = groupPolicy.value === 'fixed' ? `fixed(${groupFixedIndex.value})` : groupPolicy.value
@@ -322,13 +322,20 @@ function candidatesFor(group: Group): FixedCandidates {
   return fixedCandidatesByGroup.value.get(group.name) ?? { resolvable: false, reason: '未能定位该分组的候选节点' }
 }
 
-/** 候选可解时校验索引是否落在范围内；不可解时始终放行（不做面板保证不了的静默兜底）。 */
-function checkFixedIndexBounds(candidates: FixedCandidates, index: number): boolean {
-  if (!candidates.resolvable) return true
-  if (index < candidates.nodes.length) return true
-  message.error(candidates.nodes.length === 0
+/**
+ * 候选可解时按真实顺序校验索引是否落在范围内；不可解时退而用 knownFixedCandidateCount
+ * 只算数量的兜底——顺序不可知不代表数量不可知，dae 的越界检查只在实际拨号时触发
+ * （component/outbound/dialer_group.go），`dae validate` 不会挡，这一层前端校验不能因为
+ * “顺序算不出来”就整体放弃，否则用户不会有任何反馈，直到流量真的走到这个分组才失败。
+ * 数量本身也算不出来时（如空过滤、含关键词/正则/排除等无法穷举的条件）才真正放行，
+ * 那属于面板确实保证不了的情况，不是本函数能兜底的范围。
+ */
+function checkFixedIndexBounds(candidates: FixedCandidates, filters: GroupFilterDraft[], index: number): boolean {
+  const count = candidates.resolvable ? candidates.nodes.length : knownFixedCandidateCount(filters)
+  if (count === null || index < count) return true
+  message.error(count === 0
     ? '当前分组没有可供 fixed(0) 选择的节点'
-    : `fixed(${index}) 已越界；当前过滤条件只有 ${candidates.nodes.length} 个明确节点`)
+    : `fixed(${index}) 已越界；当前过滤条件只有 ${count} 个明确节点`)
   return false
 }
 
@@ -338,7 +345,8 @@ function validFixedIndex(group: Group, index: number): boolean {
     message.error('fixed(n) 的索引必须是从 0 开始的整数')
     return false
   }
-  return checkFixedIndexBounds(candidatesFor(group), index)
+  const filters = group.filters.map((filter) => parseGroupFilter(filter.value))
+  return checkFixedIndexBounds(candidatesFor(group), filters, index)
 }
 </script>
 

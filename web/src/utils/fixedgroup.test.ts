@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseGroups } from './daeconf'
-import { parseFixedIndex, resolveFixedCandidates, splitHostPort } from './fixedgroup'
+import { knownFixedCandidateCount, parseFixedIndex, resolveFixedCandidates, splitHostPort } from './fixedgroup'
+import { parseGroupFilter } from './group'
 import type { SubscriptionNodeSource } from '../types/api'
 
 function groupOf(content: string, name: string) {
@@ -428,6 +429,37 @@ group {
     // 让 fromLocalNodes 误以为没有订阅，从而展示一份不完整的候选（漏掉两个订阅 tag）。
     const result = resolveFixedCandidates(content, groupOf(content, 'proxy'), [], true)
     expect(result.resolvable).toBe(false)
+  })
+})
+
+describe('knownFixedCandidateCount', () => {
+  // Important 4 回归：混合来源（本地节点 + 订阅节点）时 resolveFixedCandidates 判不可解
+  // （顺序确实不可知），但候选集合仍可穷举计数，用于兜底越界校验。
+  it('混合本地节点与订阅节点过滤时仍能算出并集数量', () => {
+    const filters = [
+      parseGroupFilter('name(a)'),
+      parseGroupFilter('subtag(s) && name(b)'),
+    ]
+    expect(knownFixedCandidateCount(filters)).toBe(2)
+  })
+
+  it('多条过滤重复引用同一节点时按并集去重', () => {
+    const filters = [parseGroupFilter('name(a, b)'), parseGroupFilter('name(b, c)')]
+    expect(knownFixedCandidateCount(filters)).toBe(3)
+  })
+
+  it('含排除条件时数量不可穷举', () => {
+    const filters = [parseGroupFilter('name(a)'), parseGroupFilter('!name(b)')]
+    expect(knownFixedCandidateCount(filters)).toBeNull()
+  })
+
+  it('含关键词或正则等非显式列举条件时数量不可穷举', () => {
+    expect(knownFixedCandidateCount([parseGroupFilter("name(keyword: 'HK')")])).toBeNull()
+    expect(knownFixedCandidateCount([parseGroupFilter('subtag(s)')])).toBeNull()
+  })
+
+  it('空过滤代表全部节点，真实数量未知，不能当作 0', () => {
+    expect(knownFixedCandidateCount([])).toBeNull()
   })
 })
 

@@ -181,6 +181,35 @@ function fromLocalNodes(
   return { resolvable: true, nodes }
 }
 
+/**
+ * 只统计候选节点数量的上界，用于 fixed(n) 越界校验的兜底——不产出顺序，绝不能像
+ * resolveFixedCandidates 那样拿它的返回值展示节点名或“当前节点”：数量可知不等于
+ * 顺序可知，混合本地节点与订阅节点的过滤（如 `name(a)` 与 `subtag(s) && name(b)`
+ * 并存）没法对齐出唯一顺序，但候选集合仍可静态穷举计数。
+ *
+ * dae 的越界检查只发生在实际拨号路径上（component/outbound/dialer_group.go 的
+ * "selected dialer index is out of range"），`NewDialerSelectionPolicyFromGroupParam`
+ * 只做 strconv.Atoi，`dae validate` 不会挡越界的 fixed(n)；resolveFixedCandidates
+ * 判不可解时若不在这里补一层校验，用户会得到零反馈，直到流量真的走到这个分组才失败。
+ *
+ * 只有当全部过滤条件都是非排除的显式 nodes/subscriptionNodes 时才能返回并集大小；
+ * 空过滤（代表分组包含全部节点，真实数量未知，可能远多于 0）或含其他种类过滤时
+ * 无法静态穷举，返回 null。
+ */
+export function knownFixedCandidateCount(filters: GroupFilterDraft[]): number | null {
+  if (filters.length === 0) return null
+  if (filters.some((filter) => filter.exclude || (filter.kind !== 'nodes' && filter.kind !== 'subscriptionNodes'))) {
+    return null
+  }
+  const candidates = new Set<string>()
+  for (const filter of filters) {
+    for (const value of filter.values.map((item) => item.trim()).filter(Boolean)) {
+      candidates.add(filter.kind === 'nodes' ? `node:${value}` : `subscriptionNode:${filter.source}:${value}`)
+    }
+  }
+  return candidates.size
+}
+
 /** 解析某个 fixed 分组的候选节点；只有能确定 dae 真实顺序时才返回名称列表。 */
 export function resolveFixedCandidates(
   content: string,
