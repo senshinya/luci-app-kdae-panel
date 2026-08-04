@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -418,6 +418,24 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(groupItem).toContainText('订阅 e2e_sub：SUB-HK')
     await expect(groupItem).toContainText('订阅：e2e_sub')
 
+    // 再建一个只含显式本地节点的 fixed 分组：概览页的快速切换卡片只对候选可静态
+    // 展开为节点名的分组给出选择器（否则退回索引框），proxy 混合了三种过滤类型，
+    // 候选不可解，不能用来验证快速切换；这里顺带覆盖了编排页新增的节点选择器。
+    await groups.getByPlaceholder('新分组名，如 proxy').fill('e2e_fixed')
+    await groups.locator('.group-policy-select').locator('.n-base-selection').click()
+    await clickVisibleOption(page, 'fixed(n)')
+    await groups.getByRole('button', { name: '新建' }).click()
+    const fixedGroupItem = groups.locator('.group-item', { hasText: 'e2e_fixed' })
+    await fixedGroupItem.getByRole('button', { name: '编辑' }).click()
+    const fixedGroupModal = page.getByTestId('group-editor-modal')
+    await fixedGroupModal.getByRole('button', { name: '选择节点' }).click()
+    await fixedGroupModal.getByTestId('group-node-picker').locator('.n-base-selection').click()
+    await clickVisibleOption(page, 'E2E-01')
+    await fixedGroupModal.getByTestId('group-node-picker').locator('.n-base-selection').click()
+    await clickVisibleOption(page, 'SG-01')
+    await fixedGroupModal.getByRole('button', { name: '应用到编排' }).click()
+    await expect(fixedGroupItem).toContainText('节点：E2E-01、SG-01')
+
     const routing = page.getByTestId('routing-card')
     await routing.getByRole('button', { name: '添加规则' }).click()
     const ruleModal = page.getByTestId('routing-rule-modal')
@@ -461,6 +479,9 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(saved).toContain('filter: subtag(e2e_sub)')
     expect(saved).toContain('filter: subtag(e2e_sub) && name(SUB-HK)')
     expect(saved).toContain('domain(geosite:gfw) -> proxy')
+    expect(saved).toContain('e2e_fixed {')
+    expect(saved).toContain('policy: fixed(0)')
+    expect(saved).toContain('filter: name(E2E-01, SG-01)')
     expect(saved).toContain('log_level: debug')
     expect(saved).toContain("lan_interface: 'ens2'")
     expect(saved).toContain("wan_interface: 'auto'")
@@ -482,6 +503,24 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(page.getByText('运行中', { exact: true })).toBeVisible()
     await expect(page.getByText('dae version v1.0.6')).toBeVisible()
     await expect(page.locator('.metric-card .n-skeleton')).toHaveCount(0)
+
+    await test.step('概览页的快速切换直接改配置重载，不产生自动备份', async () => {
+      const backupsDir = join(here, '.work', 'backups')
+      const backupsBefore = readdirSync(backupsDir).length
+
+      const fixedCard = page.getByTestId('fixed-group-card')
+      await expect(fixedCard).toBeVisible()
+      await expect(fixedCard).toContainText('1 个固定分组')
+      await page.getByTestId('fixed-group-select-e2e_fixed').locator('.n-base-selection').click()
+      await clickVisibleOption(page, 'SG-01')
+      await expect(page.getByText('已把 e2e_fixed 切到 SG-01 并完成无损重载')).toBeVisible()
+
+      // 面板宣称切换成功，磁盘上必须真的换了下标，且备份目录一个文件都没多——
+      // 这是「快速切换不占用与手动存档共用的保留上限」这条设计承诺的端到端证据。
+      expect(readFileSync(configPath, 'utf8')).toContain('policy: fixed(1)')
+      expect(readdirSync(backupsDir).length).toBe(backupsBefore)
+    })
+
     await page.getByRole('button', { name: '暂停' }).click()
     await page.getByRole('button', { name: '确认暂停' }).click()
     await expect(page.getByText('dae 已暂停', { exact: true })).toBeVisible()
