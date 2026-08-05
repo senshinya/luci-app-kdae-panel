@@ -37,6 +37,9 @@ export interface GroupProperty {
   lineEnd: number
   valueStart: number
   valueEnd: number
+  /** 声明本身的范围，用于同一行存在多个声明时只删除当前声明。 */
+  declarationStart: number
+  declarationEnd: number
 }
 
 export interface Group {
@@ -350,6 +353,117 @@ function balanced(value: string): boolean {
   return depth === 0
 }
 
+interface GroupPropertyStart {
+  key: string
+  start: number
+  colon: number
+}
+
+function isIdentifierStart(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z_]/.test(char)
+}
+
+function isIdentifierPart(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z0-9_.-]/.test(char)
+}
+
+/**
+ * 找到一行中处于最外层的所有 `键: 值` 声明。
+ *
+ * filter 的值允许包含空格、括号和引号，因此不能用一个正则把整行当成值；
+ * 包括 tcp_check_url 在内的未知键也必须成为边界，否则修改相邻的 policy/filter
+ * 时仍可能把未知声明一起吞掉。
+ */
+function groupPropertyStarts(masked: string, lineStart: number, lineEnd: number): GroupPropertyStart[] {
+  const starts: GroupPropertyStart[] = []
+  let depth = 0
+  for (let index = lineStart; index < lineEnd;) {
+    const char = masked[index]
+    if (char === "'" || char === '"') {
+      index = skipString(masked, index, lineEnd)
+      continue
+    }
+    if (char === '(') {
+      depth += 1
+      index += 1
+      continue
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1)
+      index += 1
+      continue
+    }
+    if (depth === 0 && isIdentifierStart(char)) {
+      const wordStart = index
+      let wordEnd = index + 1
+      while (wordEnd < lineEnd && isIdentifierPart(masked[wordEnd])) wordEnd += 1
+      const word = masked.slice(wordStart, wordEnd)
+      let colon = wordEnd
+      while (colon < lineEnd && /\s/.test(masked[colon])) colon += 1
+      if (masked[colon] === ':') {
+        starts.push({ key: word, start: wordStart, colon })
+      }
+      index = wordEnd
+      continue
+    }
+    index += 1
+  }
+  return starts
+}
+
+function skipWhitespace(text: string, index: number, end: number): number {
+  while (index < end && /\s/.test(text[index])) index += 1
+  return index
+}
+
+/**
+ * 按声明范围解析一行。policy 是单 token，filter 则取到下一条同层声明之前；
+ * 无法确认边界时仍返回属性供展示，但整行属性都会被标记为不可编辑。
+ */
+function parseGroupProperties(masked: Masked, line: Line): GroupProperty[] {
+  const starts = groupPropertyStarts(masked.text, line.start, line.end)
+  if (starts.length === 0) return []
+
+  const properties: GroupProperty[] = []
+
+  for (let index = 0; index < starts.length; index += 1) {
+    const start = starts[index]
+    const boundary = starts[index + 1]?.start ?? line.end
+    if (start.key !== 'policy' && start.key !== 'filter') continue
+
+    const valueStart = skipWhitespace(masked.text, start.colon + 1, boundary)
+    let valueEnd = valueStart
+    let valueSafe = true
+
+    if (start.key === 'policy') {
+      // dae 的 policy 值（fixed(n)、min、random 等）本身不含空格。
+      while (valueEnd < boundary && !/\s/.test(masked.text[valueEnd])) valueEnd += 1
+      valueSafe = valueEnd > valueStart && masked.text.slice(valueEnd, boundary).trim() === ''
+    } else {
+      valueEnd = boundary
+      while (valueEnd > valueStart && /\s/.test(masked.text[valueEnd - 1])) valueEnd -= 1
+      valueSafe = valueEnd > valueStart
+    }
+
+    const value = masked.text.slice(valueStart, valueEnd)
+    const prefixSafe = index > 0 || masked.text.slice(line.start, start.start).trim() === ''
+    properties.push({
+      key: start.key,
+      value,
+      // 以 && 结尾表示下一行仍是同一条 filter，不能按当前行定点改写。
+      editable: line.editable && prefixSafe && value !== ''
+        && !value.endsWith('&&') && balanced(value) && valueSafe,
+      lineStart: line.start,
+      lineEnd: line.end,
+      valueStart,
+      valueEnd,
+      declarationStart: start.start,
+      declarationEnd: valueEnd,
+    })
+  }
+  return properties
+}
+
 export function parseGroups(text: string): Group[] {
   const masked = maskWithSpans(text)
   const groupSection = scanMasked(masked.text, 0, text.length).find((section) => section.name === 'group')
@@ -361,33 +475,24 @@ export function parseGroups(text: string): Group[] {
     let previous: GroupProperty | null = null
     for (const line of linesOf(masked, section)) {
       const content = masked.text.slice(line.start, line.end)
-      const matched = /^\s*(policy|filter)\s*:\s*(.*?)\s*$/.exec(content)
-      if (!matched) {
+      const properties = parseGroupProperties(masked, line)
+      if (properties.length === 0) {
         if (content.trim() !== '' && !/^\s*[A-Za-z_][\w.-]*\s*:/.test(content)) {
           if (previous) previous.editable = false
           previous = null
         }
         continue
       }
-      const valueEnd = line.start + content.trimEnd().length
-      const property: GroupProperty = {
-        key: matched[1],
-        value: matched[2],
-        // 值为空、以 && 结尾或括号未闭合时,只展示不改写
-        editable: line.editable && matched[2] !== '' && !matched[2].endsWith('&&') && balanced(matched[2]),
-        lineStart: line.start,
-        lineEnd: line.end,
-        valueStart: valueEnd - matched[2].length,
-        valueEnd,
+      for (const property of properties) {
+        if (property.key === 'policy') {
+          // 出现重复 policy 时哪条生效由 dae 决定,面板不猜,一律降级为只读
+          if (group.policy) group.policy.editable = false
+          else group.policy = property
+        } else {
+          group.filters.push(property)
+        }
       }
-      if (property.key === 'policy') {
-        // 出现重复 policy 时哪条生效由 dae 决定,面板不猜,一律降级为只读
-        if (group.policy) group.policy.editable = false
-        else group.policy = property
-      } else {
-        group.filters.push(property)
-      }
-      previous = property
+      previous = properties[properties.length - 1]
     }
     return group
   })
@@ -628,7 +733,14 @@ export function setGroupFilter(text: string, group: Group, index: number, value:
   const existing = group.filters[index]
   if (existing) {
     if (!existing.editable) return text
-    if (value === '') return removeLine(text, existing.lineStart, existing.lineEnd)
+    if (value === '') {
+      const before = text.slice(existing.lineStart, existing.declarationStart)
+      const after = text.slice(existing.declarationEnd, existing.lineEnd)
+      if (before.trim() === '' && after.trim() === '') {
+        return removeLine(text, existing.lineStart, existing.lineEnd)
+      }
+      return splice(text, existing.declarationStart, existing.declarationEnd, '')
+    }
     return splice(text, existing.valueStart, existing.valueEnd, value)
   }
   if (value === '') return text

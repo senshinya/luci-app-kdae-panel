@@ -287,6 +287,63 @@ describe('跨行或不闭合的分组声明只展示不改写', () => {
   })
 })
 
+describe('同一行的分组声明按独立范围编辑', () => {
+  it('修改 policy 不会吞掉同一行后面的 filter', () => {
+    const text = 'group {\n  proxy { policy: fixed(0) filter: name(a) }\n}\n'
+    const group = parseGroups(text)[0]
+
+    expect(group.policy).toMatchObject({ value: 'fixed(0)', editable: true })
+    expect(group.filters).toHaveLength(1)
+    expect(group.filters[0]).toMatchObject({ value: 'name(a)', editable: true })
+    expect(setGroupPolicy(text, group, 'random')).toBe(
+      'group {\n  proxy { policy: random filter: name(a) }\n}\n',
+    )
+  })
+
+  it('替换或删除 filter 不会吞掉同一行前面的 policy', () => {
+    const text = 'group {\n  proxy { policy: fixed(0) filter: name(a) }\n}\n'
+    const group = parseGroups(text)[0]
+
+    expect(setGroupFilter(text, group, 0, 'name(b)')).toBe(
+      'group {\n  proxy { policy: fixed(0) filter: name(b) }\n}\n',
+    )
+    const removed = setGroupFilter(text, group, 0, '')
+    expect(removed).toContain('policy: fixed(0)')
+    expect(removed).not.toContain('filter: name(a)')
+  })
+
+  it('行尾注释不属于 policy 值', () => {
+    const text = 'group {\n  proxy {\n    policy: fixed(0) # filter: name(fake)\n  }\n}\n'
+    const group = parseGroups(text)[0]
+    const next = setGroupPolicy(text, group, 'random')
+
+    expect(group.policy).toMatchObject({ value: 'fixed(0)', editable: true })
+    expect(next).toContain('policy: random # filter: name(fake)')
+  })
+
+  it('未知分组键也会隔开相邻声明', () => {
+    const text = "group {\n  proxy { policy: fixed(0) tcp_check_url: 'http://x' filter: name(a) }\n}\n"
+    const group = parseGroups(text)[0]
+
+    expect(group.policy).toMatchObject({ value: 'fixed(0)', editable: true })
+    expect(group.filters[0]).toMatchObject({ value: 'name(a)', editable: true })
+    expect(setGroupPolicy(text, group, 'random')).toContain(
+      "policy: random tcp_check_url: 'http://x' filter: name(a)",
+    )
+    expect(setGroupFilter(text, group, 0, 'name(b)')).toContain(
+      "policy: fixed(0) tcp_check_url: 'http://x' filter: name(b)",
+    )
+  })
+
+  it('无法确认 policy 边界时拒绝结构化修改', () => {
+    const text = 'group {\n  proxy { policy: fixed(0) unknown filter: name(a) }\n}\n'
+    const group = parseGroups(text)[0]
+
+    expect(group.policy?.editable).toBe(false)
+    expect(setGroupPolicy(text, group, 'random')).toBe(text)
+  })
+})
+
 describe('parseSection 的未解析行计数', () => {
   it('跨行与多条目写法都被计入而不是静默消失', () => {
     const text = [
