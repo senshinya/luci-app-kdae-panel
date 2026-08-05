@@ -22,10 +22,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tuoro/kdae-panel/internal/atomicfile"
 	"github.com/tuoro/kdae-panel/internal/dae"
+	"github.com/tuoro/kdae-panel/internal/daeconfig"
 	"github.com/tuoro/kdae-panel/internal/daediag"
 	"github.com/tuoro/kdae-panel/internal/geodata"
 	"github.com/tuoro/kdae-panel/internal/host"
@@ -120,12 +122,13 @@ type Status struct {
 // Compatibility 是目标二进制对当前机器与配置的只读预检结果。
 // 预检只执行公开命令，不替换二进制，也不触碰服务状态。
 type Compatibility struct {
-	Compatible       bool   `json:"compatible"`
-	Version          string `json:"version,omitempty"`
-	OutlineSupported bool   `json:"outlineSupported"`
-	ConfigPresent    bool   `json:"configPresent"`
-	ValidationError  string `json:"validationError,omitempty"`
-	Problem          string `json:"problem,omitempty"`
+	Compatible          bool     `json:"compatible"`
+	Version             string   `json:"version,omitempty"`
+	OutlineSupported    bool     `json:"outlineSupported"`
+	ConfigPresent       bool     `json:"configPresent"`
+	UnsupportedFeatures []string `json:"unsupportedFeatures,omitempty"`
+	ValidationError     string   `json:"validationError,omitempty"`
+	Problem             string   `json:"problem,omitempty"`
 }
 
 type Installer struct {
@@ -457,6 +460,53 @@ func (i *Installer) DeleteCached(source upstream.Source, ref string) error {
 	return i.cache.delete(source, ref, platform.Name)
 }
 
+func (i *Installer) unsupportedDNSRequestMatchers(report dae.Report) ([]string, bool, error) {
+	content, err := os.ReadFile(i.configPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("读取当前配置以检查版本兼容性: %w", err)
+	}
+	used := daeconfig.DNSRequestMatchers(string(content))
+	if len(used) == 0 {
+		return nil, true, nil
+	}
+
+	var supported []string
+	known := false
+	if report.Outline != nil {
+		supported, known = dae.DNSRequestMatchers(*report.Outline)
+	}
+	available := make(map[string]bool, len(supported))
+	for _, matcher := range supported {
+		available[matcher] = true
+	}
+	unsupported := make([]string, 0, len(used))
+	for _, matcher := range used {
+		if !available[matcher] {
+			unsupported = append(unsupported, matcher)
+		}
+	}
+	return unsupported, known, nil
+}
+
+func dnsMatcherFeatures(matchers []string) []string {
+	features := make([]string, len(matchers))
+	for index, matcher := range matchers {
+		features[index] = "dns.routing.request " + matcher + "()"
+	}
+	return features
+}
+
+func dnsMatcherCompatibilityProblem(matchers []string, known bool) string {
+	functions := make([]string, len(matchers))
+	for index, matcher := range matchers {
+		functions[index] = matcher + "()"
+	}
+	if !known {
+		return "目标版本未在配置结构中声明支持 DNS 内部选择器 " + strings.Join(functions, "、")
+	}
+	return "目标版本不支持当前配置使用的 DNS 内部选择器 " + strings.Join(functions, "、")
+}
+
 // Preflight 用目标版本执行 --version、export outline 与 validate，但不安装它。
 // binary 已由 Acquire 完成来源校验；这里仍检查 ELF，防止缓存或解包契约回归。
 func (i *Installer) Preflight(ctx context.Context, binary []byte) (Compatibility, error) {
@@ -500,6 +550,15 @@ func (i *Installer) Preflight(ctx context.Context, binary []byte) (Compatibility
 		return result, fmt.Errorf("读取当前配置状态: %w", err)
 	}
 	result.ConfigPresent = true
+	unsupported, known, err := i.unsupportedDNSRequestMatchers(report)
+	if err != nil {
+		return result, err
+	}
+	if len(unsupported) > 0 {
+		result.UnsupportedFeatures = dnsMatcherFeatures(unsupported)
+		result.Problem = dnsMatcherCompatibilityProblem(unsupported, known)
+		return result, nil
+	}
 	validateCtx, cancelValidate := context.WithTimeout(ctx, probeTimeout)
 	err = i.newProbe(staged).Validate(validateCtx, i.configPath)
 	cancelValidate()
@@ -602,12 +661,22 @@ func (i *Installer) applyBinary(ctx context.Context, binary []byte, state *State
 	state.Version = report.Version
 	if i.configPath != "" {
 		if _, err := os.Stat(i.configPath); err == nil {
+			unsupported, known, err := i.unsupportedDNSRequestMatchers(report)
+			if err != nil {
+				return Status{}, err
+			}
+			if len(unsupported) > 0 {
+				return Status{}, fmt.Errorf("新版本与当前配置不兼容，已中止安装：%s",
+					dnsMatcherCompatibilityProblem(unsupported, known))
+			}
 			validateCtx, cancelValidate := context.WithTimeout(ctx, probeTimeout)
-			err := i.newProbe(staged).Validate(validateCtx, i.configPath)
+			err = i.newProbe(staged).Validate(validateCtx, i.configPath)
 			cancelValidate()
 			if err != nil {
 				return Status{}, fmt.Errorf("新版本拒绝当前配置，已中止安装：%w", err)
 			}
+		} else if !os.IsNotExist(err) {
+			return Status{}, fmt.Errorf("读取当前配置状态: %w", err)
 		}
 	}
 

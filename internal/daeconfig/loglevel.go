@@ -59,7 +59,7 @@ func tokenize(content string) []string {
 			}
 			tokens = append(tokens, masked[index:end])
 			index = end
-		case strings.ContainsRune("{}:", rune(masked[index])):
+		case strings.ContainsRune("{}:()", rune(masked[index])):
 			tokens = append(tokens, masked[index:index+1])
 			index++
 		default:

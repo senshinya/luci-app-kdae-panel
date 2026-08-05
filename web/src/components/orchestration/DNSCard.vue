@@ -31,6 +31,7 @@ import {
   readDNSState,
   type DNSCapabilities,
   type DNSDraft,
+  unsupportedDNSRequestMatchers,
 } from '../../utils/dns'
 import { setSectionBody } from '../../utils/daeconf'
 import DNSRulesEditor from './DNSRulesEditor.vue'
@@ -52,6 +53,9 @@ const upstreamCount = computed(() => state.value.draft.upstreams.length)
 const requestCount = computed(() => state.value.draft.requestRules.length)
 const responseCount = computed(() => state.value.draft.responseRules.length)
 const unsupported = computed(() => configuredUnsupported(state.value, capabilities.value))
+const unsupportedMatchers = computed(() => capabilityChecked.value
+  ? unsupportedDNSRequestMatchers(state.value.draft.requestRules, capabilities.value)
+  : [])
 
 function capabilitySupports(key: string): boolean {
   return capabilities.value === null || capabilities.value.supported.has(key)
@@ -104,6 +108,12 @@ function draftUnsupportedFields(): string[] {
   return [...new Set(unsupportedFields)]
 }
 
+function draftUnsupportedMatchers() {
+  return capabilityChecked.value
+    ? unsupportedDNSRequestMatchers(simpleDraft.value.requestRules, capabilities.value)
+    : []
+}
+
 function applyEditor() {
   if (content.value !== editorSnapshot.value) {
     message.error('配置在编辑期间发生了变化，请关闭后重新打开')
@@ -114,6 +124,11 @@ function applyEditor() {
     const unsupportedFields = draftUnsupportedFields()
     if (unsupportedFields.length > 0) {
       message.error(`当前 dae ${capabilities.value?.version || '版本'} 不支持：${unsupportedFields.map((key) => DNS_FIELD_LABELS.get(key) || key).join('、')}`)
+      return
+    }
+    const unsupportedRequestMatchers = draftUnsupportedMatchers()
+    if (unsupportedRequestMatchers.length > 0) {
+      message.error(`当前 dae 未确认支持 DNS 内部选择器：${unsupportedRequestMatchers.map((matcher) => `${matcher}()`).join('、')}`)
       return
     }
     try {
@@ -164,6 +179,9 @@ onMounted(() => void loadCapabilities())
     <NAlert v-if="unsupported.length > 0" type="error" :bordered="false" class="dns-card-alert">
       当前配置包含安装版本不支持的 DNS 字段：{{ unsupported.map((key) => DNS_FIELD_LABELS.get(key) || key).join('、') }}。请使用进阶模式保留原文，并在保存前确认当前 dae 版本。
     </NAlert>
+    <NAlert v-if="unsupportedMatchers.length > 0" type="error" :bordered="false" class="dns-card-alert">
+      当前 dae 未确认支持 DNS 内部选择器：{{ unsupportedMatchers.map((matcher) => `${matcher}()`).join('、') }}。已有原文保持不变；切换 dae 版本前会再次预检并阻止不兼容操作。
+    </NAlert>
 
     <div v-if="!state.present" class="dns-not-configured">
       <div>
@@ -204,6 +222,9 @@ onMounted(() => void loadCapabilities())
           </NAlert>
           <NAlert v-if="draftUnsupportedFields().length > 0" type="error" :bordered="false" class="dns-template-warning">
             当前编辑内容包含安装版本不支持的字段，暂时不能应用简单模式。
+          </NAlert>
+          <NAlert v-if="draftUnsupportedMatchers().length > 0" type="error" :bordered="false" class="dns-template-warning">
+            当前 dae 未确认支持 {{ draftUnsupportedMatchers().map((matcher) => `${matcher}()`).join('、') }}，暂时不能应用简单模式；进阶草稿不会受影响。
           </NAlert>
 
           <div class="dns-settings-grid">
@@ -258,7 +279,13 @@ onMounted(() => void loadCapabilities())
               </div>
             </section>
             <DNSUpstreamEditor v-model="simpleDraft.upstreams" />
-            <DNSRulesEditor kind="request" v-model="simpleDraft.requestRules" :upstreams="simpleDraft.upstreams" />
+            <DNSRulesEditor
+              kind="request"
+              v-model="simpleDraft.requestRules"
+              :upstreams="simpleDraft.upstreams"
+              :request-matchers="capabilities?.requestMatchers"
+              :request-matchers-known="capabilities?.requestMatchersKnown === true"
+            />
             <DNSRulesEditor kind="response" v-model="simpleDraft.responseRules" :upstreams="simpleDraft.upstreams" />
           </div>
         </NTabPane>

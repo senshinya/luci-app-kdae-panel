@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { setSectionBody } from './daeconf'
 import {
   buildDNSBody,
+  buildVisualDNSMatcher,
   defaultDNSDraft,
   defaultConfiguration,
+  parseVisualDNSMatcher,
   readDNSCapabilities,
   readDNSState,
+  unsupportedDNSRequestMatchers,
   withDefaultDNS,
 } from './dns'
 
@@ -183,9 +186,72 @@ describe('DNS outline 能力', () => {
     })
     expect(capabilities?.supported).toEqual(new Set(['upstream', 'optimistic_cache', 'max_cache_size']))
     expect(capabilities?.defaults.get('max_cache_size')).toBe('65536')
+    expect(capabilities?.requestMatchersKnown).toBe(false)
   })
 
   it('outline 缺少 DNS 结构时返回 null，不误判全部字段不支持', () => {
     expect(readDNSCapabilities({ version: 'old', leaves: [], structure: [] })).toBeNull()
+  })
+
+  it('只从 request 描述识别目标二进制明确声明的内部选择器', () => {
+    const capabilities = readDNSCapabilities({
+      version: 'kdae',
+      leaves: [],
+      structure: [{
+        mapping: 'dns',
+        structure: [{
+          mapping: 'routing',
+          structure: [{
+            mapping: 'request',
+            desc: 'Ordinary requests use qname. Internal selectors: sub, node and subnode.',
+          }],
+        }],
+      }],
+    })
+    expect(capabilities?.requestMatchersKnown).toBe(true)
+    expect(capabilities?.requestMatchers).toEqual(new Set(['sub', 'node', 'subnode']))
+  })
+})
+
+describe('DNS 条件可视化', () => {
+  it('解析并生成常用的节点 DNS 条件', () => {
+    for (const matcher of [
+      'sub(tag: airport)',
+      'node(name_keyword: hk)',
+      'subnode(subtag: airport)',
+      'node()',
+    ]) {
+      expect(buildVisualDNSMatcher(parseVisualDNSMatcher(matcher))).toBe(matcher)
+    }
+  })
+
+  it('复合条件和多值条件降级为原始表达式且不改写', () => {
+    for (const matcher of [
+      'node(name_keyword: hk) && node(link_keyword: example)',
+      '!subnode(subtag: airport)',
+      'qtype(a, aaaa)',
+    ]) {
+      const parsed = parseVisualDNSMatcher(matcher)
+      expect(parsed.kind).toBe('raw')
+      expect(buildVisualDNSMatcher(parsed)).toBe(matcher)
+    }
+  })
+
+  it('能力未知或缺失时拒绝新增内部选择器，明确支持时允许', () => {
+    const rules = [{ id: 'one', matcher: 'node(name: hk)', target: 'resolver', fallback: false }]
+    expect(unsupportedDNSRequestMatchers(rules, null)).toEqual(['node'])
+
+    const supported = readDNSCapabilities({
+      version: 'kdae',
+      leaves: [],
+      structure: [{
+        mapping: 'dns',
+        structure: [{
+          mapping: 'request',
+          desc: 'Available internal selector: node.',
+        }],
+      }],
+    })
+    expect(unsupportedDNSRequestMatchers(rules, supported)).toEqual([])
   })
 })

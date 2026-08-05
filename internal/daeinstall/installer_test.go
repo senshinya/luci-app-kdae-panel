@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -62,7 +63,26 @@ func (p fakeProbe) Inspect(context.Context) dae.Report {
 	if strings.Contains(p.content, "broken") {
 		return dae.Report{Problem: "无法执行"}
 	}
-	return dae.Report{Available: true, Version: "dae " + p.content}
+	description := "Available functions: qname, qtype, sub, node, subnode"
+	if strings.Contains(p.content, "without-dns-selectors") {
+		description = "Available functions: qname, qtype"
+	}
+	outline := dae.Outline{Structure: []dae.OutlineElement{{
+		Mapping: "dns",
+		Structure: []dae.OutlineElement{{
+			Mapping: "routing",
+			Structure: []dae.OutlineElement{{
+				Mapping:     "request",
+				Description: description,
+			}},
+		}},
+	}}}
+	return dae.Report{
+		Available:        true,
+		Version:          "dae " + p.content,
+		OutlineSupported: true,
+		Outline:          &outline,
+	}
 }
 
 func (p fakeProbe) Validate(context.Context, string) error {
@@ -371,6 +391,57 @@ func TestPreflightReportsConfigurationIncompatibility(t *testing.T) {
 	}
 	if result.Compatible || !strings.Contains(result.ValidationError, "不认识的字段") {
 		t.Fatalf("应明确报告配置不兼容: %+v", result)
+	}
+}
+
+func TestPreflightRejectsUnsupportedDNSRequestMatchers(t *testing.T) {
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, &fakeService{})
+	seed(t, binaryPath, "v1")
+	config := `dns {
+  upstream { resolver: 'udp://1.1.1.1:53' }
+  routing {
+    request {
+      node(name_keyword: hk) -> resolver
+      subnode(subtag: airport) -> resolver
+    }
+  }
+}`
+	if err := os.WriteFile(installer.configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := installer.Preflight(context.Background(), elf("without-dns-selectors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Compatible ||
+		!reflect.DeepEqual(result.UnsupportedFeatures, []string{
+			"dns.routing.request node()",
+			"dns.routing.request subnode()",
+		}) ||
+		!strings.Contains(result.Problem, "node()、subnode()") {
+		t.Fatalf("应在 validate 前明确拒绝内部 DNS 选择器: %+v", result)
+	}
+	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v1")) {
+		t.Fatalf("预检不应替换当前二进制: %q", content)
+	}
+}
+
+func TestInstallRejectsUnsupportedDNSRequestMatchersBeforeReplacing(t *testing.T) {
+	installer, binaryPath := newTestInstaller(t, &fakeFetcher{}, &fakeService{})
+	seed(t, binaryPath, "v1")
+	config := `dns { routing { request { sub(airport) -> resolver } } }`
+	if err := os.WriteFile(installer.configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := installer.Install(context.Background(), elf("without-dns-selectors"),
+		upstream.SourceOfficial, "v2.0.0", "v2.0.0", "")
+	if err == nil || !strings.Contains(err.Error(), "sub()") {
+		t.Fatalf("安装事务应拒绝不兼容版本: %v", err)
+	}
+	if content, _ := os.ReadFile(binaryPath); string(content) != string(elf("v1")) {
+		t.Fatalf("拒绝后必须保留原二进制: %q", content)
 	}
 }
 

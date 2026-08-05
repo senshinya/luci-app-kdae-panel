@@ -42,6 +42,8 @@ type Report struct {
 	OutlineVersion   string          `json:"outlineVersion,omitempty"`
 	Problem          string          `json:"problem,omitempty"`
 	DetectedAt       time.Time       `json:"detectedAt"`
+	// Outline 供同一进程内的兼容检查复用，避免一次探测重复执行 export outline。
+	Outline *Outline `json:"-"`
 }
 
 type Outline struct {
@@ -108,6 +110,7 @@ func (c *Client) Inspect(ctx context.Context) Report {
 	if err == nil {
 		report.OutlineSupported = true
 		report.OutlineVersion = outline.Version
+		report.Outline = &outline
 	} else if report.Commands["export"] {
 		report.Problem = err.Error()
 	}

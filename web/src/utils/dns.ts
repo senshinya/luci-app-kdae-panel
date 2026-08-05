@@ -10,6 +10,7 @@ import {
   readSectionBody,
   scanSections,
   setSectionBody,
+  unquote,
   type Entry,
   type Section,
 } from './daeconf'
@@ -80,7 +81,37 @@ export interface DNSCapabilities {
   version: string
   supported: Set<string>
   defaults: Map<string, string>
+  requestMatchers: Set<DNSInternalMatcher>
+  requestMatchersKnown: boolean
 }
+
+export const DNS_INTERNAL_MATCHERS = ['sub', 'node', 'subnode'] as const
+export type DNSInternalMatcher = typeof DNS_INTERNAL_MATCHERS[number]
+export type DNSVisualMatcherKind = 'qname' | 'qtype' | DNSInternalMatcher | 'raw'
+
+export interface DNSVisualMatcher {
+  kind: DNSVisualMatcherKind
+  key: string
+  value: string
+}
+
+const VISUAL_MATCHER_KEYS: Record<Exclude<DNSVisualMatcherKind, 'raw'>, readonly string[]> = {
+  qname: ['', 'full', 'suffix', 'keyword', 'regex', 'geosite'],
+  qtype: [''],
+  sub: ['*', 'tag', 'tag_regex', 'link_keyword', 'link_regex'],
+  node: ['*', 'name', 'name_keyword', 'name_regex', 'link_keyword', 'link_regex'],
+  subnode: ['*', 'subtag', 'subtag_regex', 'name', 'name_keyword', 'name_regex', 'link_keyword', 'link_regex'],
+}
+
+const DEFAULT_MATCHER_KEY: Record<Exclude<DNSVisualMatcherKind, 'raw'>, string> = {
+  qname: 'geosite',
+  qtype: '',
+  sub: '*',
+  node: '*',
+  subnode: '*',
+}
+
+const MATCHER_SAFE_TOKEN = /^[A-Za-z0-9_/\\^*.+=@$!#%-]+$/
 
 export function emptyDNSDraft(): DNSDraft {
   return {
@@ -150,19 +181,162 @@ function findDNSOutline(nodes: OutlineElement[]): OutlineElement | null {
   return null
 }
 
+function findMappedElement(nodes: OutlineElement[], mapping: string): OutlineElement | null {
+  for (const node of nodes) {
+    if (node.mapping?.toLowerCase() === mapping) return node
+    const nested = findMappedElement(node.structure || [], mapping)
+    if (nested) return nested
+  }
+  return null
+}
+
 /** 从当前 dae 二进制导出的 outline 读取 DNS 字段与默认值。 */
 export function readDNSCapabilities(outline: DaeOutline): DNSCapabilities | null {
   const dns = findDNSOutline(outline.structure)
   if (!dns?.structure?.length) return null
   const fields = dns.structure.filter((field) => field.mapping)
   if (fields.length === 0) return null
+  const request = findMappedElement(dns.structure, 'request')
+  const description = request?.desc?.trim() || ''
+  const requestMatchers = new Set<DNSInternalMatcher>()
+  for (const matcher of DNS_INTERNAL_MATCHERS) {
+    if (new RegExp(`\\b${matcher}\\b`).test(description)) requestMatchers.add(matcher)
+  }
   return {
     version: outline.version,
     supported: new Set(fields.map((field) => field.mapping!)),
     defaults: new Map(fields
       .filter((field) => field.defaultValue !== undefined && field.defaultValue !== '')
       .map((field) => [field.mapping!, field.defaultValue!])),
+    requestMatchers,
+    requestMatchersKnown: description !== '',
   }
+}
+
+export function visualMatcherKeys(kind: DNSVisualMatcherKind): readonly string[] {
+  return kind === 'raw' ? [] : VISUAL_MATCHER_KEYS[kind]
+}
+
+export function defaultVisualMatcher(kind: Exclude<DNSVisualMatcherKind, 'raw'>): DNSVisualMatcher {
+  const key = DEFAULT_MATCHER_KEY[kind]
+  const value = kind === 'qname' ? 'cn' : kind === 'qtype' ? 'a' : ''
+  return { kind, key, value }
+}
+
+function singleMatcherParam(text: string): { key: string, value: string } | null {
+  const trimmed = text.trim()
+  if (trimmed === '') return { key: '*', value: '' }
+
+  let quoted = ''
+  let colon = -1
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index]
+    if (quoted !== '') {
+      if (char === '\\' && trimmed[index + 1] === quoted) index += 1
+      else if (char === quoted) quoted = ''
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quoted = char
+    } else if (char === ',') {
+      return null
+    } else if ('()&|!{}'.includes(char)) {
+      return null
+    } else if (char === ':' && colon < 0) {
+      colon = index
+    }
+  }
+  if (quoted !== '') return null
+
+  const rawKey = colon < 0 ? '' : trimmed.slice(0, colon).trim()
+  const rawValue = (colon < 0 ? trimmed : trimmed.slice(colon + 1)).trim()
+  if ((rawKey !== '' && !/^[a-z_][a-z0-9_]*$/i.test(rawKey)) || rawValue === '') return null
+  const first = rawValue[0]
+  if ((first === "'" || first === '"') && rawValue[rawValue.length - 1] !== first) return null
+  return { key: rawKey, value: unquote(rawValue) }
+}
+
+/** 只结构化一个可无损表示的单函数、单条件 matcher；其余写法保持原文。 */
+export function parseVisualDNSMatcher(matcher: string): DNSVisualMatcher {
+  const trimmed = matcher.trim()
+  const matched = /^([a-z_][a-z0-9_]*)\s*\((.*)\)$/i.exec(trimmed)
+  if (!matched) return { kind: 'raw', key: '', value: trimmed }
+  const kind = matched[1].toLowerCase() as DNSVisualMatcherKind
+  if (!(kind in VISUAL_MATCHER_KEYS)) return { kind: 'raw', key: '', value: trimmed }
+
+  const parsed = singleMatcherParam(matched[2])
+  if (!parsed) return { kind: 'raw', key: '', value: trimmed }
+  let key = parsed.key
+  if (key === '') {
+    if (kind === 'sub') key = 'tag'
+    else if (kind === 'node') key = 'name'
+    else if (kind === 'subnode') key = 'subtag'
+  }
+  if (!visualMatcherKeys(kind).includes(key)) return { kind: 'raw', key: '', value: trimmed }
+  return { kind, key, value: parsed.value }
+}
+
+function matcherValue(value: string): string {
+  const trimmed = safeText(value, 'DNS 匹配值')
+  if (MATCHER_SAFE_TOKEN.test(trimmed)) return trimmed
+  if (!isQuotable(trimmed)) throw new Error('DNS 匹配值无法在 dae 配置中无损表示')
+  return quote(trimmed)
+}
+
+export function buildVisualDNSMatcher(matcher: DNSVisualMatcher): string {
+  if (matcher.kind === 'raw') return matcher.value
+  if (!visualMatcherKeys(matcher.kind).includes(matcher.key)) {
+    throw new Error(`${matcher.kind} 不支持条件 ${matcher.key}`)
+  }
+  if (matcher.key === '*') return `${matcher.kind}()`
+  const key = matcher.key === '' ? '' : `${matcher.key}: `
+  return `${matcher.kind}(${key}${matcherValue(matcher.value)})`
+}
+
+function matcherFunctions(text: string): Set<string> {
+  const functions = new Set<string>()
+  for (let index = 0; index < text.length;) {
+    const char = text[index]
+    if (char === "'" || char === '"') {
+      const quoteChar = char
+      for (index += 1; index < text.length; index += 1) {
+        if (text[index] === '\\' && text[index + 1] === quoteChar) index += 1
+        else if (text[index] === quoteChar) {
+          index += 1
+          break
+        }
+      }
+      continue
+    }
+    if (!/[A-Za-z_]/.test(char)) {
+      index += 1
+      continue
+    }
+    let end = index + 1
+    while (end < text.length && /[A-Za-z0-9_]/.test(text[end])) end += 1
+    let next = end
+    while (next < text.length && /\s/.test(text[next])) next += 1
+    if (text[next] === '(') functions.add(text.slice(index, end).toLowerCase())
+    index = end
+  }
+  return functions
+}
+
+export function usedDNSInternalMatchers(rules: DNSRule[]): DNSInternalMatcher[] {
+  const used = new Set<string>()
+  for (const rule of rules) {
+    for (const name of matcherFunctions(rule.matcher)) used.add(name)
+  }
+  return DNS_INTERNAL_MATCHERS.filter((matcher) => used.has(matcher))
+}
+
+export function unsupportedDNSRequestMatchers(
+  rules: DNSRule[],
+  capabilities: DNSCapabilities | null,
+): DNSInternalMatcher[] {
+  const used = usedDNSInternalMatchers(rules)
+  if (!capabilities?.requestMatchersKnown) return used
+  return used.filter((matcher) => !capabilities.requestMatchers.has(matcher))
 }
 
 function blankSections(text: string, sections: Section[]): string {
@@ -392,6 +566,10 @@ function validateRules(rules: DNSRule[], upstreams: Set<string>, kind: 'request'
       if (!safeMatcher(matcher)) throw new Error(`${kind} 匹配条件包含不完整或不安全的配置语法`)
     }
     const target = safeText(rule.target, `${kind} 目标`)
+    const internal = kind === 'request' && usedDNSInternalMatchers([rule]).length > 0
+    if (internal && !upstreams.has(target)) {
+      throw new Error(`内部 DNS 选择器的目标 ${target} 必须是现有上游`)
+    }
     if (/\s/.test(target) || (!upstreams.has(target) && !builtins.has(target))) {
       throw new Error(`${kind} 目标 ${target} 不是内置动作或现有上游`)
     }

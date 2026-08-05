@@ -369,6 +369,15 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     await expect(reopenedDNSModal.locator('textarea')).toHaveValue(originalDNSBody)
     await reopenedDNSModal.locator('.n-tabs-tab', { hasText: '简单模式' }).click()
     await reopenedDNSModal.getByTestId('dns-upstreams-editor').getByLabel('上游地址').first().locator('input').fill('udp://1.1.1.1:53')
+    const requestRules = reopenedDNSModal.getByTestId('dns-request-rules-editor')
+    await requestRules.getByRole('button', { name: '添加规则' }).click()
+    const nodeDNSRule = requestRules.locator('.dns-rule-row').last()
+    await nodeDNSRule.getByLabel('DNS 条件类型').click()
+    await clickVisibleOption(page, '节点解析 · node')
+    await nodeDNSRule.getByLabel('DNS 条件字段').click()
+    await clickVisibleOption(page, '节点名称包含')
+    await nodeDNSRule.getByLabel('DNS 条件值').locator('input').fill('hk')
+    await expect(nodeDNSRule.getByLabel('DNS 规则目标').locator('.n-base-selection')).toContainText('alidns')
     await reopenedDNSModal.getByRole('button', { name: '应用到编排' }).click()
     await expect(page.getByText('DNS 设置已应用到编排，保存并重载后生效')).toBeVisible()
 
@@ -485,6 +494,7 @@ test('首次初始化到编排保存的完整链路', async ({ page }) => {
     expect(saved).toContain("lan_interface: 'ens2'")
     expect(saved).toContain("wan_interface: 'auto'")
     expect(saved).toContain("alidns: 'udp://1.1.1.1:53'")
+    expect(saved).toContain('node(name_keyword: hk) -> alidns')
     expect(saved).not.toContain('仅保留在进阶草稿')
 
     await capture(page, 'orchestration.png', 1600, 1120)

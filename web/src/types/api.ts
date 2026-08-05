@@ -205,6 +205,7 @@ export interface DaeCompatibility {
   version?: string
   outlineSupported: boolean
   configPresent: boolean
+  unsupportedFeatures?: string[]
   validationError?: string
   problem?: string
 }

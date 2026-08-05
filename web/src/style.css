@@ -2637,9 +2637,25 @@ pre,
 
 .dns-rule-row {
   display: grid;
-  grid-template-columns: 92px minmax(220px, 1fr) minmax(190px, 0.65fr) 34px;
+  grid-template-columns: 92px minmax(430px, 1fr) minmax(190px, 0.55fr) 34px;
   align-items: center;
   gap: 10px;
+}
+
+.dns-rule-condition {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(132px, 0.7fr) minmax(142px, 0.8fr) minmax(150px, 1fr);
+  gap: 8px;
+}
+
+.dns-rule-condition.raw {
+  grid-template-columns: minmax(132px, 0.4fr) minmax(240px, 1fr);
+}
+
+.dns-rule-compat {
+  grid-column: 1 / -1;
+  font-size: 12px;
 }
 
 .dns-rule-matcher {
@@ -3462,6 +3478,15 @@ pre,
 
   .dns-rule-row > :last-child {
     grid-row: 1;
+  }
+
+  .dns-rule-condition,
+  .dns-rule-condition.raw {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dns-rule-condition > * {
+    grid-column: 1;
   }
 
   .geo-source-picker {
